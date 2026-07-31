@@ -1,0 +1,13 @@
+{
+  "name": "merci-materials-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Merci Tekstil Paneli - Sirket Materyalleri dosya depolama API'si (Render + kalici disk)",
+  "engines": { "node": ">=18" },
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "multer": "^2.0.0"
+  }
+}
