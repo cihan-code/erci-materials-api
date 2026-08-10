@@ -137,6 +137,36 @@ app.post('/api/paneldata', checkApiKey, (req, res) => {
   }
 });
 
+// ---- Stok paneli verisi (Kumaş + Numune) - ayrı bir dosyada, mevcut panel verisine dokunmaz ----
+const STOK_DATA_FILE = path.join(DATA_DIR, 'stok-data.json');
+ 
+app.get('/api/stokdata', checkApiKey, (req, res) => {
+  if (!fs.existsSync(STOK_DATA_FILE)) return res.json({ data: null, updatedAt: null });
+  try {
+    const raw = fs.readFileSync(STOK_DATA_FILE, 'utf8');
+    res.type('application/json').send(raw);
+  } catch (e) {
+    res.status(500).json({ error: 'Stok verisi okunamadi.' });
+  }
+});
+ 
+app.post('/api/stokdata', checkApiKey, (req, res) => {
+  const body = req.body || {};
+  if (!body.data) return res.status(400).json({ error: 'data alani gerekli.' });
+  const payload = {
+    data: body.data,
+    updatedAt: new Date().toISOString(),
+  };
+  try {
+    ensureDir(DATA_DIR);
+    fs.writeFileSync(STOK_DATA_FILE, JSON.stringify(payload));
+    res.json({ ok: true, updatedAt: payload.updatedAt });
+  } catch (e) {
+    res.status(500).json({ error: 'Stok verisi kaydedilemedi.' });
+  }
+});
+ 
+
 // Klasor listesi
 app.get('/api/folders', checkApiKey, (req, res) => {
   const folders = loadFolders();
