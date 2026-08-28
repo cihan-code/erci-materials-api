@@ -27,7 +27,10 @@ Her sabah, canlı panel sinyallerinden yönetim için tek sayfalık brifing ve o
 12. **Kapanış** — sonraki döngüde bakılacak kritik takipler.
 
 ### Kalite çıtası
-- Bir sayfada okunur; her iddia bir rakama/panel kaydına dayanır.
+- **Tek sayfa. Toplam ~600 kelimeyi geçme.** Kısa cümleler, tablo satırları 1 satır.
+- Alt-senaryo (Plan A / Plan B), uzun paragraf, tekrar, giriş-kapanış dolgusu **yok**.
+  Her madde: durum + rakam + tek net aksiyon.
+- Her iddia bir rakama/panel kaydına dayanır.
 - Günün planındaki her madde bir kişiye atanmış ve bir sebebe bağlı.
 - Hiçbir öneri "yapıldı" dilinde değil; hepsi "yapılmalı / önerilir".
 - Dünkü brifinge göre ne değişti belli.

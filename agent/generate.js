@@ -26,13 +26,15 @@ const PROMPTS_DIR = path.join(__dirname, 'prompts');
 function readPrompt(name) { return fs.readFileSync(path.join(PROMPTS_DIR, name), 'utf8'); }
 
 // Her rapor tipi: hangi model, hangi domain sinyalleri, effort, max_tokens, onceki cikti sayisi.
+// maxTokens = guvenli tavan (end_turn once biterse yalniz gercek token'i odenir). Promptlar
+// kisaligi zorluyor; tavan yalnizca model asiri uretirse kesmesin diye genis.
 const OP = {
-  'gunluk-brifing':  { tier: 'haiku',  domains: ['production', 'tasks', 'sales', 'finance'], maxTokens: 7000, recent: 1 },
-  'uretim-risk':     { tier: 'haiku',  domains: ['production'],                              maxTokens: 5000, recent: 0 },
-  'satis-takip':     { tier: 'haiku',  domains: ['sales', 'crm'],                            maxTokens: 5000, recent: 0 },
-  'finans':          { tier: 'haiku',  domains: ['finance'],                                 maxTokens: 5000, recent: 0 },
-  'haftalik-review': { tier: 'sonnet', domains: ['production', 'tasks', 'sales', 'finance', 'crm'], maxTokens: 12000, effort: 'medium', recent: 1 },
-  'aylik-rapor':     { tier: 'sonnet', domains: ['production', 'tasks', 'sales', 'finance', 'crm'], maxTokens: 16000, effort: 'medium', recent: 1 },
+  'gunluk-brifing':  { tier: 'haiku',  domains: ['production', 'tasks', 'sales', 'finance'], maxTokens: 12000, recent: 1 },
+  'uretim-risk':     { tier: 'haiku',  domains: ['production'],                              maxTokens: 8000,  recent: 0 },
+  'satis-takip':     { tier: 'haiku',  domains: ['sales', 'crm'],                            maxTokens: 8000,  recent: 0 },
+  'finans':          { tier: 'haiku',  domains: ['finance'],                                 maxTokens: 8000,  recent: 0 },
+  'haftalik-review': { tier: 'sonnet', domains: ['production', 'tasks', 'sales', 'finance', 'crm'], maxTokens: 20000, effort: 'medium', recent: 1 },
+  'aylik-rapor':     { tier: 'sonnet', domains: ['production', 'tasks', 'sales', 'finance', 'crm'], maxTokens: 24000, effort: 'medium', recent: 1 },
 };
 
 // Son N raporun "3 Baslik" ozeti ("dune gore degisim" icin). recent=0 -> hic.
