@@ -79,3 +79,28 @@ Bu makinede node yoksa: `export ELECTRON_RUN_AS_NODE=1; NODE="/Applications/Visu
 
 `.github/workflows/agent-brief.yml` — her gün 04:00 UTC (07:00 İstanbul) `gunluk-brifing`;
 Pazartesi + `haftalik-review`; ayın 1'i + `aylik-rapor`.
+
+## Finansal belge işleme (dekont / fatura)
+
+`company-profile.js` · `documents.js` (kalıcı disk store) · `document.js` (Sonnet Vision +
+deterministik sınıflandırma) · `documentMatch.js` (aday eşleşmeler) · `documentCommit.js`
+(onaylı finans kaydı) · `invoices.js` (fatura durum/kalan hesabı).
+
+**Akış:** panel "🤖 Yönetim Ajanı → Belge İşleme" → yükle (jpg/png/webp/pdf) → Vision okur
+→ backend IBAN/VKN ile sınıflandırır → kullanıcı önizleme ekranında düzeltir → **"Onayla ve İşle"**
+→ `income` / `expense` / `invoice` / borç ödemesi kaydı. Onaysız hiçbir mutasyon yok.
+
+**Uçlar:** `POST /api/agent/documents` (upload) · `GET /api/agent/documents[/:id]` ·
+`GET /api/agent/documents/:id/file` · `POST /:id/extract` · `POST /:id/commit` · `DELETE /:id`.
+
+**Faturalar:** `data.invoices[]` (panel-data içinde). `remaining_amount` ve `status` backend
+hesaplar (`invoices.js` / `metrics.js`). Panelde "Faturalar" sekmesi.
+
+**Company profile (Render env):**
+- `MERCI_IBANS` = virgülle ayrılmış IBAN listesi (repo public — git'e YAZILMAZ)
+- `MERCI_COMPANY_PROFILE` (ops.) = tam profil JSON'u, veya `data/company-profile.json`
+- İsim/VKN/vergi dairesi kodda varsayılan (Ticaret Sicil kaydı).
+Frontend'e hiç girmez.
+
+**Maliyet:** belge başına 1 Vision çağrısı (Sonnet), yalnız belge + kısa talimat + minimum profil
+gönderilir (panel JSON gönderilmez). Belge başına ~$0.01–0.02. `usage-log` opType `document_extract`.

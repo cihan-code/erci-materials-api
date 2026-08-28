@@ -1,0 +1,21 @@
+{
+  "document_type": "payment_receipt",
+  "direction": "incoming",
+  "date": "2026-08-25",
+  "amount": 78500,
+  "currency": "TRY",
+  "sender_name": "ABC KULÜP DERNEĞİ",
+  "receiver_name": "MERCI TEKSTİL SANAYİ VE TİCARET",
+  "sender_iban": "TR999988887777666655554444",
+  "receiver_iban": "TR111122223333444455556666",
+  "sender_tax_number": null,
+  "receiver_tax_number": null,
+  "invoice_number": null,
+  "reference_number": "DKT-2026-55512",
+  "description": "sipariş ödemesi",
+  "subtotal": null,
+  "vat_amount": null,
+  "total": 78500,
+  "due_date": null,
+  "confidence": { "document_type": 0.98, "direction": 0.9, "amount": 0.99 }
+}

@@ -56,6 +56,36 @@ function normProbability(p) {
   return { value: n, normalized: false };
 }
 
+// Fatura rollup - remaining ve status BACKEND. (agent/invoices.js ile ayni mantik.)
+function computeInvoices(list) {
+  const enrich = (iv) => {
+    const total = round2(iv.total_amount || 0);
+    const paid = round2(iv.paid_amount || 0);
+    const remaining = round2(total - paid);
+    let status = iv.status;
+    if (status !== 'İptal') {
+      if (iv.direction === 'outgoing') status = remaining <= 0.01 ? 'Tahsil Edildi' : (paid > 0.01 ? 'Kısmi Tahsil Edildi' : 'Tahsil Edilmedi');
+      else status = remaining <= 0.01 ? 'Ödendi' : (paid > 0.01 ? 'Kısmi Ödendi' : 'Ödenmedi');
+    }
+    return {
+      id: iv.id, direction: iv.direction, no: iv.invoice_number || null,
+      tarih: iv.invoice_date || null, vade: iv.due_date || null,
+      taraf: iv.counterparty_name || '-', total, paid, remaining, status,
+      job_id: iv.related_job_id || null, document_id: iv.document_id || null,
+    };
+  };
+  const all = (list || []).map(enrich);
+  const alis = all.filter((x) => x.direction === 'incoming');
+  const satis = all.filter((x) => x.direction === 'outgoing');
+  const openSum = (a) => round2(a.filter((x) => x.status !== 'İptal').reduce((s, x) => s + x.remaining, 0));
+  return {
+    alis, satis,
+    alisAcikToplam: openSum(alis),   // odememiz gereken
+    satisAcikToplam: openSum(satis), // tahsil etmemiz gereken
+    alisSayisi: alis.length, satisSayisi: satis.length,
+  };
+}
+
 function computeMetrics(data, today) {
   data = data || {};
   const T = d(today) || d(new Date().toISOString().slice(0, 10));
@@ -295,6 +325,8 @@ function computeMetrics(data, today) {
     supheliMaasCiftToplam: supheliToplam,
     // S6: liste ama "odenmedi" YOK
     sabitGiderKalemleri: fixed.map((f) => ({ ay: f.month_label || ym(f.date), ad: f.name, tutar: f.amount || 0 })),
+    // FATURALAR (kalan/durum backend hesaplar)
+    faturalar: computeInvoices(data.invoices || []),
   };
 
   // ---------------- HEDEFLER - panelin computeHedefGerceklesen'i (CANLI) ----------------
@@ -437,6 +469,14 @@ function renderMetricsText(M, domainList) {
     L.push('Aylık sabit gider kalemleri (ödeme durumu bilinmiyor, S6 — "ödenmedi" deme):');
     F.sabitGiderKalemleri.forEach((f) => L.push('  ' + f.ay + ' | ' + f.ad + ' | ' + tl(f.tutar)));
     L.push('');
+    if (F.faturalar && (F.faturalar.alisSayisi || F.faturalar.satisSayisi)) {
+      L.push('FATURALAR (invoices — kalan/durum backend hesabı, işlerin açık tutarıyla TOPLAMA):');
+      L.push('  Açık ALIŞ faturası (ödememiz gereken): ' + tl(F.faturalar.alisAcikToplam) + ' (' + F.faturalar.alisSayisi + ' fatura)');
+      L.push('  Açık SATIŞ faturası (tahsil etmemiz gereken): ' + tl(F.faturalar.satisAcikToplam) + ' (' + F.faturalar.satisSayisi + ' fatura)');
+      F.faturalar.alis.concat(F.faturalar.satis).filter((x) => x.status !== 'İptal' && x.remaining > 0.01).slice(0, 20)
+        .forEach((x) => L.push('  ' + (x.direction === 'incoming' ? 'ALIŞ' : 'SATIŞ') + ' id=' + x.id + ' ' + (x.no || '') + ' | ' + x.taraf + ' | toplam ' + tl(x.total) + ' | kalan ' + tl(x.remaining) + ' | ' + x.status + (x.vade ? ' | vade ' + x.vade : '')));
+      L.push('');
+    }
     L.push('## HEDEFLER (gerçekleşen = panelin CANLI hesabı, donuk Excel alanı değil):');
     M.hedefler.yillik.forEach((h) => {
       const fmt = (v) => h.paraBirimi ? tl(v) : num(v);

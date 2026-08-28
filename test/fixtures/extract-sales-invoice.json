@@ -1,0 +1,21 @@
+{
+  "document_type": "invoice",
+  "direction": "outgoing",
+  "date": "2026-08-22",
+  "amount": null,
+  "currency": "TRY",
+  "sender_name": "MERCI TEKSTİL SANAYİ VE TİCARET",
+  "receiver_name": "İTÜ ROVER KULÜBÜ",
+  "sender_iban": null,
+  "receiver_iban": null,
+  "sender_tax_number": "6160906794",
+  "receiver_tax_number": "9998887776",
+  "invoice_number": "MRC2026000045",
+  "reference_number": null,
+  "description": "tişört üretimi",
+  "subtotal": 100000,
+  "vat_amount": 20000,
+  "total": 120000,
+  "due_date": "2026-09-21",
+  "confidence": { "document_type": 0.99, "direction": 0.96, "amount": 0.98 }
+}

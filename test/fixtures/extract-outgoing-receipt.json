@@ -1,0 +1,18 @@
+{
+  "document_type": "payment_receipt",
+  "direction": "outgoing",
+  "date": "2026-08-26",
+  "amount": 120000,
+  "currency": "TRY",
+  "sender_name": "MERCI TEKSTİL",
+  "receiver_name": "Başaran Tekstil",
+  "sender_iban": "TR111122223333444455556666",
+  "receiver_iban": "TR555544443333222211110000",
+  "sender_tax_number": null,
+  "receiver_tax_number": null,
+  "invoice_number": null,
+  "reference_number": "FAST-889931",
+  "description": "kumaş ödemesi",
+  "subtotal": null, "vat_amount": null, "total": 120000, "due_date": null,
+  "confidence": { "document_type": 0.97, "direction": 0.95, "amount": 0.99 }
+}

@@ -516,5 +516,89 @@ app.post('/api/agent/act/confirm', checkApiKey, (req, res) => {
   }
 });
 
+// ================= FINANSAL BELGE ISLEME (dekont / fatura) =================
+// Yukleme -> Vision cikarim -> DETERMINISTIK siniflandirma -> kullanici onizleme/duzenleme
+// -> "Onayla ve İşle" -> finans kaydi. Onaysiz HICBIR mutasyon yok.
+const docUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+});
+
+app.post('/api/agent/documents', checkApiKey, (req, res) => {
+  docUpload.single('file')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message || 'Yükleme başarısız.' });
+    if (!req.file) return res.status(400).json({ error: 'Dosya bulunamadı (alan adı: file).' });
+    try {
+      const docs = require('./agent/documents');
+      const r = docs.saveDocument(req.file.buffer, req.file.originalname, req.file.mimetype);
+      res.json(r);
+    } catch (e) {
+      res.status(400).json({ error: String(e && e.message || e) });
+    }
+  });
+});
+
+app.get('/api/agent/documents', checkApiKey, (req, res) => {
+  try {
+    const docs = require('./agent/documents');
+    res.json(docs.listDocuments({ status: req.query.status, limit: req.query.limit }));
+  } catch (e) { res.status(500).json({ error: 'Belge listesi okunamadı.' }); }
+});
+
+app.get('/api/agent/documents/:id', checkApiKey, (req, res) => {
+  const docs = require('./agent/documents');
+  const rec = docs.getDocument(req.params.id);
+  if (!rec) return res.status(404).json({ error: 'Belge bulunamadı.' });
+  const { storedName, ...safe } = rec;
+  res.json(safe);
+});
+
+app.get('/api/agent/documents/:id/file', checkApiKey, (req, res) => {
+  const docs = require('./agent/documents');
+  const rec = docs.getDocument(req.params.id);
+  if (!rec) return res.status(404).json({ error: 'Belge bulunamadı.' });
+  try {
+    const buf = docs.fileBuffer(rec);
+    res.setHeader('Content-Type', rec.mime);
+    res.setHeader('Content-Disposition', 'inline; filename="' + encodeURIComponent(rec.originalName) + '"');
+    res.send(buf);
+  } catch (e) { res.status(404).json({ error: 'Dosya diskte yok.' }); }
+});
+
+// Vision cikarim + deterministik siniflandirma. Finans mutasyonu YOK.
+app.post('/api/agent/documents/:id/extract', checkApiKey, async (req, res) => {
+  if (!process.env.ANTHROPIC_API_KEY && process.env.AGENT_MOCK !== '1') {
+    return res.status(503).json({ error: 'ANTHROPIC_API_KEY tanımlı değil.' });
+  }
+  try {
+    const { extractDocument } = require('./agent/document');
+    const rec = await extractDocument(req.params.id);
+    const { storedName, ...safe } = rec;
+    res.json(safe);
+  } catch (e) {
+    console.error('[documents/extract] hata:', e && e.message || e);
+    res.status(400).json({ error: String(e && e.message || e) });
+  }
+});
+
+// Onaylanan belgeyi finansa isle (kullanici duzenlemeleri + confirm).
+app.post('/api/agent/documents/:id/commit', checkApiKey, (req, res) => {
+  try {
+    const { commitDocument } = require('./agent/documentCommit');
+    const out = commitDocument(req.params.id, req.body || {});
+    res.json(out);
+  } catch (e) {
+    const code = e && e.code === 'CONFLICT' ? 409 : 400;
+    res.status(code).json({ error: String(e && e.message || e) });
+  }
+});
+
+app.delete('/api/agent/documents/:id', checkApiKey, (req, res) => {
+  try {
+    const docs = require('./agent/documents');
+    res.json(docs.discardDocument(req.params.id));
+  } catch (e) { res.status(400).json({ error: String(e && e.message || e) }); }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('Merci Tekstil Materyaller API port ' + PORT + ' uzerinde calisiyor. DATA_DIR=' + DATA_DIR));

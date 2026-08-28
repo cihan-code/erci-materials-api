@@ -1,0 +1,18 @@
+{
+  "document_type": "payment_receipt",
+  "direction": "outgoing",
+  "date": "2026-08-27",
+  "amount": 42000,
+  "currency": "TRY",
+  "sender_name": "Bir Firma",
+  "receiver_name": "MERCI TEKSTİL",
+  "sender_iban": "TR777766665555444433332222",
+  "receiver_iban": "TR111122223333444455556666",
+  "sender_tax_number": null,
+  "receiver_tax_number": null,
+  "invoice_number": null,
+  "reference_number": "CNF-1",
+  "description": "belirsiz",
+  "subtotal": null, "vat_amount": null, "total": 42000, "due_date": null,
+  "confidence": { "document_type": 0.9, "direction": 0.8, "amount": 0.95 }
+}

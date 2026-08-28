@@ -1,0 +1,21 @@
+{
+  "document_type": "invoice",
+  "direction": "incoming",
+  "date": "2026-08-20",
+  "amount": null,
+  "currency": "TRY",
+  "sender_name": "DURSUN BASKI MATBAA LTD ŞTİ",
+  "receiver_name": "MERCI TEKSTİL SANAYİ VE TİCARET",
+  "sender_iban": null,
+  "receiver_iban": null,
+  "sender_tax_number": "1112223334",
+  "receiver_tax_number": "6160906794",
+  "invoice_number": "DUR2026000123",
+  "reference_number": null,
+  "description": "baskı hizmeti",
+  "subtotal": 50000,
+  "vat_amount": 10000,
+  "total": 60000,
+  "due_date": "2026-09-19",
+  "confidence": { "document_type": 0.99, "direction": 0.92, "amount": 0.98 }
+}

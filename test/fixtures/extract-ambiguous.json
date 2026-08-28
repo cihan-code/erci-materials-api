@@ -1,0 +1,18 @@
+{
+  "document_type": "unknown",
+  "direction": "unknown",
+  "date": "2026-08-24",
+  "amount": 15000,
+  "currency": "TRY",
+  "sender_name": null,
+  "receiver_name": null,
+  "sender_iban": null,
+  "receiver_iban": null,
+  "sender_tax_number": null,
+  "receiver_tax_number": null,
+  "invoice_number": null,
+  "reference_number": "X-771",
+  "description": null,
+  "subtotal": null, "vat_amount": null, "total": 15000, "due_date": null,
+  "confidence": { "document_type": 0.4, "direction": 0.3, "amount": 0.7 }
+}

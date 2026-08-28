@@ -13,6 +13,9 @@ giderleri yönetime özetle. **Sayıları tablodan al, yenisini hesaplama.**
    konsantrasyon riski notu (ama iki kaynağı birbirine ekleme).
 4. **İşlerin bağlı tahsilatı** — aktif işlerin sipariş bedeli ve bağlı tahsilatı. Bağlı tahsilatı 0
    olanları işaretle ama "şu iş X TL borçlu" deme — sadece "bu işe bağlı tahsilat kaydı yok".
+5b. **Faturalar** — tabloda varsa: açık alış faturası (ödememiz gereken) ve açık satış faturası
+   (tahsil etmemiz gereken) toplamları + vadesi yaklaşanlar. **Bunları da debts / iş tutarıyla
+   TOPLAMA (S1/S12)** — ayrı kalem olarak sun.
 5. **Sabit giderler** — tablodaki kalemler ve toplam. **"Ödenmedi" DEME** (ödeme durumu verisi
    güvenilmez, S6). Sadece "aylık sabit gider yükü ~X TL".
 6. **Şüpheli maaş çift kaydı** — tabloda varsa yönetime bildir (otomatik düzeltme yok, S7).

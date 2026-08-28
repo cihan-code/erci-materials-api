@@ -122,11 +122,17 @@ async function streamOnce(body, key) {
 }
 
 // opts: { model, opType, system, user, maxTokens, thinking, effort, schema }
+//   user: string  VEYA  content-block dizisi (image/document + text) - Vision icin.
 async function callClaude(opts) {
+  const userIsBlocks = Array.isArray(opts.user);
+  const userTextForLog = userIsBlocks
+    ? opts.user.map((b) => (b && b.type === 'text' ? b.text : '[' + (b && b.type) + ']')).join(' ')
+    : String(opts.user || '');
+
   // ---- MOCK: gercek cagriyi atla, $0 logla ----
   if (MOCK) {
-    const text = mockText(opts);
-    const inTok = Math.round(String(opts.system || '').length / 4 + String(opts.user || '').length / 4);
+    const text = opts.mockResult != null ? opts.mockResult : mockText(opts);
+    const inTok = Math.round(String(opts.system || '').length / 4 + userTextForLog.length / 4 + (userIsBlocks ? 1400 : 0));
     const outTok = Math.round(text.length / 4);
     store.logUsage({ opType: opts.opType || 'unknown', model: opts.model, inputTokens: inTok, outputTokens: outTok, costUsd: 0, stopReason: 'end_turn', ok: true, mock: true });
     console.log('[claude] MOCK yanit (%s) - API cagrilmadi, $0', opts.opType);
@@ -141,7 +147,7 @@ async function callClaude(opts) {
     max_tokens: opts.maxTokens || 8000,
     stream: true,
     system: opts.system,
-    messages: [{ role: 'user', content: opts.user }],
+    messages: [{ role: 'user', content: opts.user }], // string veya content-block dizisi
   };
   if (opts.thinking) body.thinking = opts.thinking;
   if (opts.effort) body.output_config = Object.assign(body.output_config || {}, { effort: opts.effort });
