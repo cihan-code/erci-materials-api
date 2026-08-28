@@ -25,16 +25,17 @@ const { HAIKU, SONNET } = require('./pricing');
 const PROMPTS_DIR = path.join(__dirname, 'prompts');
 function readPrompt(name) { return fs.readFileSync(path.join(PROMPTS_DIR, name), 'utf8'); }
 
-// Her rapor tipi: hangi model, hangi domain sinyalleri, effort, max_tokens, onceki cikti sayisi.
-// maxTokens = guvenli tavan (end_turn once biterse yalniz gercek token'i odenir). Promptlar
-// kisaligi zorluyor; tavan yalnizca model asiri uretirse kesmesin diye genis.
+// Her rapor tipi: model, domain, effort, max_tokens, onceki cikti sayisi.
+// Yonetim karari (2026-08-28): TUM yonetim raporlari Sonnet. Haiku yalniz act.js'te
+// (intent belirleme + basit panel aksiyonlari). Sayilar metrics.js'ten hazir geliyor,
+// model hesap yapmiyor -> effort:medium yeterli.
 const OP = {
-  'gunluk-brifing':  { tier: 'haiku',  domains: ['production', 'tasks', 'sales', 'finance'], maxTokens: 12000, recent: 1 },
-  'uretim-risk':     { tier: 'haiku',  domains: ['production'],                              maxTokens: 8000,  recent: 0 },
-  'satis-takip':     { tier: 'haiku',  domains: ['sales', 'crm'],                            maxTokens: 8000,  recent: 0 },
-  'finans':          { tier: 'haiku',  domains: ['finance'],                                 maxTokens: 8000,  recent: 0 },
-  'haftalik-review': { tier: 'sonnet', domains: ['production', 'tasks', 'sales', 'finance', 'crm'], maxTokens: 20000, effort: 'medium', recent: 1 },
-  'aylik-rapor':     { tier: 'sonnet', domains: ['production', 'tasks', 'sales', 'finance', 'crm'], maxTokens: 24000, effort: 'medium', recent: 1 },
+  'gunluk-brifing':  { tier: 'sonnet', domains: ['production', 'tasks', 'sales', 'finance'],        maxTokens: 14000, effort: 'medium', recent: 1 },
+  'uretim-risk':     { tier: 'sonnet', domains: ['production'],                                      maxTokens: 10000, effort: 'medium', recent: 0 },
+  'satis-takip':     { tier: 'sonnet', domains: ['sales', 'crm'],                                    maxTokens: 10000, effort: 'medium', recent: 0 },
+  'finans':          { tier: 'sonnet', domains: ['finance'],                                         maxTokens: 10000, effort: 'medium', recent: 0 },
+  'haftalik-review': { tier: 'sonnet', domains: ['production', 'tasks', 'sales', 'finance', 'crm'],  maxTokens: 20000, effort: 'medium', recent: 1 },
+  'aylik-rapor':     { tier: 'sonnet', domains: ['production', 'tasks', 'sales', 'finance', 'crm'],  maxTokens: 24000, effort: 'medium', recent: 1 },
 };
 
 // Son N raporun "3 Baslik" ozeti ("dune gore degisim" icin). recent=0 -> hic.
@@ -79,11 +80,12 @@ async function generate(type) {
       'Panel updatedAt: ' + (updatedAt || 'bilinmiyor') + staleNote,
       recent ? '\n## Onceki cikti (dune gore degisim icin)\n' + recent : '',
       '',
-      '## Guncel panel sinyalleri (' + cfg.domains.join(', ') + ')',
       signals,
       '',
-      'Yukaridaki sinyallere dayanarak istenen ciktiyi Turkce markdown olarak uret. Sadece belgeyi'
-      + ' dondur, on/arka aciklama yazma.',
+      'KURAL: Yukaridaki metrik tablosundaki sayilari AYNEN kullan. Yeni toplam, oran, yuzde,'
+      + ' gun farki veya adet HESAPLAMA. Iki sayiyi toplayip ucuncu bir sayi uretme. Tabloda'
+      + ' olmayan hicbir sayiyi yazma.',
+      'Istenen ciktiyi Turkce markdown olarak uret. Sadece belgeyi dondur, on/arka aciklama yazma.',
     ].join('\n');
 
     console.log('[generate] tip=%s model=%s domains=%s sinyal=%d kar', type, model, cfg.domains.join('+'), signals.length);

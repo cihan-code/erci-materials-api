@@ -39,16 +39,59 @@ async function main() {
   seed();
   const store = require('../agent/store');
   const { buildSignals, ALL_DOMAINS } = require('../agent/signals');
+  const { computeMetrics } = require('../agent/metrics');
   const { generate, OP } = require('../agent/generate');
   const actions = require('../agent/actions');
   const { data } = store.loadPanelData();
+  const TODAY = '2026-08-28';
 
-  console.log('\n# 1. Domain sinyalleri (ham JSON gitmiyor)');
+  console.log('\n# 0. metrics.js — deterministik hesaplar (S1..S11)');
+  const M = computeMetrics(data, TODAY);
+  ok('gorev sayisi carried_forward haric', () => {
+    const naive = data.tasks.filter((t) => !t.done).length;
+    assert(M.tasks.acikSayisi < naive, 'acik gorev naive ile ayni (' + M.tasks.acikSayisi + ')');
+    assert(M.tasks.acikSayisi === data.tasks.filter((t) => !t.done && !t.carried_forward).length);
+  });
+  ok('aktif is = Onaylandi + Uretimde', () => {
+    const exp = data.jobs.filter((j) => ['Onaylandı', 'Üretimde'].includes(j.status)).length;
+    assert(M.jobs.aktifSayisi === exp);
+  });
+  ok('is bagli tahsilat = job_id eslesen incomes', () => {
+    const j = M.jobs.aktif.find((x) => x.bagliTahsilat > 0);
+    if (j) {
+      const sum = data.incomes.filter((i) => i.job_id === j.id).reduce((s, i) => s + i.amount, 0);
+      assert(Math.abs(j.bagliTahsilat - sum) < 1);
+    }
+  });
+  ok('S8: probability 0-1 normalize', () => {
+    M.sales.acikFirsatlar.forEach((p) => { if (p.olasilik != null) assert(p.olasilik >= 0 && p.olasilik <= 1, 'olasilik ' + p.olasilik); });
+  });
+  ok('S1: debts alacak ile is tutari ayri alanlar', () => {
+    assert(typeof M.finance.debtsAcikAlacak === 'number');
+    assert(typeof M.jobs.aktifBagliTahsilatToplam === 'number');
+    assert(!('toplamAlacak' in M.finance), 'birlesik toplam alani olmamali');
+  });
+  ok('S5: aylik yonetim sonucu sabit gideri dusuyor', () => {
+    M.finance.aylik.forEach((a) => assert(Math.abs(a.yonetimSonucu - (a.gelir - a.gider - a.sabitGider)) < 1));
+  });
+  ok('hedef gerceklesen CANLI (gerceklesen_excel degil)', () => {
+    const is = M.hedefler.yillik.find((h) => /İş/.test(h.ad));
+    if (is) assert(is.gerceklesen === data.jobs.filter((j) => j.status === 'Teslim Edildi').length, 'is hedefi ' + is.gerceklesen);
+  });
+  ok('dataConfidence dolu ve gercek', () => {
+    assert(M.dataConfidence.length >= 4);
+    assert(!M.dataConfidence.some((c) => /sayac bozuk|sayaç bozuk/i.test(c)), 'panel sucla­yan madde var');
+  });
+  console.log('       aktif is:', M.jobs.aktifSayisi, '| acik gorev:', M.tasks.acikSayisi,
+    '| acik firsat:', M.sales.acikFirsatSayisi, '| dataConfidence:', M.dataConfidence.length, 'madde');
+
+  console.log('\n# 1. Domain sinyalleri (ham JSON gitmiyor, sayi tablosu)');
   ALL_DOMAINS.forEach((dom) => {
     ok(dom + ' sinyali uretiliyor', () => {
-      const s = buildSignals(data, '2026-08-28', [dom]);
+      const s = buildSignals(data, TODAY, [dom]);
       assert(s.length > 20, 'bos sinyal');
       assert(!s.includes('"customer_id":'), 'ham JSON sizmis');
+      assert(/DOĞRULANMIŞ METRİK/.test(s), 'metrik tablosu basligi yok');
       console.log('       ~' + Math.round(s.length / 4) + ' token');
     });
   });

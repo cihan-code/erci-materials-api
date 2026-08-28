@@ -37,9 +37,11 @@ sadece hangi aksiyon + hangi parametreler olduğunu döndürürsün, backend uyg
 - `reassign_task` — `{id?|match, assigned_to}`
 - `set_task_date` — `{id?|match, date}`
 - `set_production_status` — `{id?|customer_name, status, problem_note?}`
+  status ∈ Kumaş Bekleniyor · Kumaş Geldi · Kesimde · Baskı/Nakışta · Dikimde · Ütü-Pakette-Teslimat Bekliyor · Teslim Edildi
 - `set_production_delivery` — `{id?|customer_name, est_delivery}`
 - `set_pipeline_followup` — `{id?|customer_name, follow_up_date, note?}`
-- `set_pipeline_status` — `{id?|customer_name, status}` (Potansiyel/Onaylandı/Kaybedildi/Beklemede)
+- `set_pipeline_status` — `{id?|customer_name, status}`
+  status ∈ Potansiyel · Fiyat Verildi · Görüşülüyor · Kazanıldı · Kaybedildi
 - `append_customer_note` — `{id?|name, note}`
 - `set_school_followup` — `{id?|okul_adi, takip_tarihi, gorusme_durumu?}`
 
@@ -47,8 +49,9 @@ sadece hangi aksiyon + hangi parametreler olduğunu döndürürsün, backend uyg
 - `add_income` — `{amount, source?, category?, date?, payment_method?, note?}`
 - `add_expense` — `{amount, payee?, category?, date?, payment_method?, note?}`
 - `update_debt_payment` — `{id?|party_name, paid_amount}`
-- `set_job_deposit` — `{id?|job_no, deposit_received}`
-- `set_job_status` — `{id?|job_no, status}`
+- `add_job_payment` — `{id?|job_no, amount, category?, date?, payment_method?, note?}`
+  (bir işe tahsilat kaydı ekler — kapora/kalan tahsilat. category ∈ Kapora · Kalan Tahsilat · Peşin Ödeme · Diğer Gelir)
+- `set_job_status` — `{id?|job_no, status}`  status ∈ Teklif · Onaylandı · Üretimde · Teslim Edildi · İptal
 - `delete_task` — `{id?|match}`
 
 Başka bir işlem türü isteniyorsa (ör. yeni müşteri ekle, yeni iş aç) aksiyon üretme; `reply`de

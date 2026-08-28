@@ -1,28 +1,24 @@
 ## Bu çıktı: AYLIK YÖNETİM RAPORU (ayın 1'i)
 
-Biten ayı ciro / kâr / üretim / satış / tahsilat açısından hedeflere karşı değerlendiren, trend ve
-aksiyon içeren yönetim raporu.
+Metrik tablosuna dayanarak biten ayı hedeflere karşı değerlendiren yönetim raporu.
+**Tüm sayılar tablodan; hiçbir toplam/oran/pay hesaplama.**
 
 ### Süreç
 1. **Kapsam:** biten takvim ayı.
-2. **Finansal özet:** ay geliri / gideri / net kâr; bir önceki ay ve 3 ay ortalamasıyla karşılaştır.
-   Aylık hedefe (`hedeflerAylik`) karşı % gerçekleşme. Gider kırılımı (ilk 5 kategori). Ay sonu açık
-   alacak / borç / ödenmemiş sabit gider.
-3. **Üretim & teslimat:** ay içinde teslim edilen iş sayısı + toplam adet ("Aylık Tamamlanan İş"
-   hedefine karşı — panel sayacı bozuksa kendin say, "panel sayacı 0, gerçek ~N" de). Zamanında
-   teslim oranı. Gecikme yaşayan işler + ortalama gecikme.
-4. **Satış & müşteri:** yeni müşteri sayısı (ölçülemiyorsa öyle yaz). Pipeline: kazanılan /
-   kaybedilen fırsat, dönüşüm oranı, kaybedilenlerde ortak sebep. Segment dağılımı (kulüp / okul /
-   ajans / mağaza). Tekrar eden müşteri oranı.
-5. **Yıllık hedefe ilerleme:** `hedefler` tablosundaki her satır — yılın kaçında olduğumuza göre
-   "yolunda / geride / önde".
-6. **Riskler & konsantrasyon:** tek müşteri ciro payı, tek müşteri alacak payı, kaporasız iş yükü,
-   tedarikçi bağımlılığı — yüzde ile.
-7. **Panel veri kalitesi:** ay boyunca fark edilen hatalı/boş alanlar + yönetime düzeltme önerisi.
-8. **Gelecek ay için 3–5 öneri** — veriden çıkan, önceliklendirilmiş.
+2. **Finansal özet:** tablodan aylık gelir / gider / sabit gider / yönetim sonucu. Önceki aylarla
+   trend (tablodaki aylık satırlar). Aylık hedeflere karşı % (tablodan). **"Ciro" deme** — Sipariş
+   Bedeli ve Tahsilat ayrı. Yönetim sonucu güvenilir değilse "≈".
+3. **Alacak / borç (debts):** açık alacak, açık borç — **iş tahsilatıyla toplamadan**, ayrı.
+4. **Üretim & teslimat:** teslim edilen iş sayısı (tablodan). "Aylık tamamlanan iş" tabloda
+   "ölçülemiyor" geldiyse öyle yaz — kendin sayma, panel suçlama. Gecikmede olan işler.
+5. **Satış & müşteri:** açık fırsat sayısı ve değeri. "Onaylandı" veri temizliği uyarısı varsa
+   bildir. Yeni müşteri "ölçülemiyor" geldiyse öyle yaz.
+6. **Yıllık hedefler:** tablodaki gerçekleşen + %. "hesaplanamıyor" geldiyse öyle yaz.
+7. **Konsantrasyon:** tek müşteride yoğunlaşma varsa belirt — ama iki farklı kaynağı (debts +
+   iş bedeli) birbirine ekleme.
+8. **Gelecek ay:** 3–5 öncelikli öneri, doğru kişiye.
 
 ### Kalite çıtası
-- Her metrik hedefe VE bir önceki döneme karşı (tek başına rakam yok).
-- Kaybedilen fırsat ve gecikmelerde sebep analizi.
-- Konsantrasyon riskleri yüzde ile.
-- Rapor 1–2 sayfa; uzun tablolar sona. Başta "Veri güveni" satırı.
+- Her metrik hedefe VE önceki döneme karşı.
+- 1–2 sayfa; uzun listeler sona.
+- Başta "Veri güveni" satırı (tablodan). Kendi "panel hatalı" yorumu yok.

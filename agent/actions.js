@@ -6,15 +6,18 @@
 // Her aksiyon panel-data.json'da YALNIZ hedef kaydi degistirir; store.writePanelData yedek alir.
 
 const store = require('./store');
+const { URETIM_STATUSES, PIPELINE_STATUSES, JOB_STATUSES } = require('./metrics');
 
 const RISK = { SAFE: 'safe', CONFIRM: 'confirm' };
 
 const MANAGERS = ['Cihan Berber', 'Erdem Küçükarslan', 'Mert Kıvanç Tekin'];
-const PROD_STATUSES = [
-  'Siparis Alindi', 'Kumas Bekleniyor', 'Kesimde', 'Baskı/Nakışta', 'Baskı/Nakışta',
-  'Dikimde', 'Ütü-Paket', 'Ütü-Pakette-Teslimat Bekliyor', 'Teslim Edildi',
-];
-const PIPELINE_STATUSES = ['Potansiyel', 'Onaylandı', 'Kaybedildi', 'Beklemede'];
+// Panelin (index.html) gercek enum'lari - metrics.js'ten tek kaynak.
+const PROD_STATUSES = URETIM_STATUSES; // uretimTakip.status
+// PIPELINE_STATUSES ve JOB_STATUSES da metrics.js'ten geliyor.
+
+function statusMatch(list, v) {
+  return list.find((s) => s.toLowerCase() === String(v || '').trim().toLowerCase()) || null;
+}
 
 function todayISO() { return new Date().toISOString().slice(0, 10); }
 function nextId(arr) {
@@ -95,8 +98,9 @@ const ACTIONS = {
     describe: (p) => 'Üretim durumu: ' + (p.id != null ? 'id=' + p.id : '"' + str(p.customer_name, 40) + '"') + ' → ' + p.status,
     apply: (data, p) => {
       const u = findOne(data.uretimTakip, p, ['customer_name', 'note'], 'Üretim kaydı');
-      if (!p.status) throw new Error('status gerekli');
-      u.status = str(p.status, 60);
+      const s = statusMatch(PROD_STATUSES, p.status);
+      if (!s) throw new Error('Geçersiz üretim durumu. Geçerli: ' + PROD_STATUSES.join(', '));
+      u.status = s;
       if (p.problem_note !== undefined) u.problem_note = str(p.problem_note, 300);
       return 'Üretim (' + (u.customer_name || u.id) + ') → ' + u.status;
     },
@@ -127,10 +131,9 @@ const ACTIONS = {
     describe: (p) => 'Fırsat durumu: ' + (p.id != null ? 'id=' + p.id : '"' + str(p.customer_name, 40) + '"') + ' → ' + p.status,
     apply: (data, p) => {
       const pl = findOne(data.pipeline, p, ['customer_name', 'description', 'note'], 'Fırsat');
-      if (!PIPELINE_STATUSES.some((s) => s.toLowerCase() === String(p.status || '').toLowerCase())) {
-        throw new Error('status su degerlerden biri olmali: ' + PIPELINE_STATUSES.join(', '));
-      }
-      pl.status = PIPELINE_STATUSES.find((s) => s.toLowerCase() === String(p.status).toLowerCase());
+      const s = statusMatch(PIPELINE_STATUSES, p.status);
+      if (!s) throw new Error('Geçersiz fırsat durumu. Geçerli: ' + PIPELINE_STATUSES.join(', '));
+      pl.status = s;
       return 'Fırsat (' + (pl.customer_name || pl.id) + ') → ' + pl.status;
     },
   },
@@ -202,15 +205,25 @@ const ACTIONS = {
       return x.party_name + ' ödenen tutar → ' + paid.toLocaleString('tr-TR') + ' TL';
     },
   },
-  set_job_deposit: {
+  add_job_payment: {
     risk: RISK.CONFIRM, domain: 'finance',
-    describe: (p) => 'İş kaporası güncelle: ' + (p.id != null ? 'id=' + p.id : p.job_no) + ' → ' + Number(p.deposit_received || 0).toLocaleString('tr-TR') + ' TL',
+    describe: (p) => 'İşe tahsilat kaydı ekle: ' + (p.id != null ? 'iş id=' + p.id : p.job_no) + ' → ' + Number(p.amount || 0).toLocaleString('tr-TR') + ' TL (' + (p.category || 'Kalan Tahsilat') + ')',
     apply: (data, p) => {
+      // Panelin gercek modeli: tahsilat = incomes icinde job_id bagli kayit.
+      // deposit_received alani panelin guvenmedigi Excel artefakti - ona yazmiyoruz (S2).
       const j = findOne(data.jobs, { id: p.id, match: p.job_no || p.match }, ['job_no', 'title', 'customer_name_free'], 'İş');
-      const dep = Number(p.deposit_received);
-      if (!Number.isFinite(dep) || dep < 0) throw new Error('deposit_received 0 veya pozitif olmali');
-      j.deposit_received = dep;
-      return (j.job_no || 'İş #' + j.id) + ' kapora → ' + dep.toLocaleString('tr-TR') + ' TL';
+      const amount = Number(p.amount);
+      if (!Number.isFinite(amount) || amount <= 0) throw new Error('amount pozitif sayı olmalı');
+      const cat = statusMatch(['Kapora', 'Kalan Tahsilat', 'Peşin Ödeme', 'Diğer Gelir'], p.category) || 'Kalan Tahsilat';
+      data.incomes = data.incomes || [];
+      const id = nextId(data.incomes);
+      const custName = (data.customers || []).find((c) => c.id === j.customer_id);
+      data.incomes.unshift({
+        id, date: isISODate(p.date) ? p.date : todayISO(), amount, category: cat,
+        source: (custName && custName.name) || j.customer_name_free || '', job_id: j.id,
+        payment_method: str(p.payment_method, 40), note: str(p.note, 200) || 'Ajan üzerinden',
+      });
+      return (j.job_no || 'İş #' + j.id) + ' işine ' + amount.toLocaleString('tr-TR') + ' TL tahsilat (gelir #' + id + ')';
     },
   },
   set_job_status: {
@@ -218,8 +231,9 @@ const ACTIONS = {
     describe: (p) => 'İş durumu değiştir: ' + (p.id != null ? 'id=' + p.id : p.job_no) + ' → ' + p.status,
     apply: (data, p) => {
       const j = findOne(data.jobs, { id: p.id, match: p.job_no || p.match }, ['job_no', 'title', 'customer_name_free'], 'İş');
-      if (!p.status) throw new Error('status gerekli');
-      j.status = str(p.status, 40);
+      const s = statusMatch(JOB_STATUSES, p.status);
+      if (!s) throw new Error('Geçersiz iş durumu. Geçerli: ' + JOB_STATUSES.join(', '));
+      j.status = s;
       return (j.job_no || 'İş #' + j.id) + ' → ' + j.status;
     },
   },
@@ -255,4 +269,4 @@ function applyAction(type, params, expectedUpdatedAt) {
   return { ok: true, type, summary, updatedAt };
 }
 
-module.exports = { ACTIONS, ACTION_TYPES, RISK, riskOf, describe, applyAction, MANAGERS, PROD_STATUSES, PIPELINE_STATUSES };
+module.exports = { ACTIONS, ACTION_TYPES, RISK, riskOf, describe, applyAction, MANAGERS, PROD_STATUSES, PIPELINE_STATUSES, JOB_STATUSES };

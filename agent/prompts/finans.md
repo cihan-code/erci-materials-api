@@ -1,28 +1,25 @@
 ## Bu çıktı: FİNANS & NAKİT İZLEME
 
-Nakit akışını, tahsilatları, borçları ve sabit giderleri izle; tahsil edilmesi gereken parayı ve
-ödenmesi gereken borcu zamanında öne çıkar.
+Metrik tablosunun **FİNANS** bölümüne dayanarak nakit durumunu, tahsilatı, borçları ve sabit
+giderleri yönetime özetle. **Sayıları tablodan al, yenisini hesaplama.**
 
-### Süreç
-1. **Aylık nakit akışı** — son 3–4 ay gelir / gider / net. Trend yukarı mı aşağı mı. Bu ay aylık
-   hedefe karşı nerede.
-2. **Açık tahsilat (işlerden)** — her `status == Üretimde` iş için açık = tutar − kapora. Kapora = 0
-   işler ayrı liste (🔴) + toplam kaporasız açık; 500.000 TL eşiğini aşıyorsa escalation notu. Teslim
-   edilmiş ama tahsilatı eksik işler → hatırlatma.
-3. **Alacaklar (`debts`, Alacak)** — kalan = amount − paid_amount, yaşına göre. Tek müşteri toplam
-   alacağın %60'ından fazlaysa konsantrasyon riski notu.
-4. **Borçlar (`debts`, Borç)** — kalan bakiye, vade. Vadesi geçmiş → 🔴; ≤ 14 gün → 🟡.
-   Vergi/SGK/Bağkur borçlarını ayrı grupla (gecikince ceza).
-5. **Sabit giderler** — `paid_amount < amount` satırlar: ödenmemiş liste + toplam. Aylar birikmişse
-   not düş.
-6. **Nakit görünümü (kaba, "tahmin" işaretli):** (açık alacak + yakında tahsil edilebilir kapora) −
-   (vadesi 30 gün içindeki borç + ödenmemiş sabit gider). Pozitif/negatif işaret, kesin rakam iddiası
-   yok.
-7. Her madde: önerilen aksiyon + sorumlu (**Erdem Küçükarslan** — finans alanı) + öncelik.
+### Bloklar
+1. **İki metrik ayrı** — Sipariş Bedeli toplamı ve Tahsilat toplamı ayrı satır. "Ciro" deme.
+   Tahsilat verisinin hangi aydan başladığını belirt.
+2. **Aylık akış** — tablodan aylık gelir / gider / sabit gider / yönetim sonucu. Trend bir cümle.
+   "Yönetim sonucu" güvenilir değilse "≈" kullan, "net kâr" deme.
+3. **Alacak / Borç (debts)** — tablodaki açık alacak ve açık borç. **İşlerin bağlı tahsilatıyla
+   TOPLAMA (S1).** Vadesi geçmiş → 🔴, vade yakın → 🟡. Tek taraf toplam alacağın büyük kısmıysa
+   konsantrasyon riski notu (ama iki kaynağı birbirine ekleme).
+4. **İşlerin bağlı tahsilatı** — aktif işlerin sipariş bedeli ve bağlı tahsilatı. Bağlı tahsilatı 0
+   olanları işaretle ama "şu iş X TL borçlu" deme — sadece "bu işe bağlı tahsilat kaydı yok".
+5. **Sabit giderler** — tablodaki kalemler ve toplam. **"Ödenmedi" DEME** (ödeme durumu verisi
+   güvenilmez, S6). Sadece "aylık sabit gider yükü ~X TL".
+6. **Şüpheli maaş çift kaydı** — tabloda varsa yönetime bildir (otomatik düzeltme yok, S7).
+7. Her madde: önerilen aksiyon + sorumlu **Erdem Küçükarslan** + öncelik.
 
 ### Kalite çıtası
-- Her açık alacak/borç kalemi için yaş veya vade + önerilen aksiyon.
-- Kaporasız işler net listede ve toplam tutarıyla.
-- Konsantrasyon riski açıkça belirtilmiş.
+- Başta "Veri güveni" satırı (tablodaki maddelerden).
+- Alacak (debts) ve iş tahsilatı asla toplanmıyor.
+- Yönetim sonucu "kesin net kâr" olarak sunulmuyor.
 - Ajan ödeme/havale/fatura yapmaz veya tetiklemez.
-- Tahmini net akış "tahmin" olarak işaretli. Başta "Veri güveni" satırı.
