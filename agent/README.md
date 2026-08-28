@@ -44,18 +44,32 @@ Her rapor yalnız ihtiyacı olan domain sinyallerini alır (ör. `uretim-risk` �
   `set_job_status`, `delete_task` — panelde "Onayla" butonuyla uygulanır.
 - `ANTHROPIC_API_KEY` yalnız Render env — panel `index.html`'e veya git'e girmez.
 
-## Kurulum & test
+## Kurulum
+
+```
+Render → Environment: ANTHROPIC_API_KEY = sk-ant-...   (DATA_DIR=/data, API_KEY, CORS_ORIGIN zaten var)
+GitHub → repo secret: MERCI_API_KEY = panelin x-api-key'i
+```
+
+## Test — ÖNCE ücretsiz yol
+
+Her değişiklikte canlı API çağırmak = para. Bunun yerine:
 
 ```bash
-# Render → Environment: ANTHROPIC_API_KEY = sk-ant-...   (DATA_DIR=/data, API_KEY, CORS_ORIGIN zaten var)
-# GitHub → repo secret: MERCI_API_KEY = panelin x-api-key'i
+# 1) Ücretsiz duman testi — API'ye HİÇ gitmez (16 kontrol: sinyal, model yönlendirme,
+#    prompt kurulumu, aksiyon uygulama, usage log, act akışı)
+npm run smoke -- /yol/panel-snapshot.json
 
-# yerel
+# 2) Mock sunucu — tüm uçlar çalışır, sahte yanıt, $0
+DATA_DIR=./data npm run mock
+curl -X POST localhost:3000/api/agent/run?type=gunluk-brifing -H "x-api-key: $API_KEY"
+
+# 3) GERÇEK çağrı — yalnız çıktı KALİTESİ kontrol edilecekse, seyrek/toplu
 DATA_DIR=./data ANTHROPIC_API_KEY=sk-ant-... node agent/generate.js gunluk-brifing
-DATA_DIR=./data node server.js
-curl -X POST localhost:3000/api/agent/act -H 'content-type: application/json' \
-  -H "x-api-key: $API_KEY" -d '{"instruction":"Lady Crow üretimini kargoda göster"}'
 ```
+
+`AGENT_MOCK=1` yalnız yerelde; Render'da asla set edilmez → canlı akış her zaman gerçek.
+Bu makinede node yoksa: `export ELECTRON_RUN_AS_NODE=1; NODE="/Applications/Visual Studio Code.app/Contents/MacOS/Code"; "$NODE" test/smoke.js snapshot.json`
 
 ## Zamanlama
 
