@@ -68,7 +68,11 @@ curl -X POST localhost:3000/api/agent/run?type=gunluk-brifing -H "x-api-key: $AP
 DATA_DIR=./data ANTHROPIC_API_KEY=sk-ant-... node agent/generate.js gunluk-brifing
 ```
 
-`AGENT_MOCK=1` yalnız yerelde; Render'da asla set edilmez → canlı akış her zaman gerçek.
+**Güvenlik kilidi:** `AGENT_MOCK=1` production'da (Render `RENDER=true` veya `NODE_ENV=production`)
+ise `agent/claude.js` açık uyarı basıp `process.exit(1)` yapar — `server.js` claude.js'i eager
+require ettiği için uygulama `app.listen`'e gelmeden durur. Sahte brifingin canlıya yazılması
+imkânsız. Yerelde (RENDER yok) sadece uyarı verir, devam eder.
+
 Bu makinede node yoksa: `export ELECTRON_RUN_AS_NODE=1; NODE="/Applications/Visual Studio Code.app/Contents/MacOS/Code"; "$NODE" test/smoke.js snapshot.json`
 
 ## Zamanlama
