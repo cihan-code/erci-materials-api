@@ -20,8 +20,11 @@ Her sabah, canlı panel sinyallerinden yönetim için tek sayfalık brifing ve o
    5–8 görev.
 9. **Hedef Nabzı** — bu ayki ciro / net / iş sayısı / yeni müşteri, aylık hedefe karşı (% ilerleme).
    Ölçülemeyen metriği "ölçülemiyor" yaz.
-10. **📋 Günün Planı** — her yönetici için en fazla 5 öncelikli madde. Format:
-    `[öncelik] eylem — neden (panel referansı)`. Öncelik: 🔴 / 🟡 / 🟢.
+10. **📋 Günün Planı** — üç başlık: **Erdem (Finans)**, **Cihan (İşler & Üretim)**,
+    **Mert Kıvanç (Satış & Müşteri)**. Her biri için en fazla 5 öncelikli madde, o kişinin yetki
+    alanından. Format: `[öncelik] eylem — neden (panel referansı)`. Öncelik: 🔴 / 🟡 / 🟢.
+    Bir maddeyi yanlış kişiye yazma (tahsilat → Erdem, üretim gecikmesi → Cihan, fırsat takibi →
+    Mert Kıvanç).
 11. **💡 Yönetime Aksiyon Önerileri** — 3–6 madde; panelde olmayan ama veriden çıkan çıkarımlar
     (ör. tek müşteri konsantrasyon riski, kapora politikası).
 12. **Kapanış** — sonraki döngüde bakılacak kritik takipler.

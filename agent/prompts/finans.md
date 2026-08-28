@@ -18,7 +18,7 @@ Nakit akışını, tahsilatları, borçları ve sabit giderleri izle; tahsil edi
 6. **Nakit görünümü (kaba, "tahmin" işaretli):** (açık alacak + yakında tahsil edilebilir kapora) −
    (vadesi 30 gün içindeki borç + ödenmemiş sabit gider). Pozitif/negatif işaret, kesin rakam iddiası
    yok.
-7. Her madde: önerilen aksiyon + sorumlu (varsayılan: Cihan Berber) + öncelik.
+7. Her madde: önerilen aksiyon + sorumlu (**Erdem Küçükarslan** — finans alanı) + öncelik.
 
 ### Kalite çıtası
 - Her açık alacak/borç kalemi için yaş veya vade + önerilen aksiyon.

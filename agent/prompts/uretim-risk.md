@@ -13,8 +13,9 @@
    - 🟢 **Akışta:** yeterli süre var.
 3. `jobs` (status=Üretimde) ile eşleştir: kapora durumu, toplam tutar, resmi delivery_date.
 4. Her 🔴 ve 🟡 için: iş adı, müşteri, adet, aşama, est_delivery, gecikme günü; bilinen problem;
-   **kurtarma aksiyonu** (ne, kim — öneri; yeni gerçekçi teslim tarihi tahmini); gecikme > 3 gün ise
-   "müşteri bilgilendirilsin" öner.
+   **kurtarma aksiyonu** (ne yapılmalı; sorumlu = **Cihan Berber**, atölye/tedarikçi takibi onun
+   alanı; yeni gerçekçi teslim tarihi tahmini). Müşteriyle iletişim gerekiyorsa onu **Mert Kıvanç**a
+   yaz. Gecikme > 3 gün ise "müşteri bilgilendirilsin" öner.
 5. **Darboğaz analizi:** açık işlerin aşama dağılımı; bir aşamada yığılma varsa kapasite/tedarikçi
    notu.
 
