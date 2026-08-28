@@ -472,5 +472,46 @@ app.post('/api/agent/run', checkApiKey, (req, res) => {
   }
 });
 
+// ---- API maliyet gunlugu: her Anthropic cagrisi (model, token, USD) ----
+app.get('/api/agent/usage', checkApiKey, (req, res) => {
+  try {
+    res.json(agentStore.readUsage({ limit: Math.min(500, parseInt(req.query.limit, 10) || 100) }));
+  } catch (e) {
+    res.status(500).json({ error: 'Kullanim gunlugu okunamadi.' });
+  }
+});
+
+// ---- Ajana serbest metin komut: Claude aksiyonlari cikarir, backend uygular ----
+// safe aksiyonlar hemen uygulanir; finansal/silme/kritik aksiyonlar "pending" doner,
+// kullanici /api/agent/act/confirm ile onaylar (ikinci Claude cagrisi YOK).
+app.post('/api/agent/act', checkApiKey, async (req, res) => {
+  const instruction = (req.body && req.body.instruction) || '';
+  if (!instruction.trim()) return res.status(400).json({ error: 'instruction gerekli.' });
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.status(503).json({ error: 'ANTHROPIC_API_KEY tanimli degil.' });
+  }
+  try {
+    const { interpretAndAct } = require('./agent/act');
+    const out = await interpretAndAct(instruction);
+    res.json(out);
+  } catch (e) {
+    console.error('[api/agent/act] hata:', e && e.message || e);
+    res.status(400).json({ error: String(e && e.message || e) });
+  }
+});
+
+// Onaylanmis tek aksiyonu uygula (Claude cagrisi yok).
+app.post('/api/agent/act/confirm', checkApiKey, (req, res) => {
+  const action = req.body && req.body.action;
+  if (!action || !action.type) return res.status(400).json({ error: 'action.type gerekli.' });
+  try {
+    const { confirmAction } = require('./agent/act');
+    res.json(confirmAction(action));
+  } catch (e) {
+    const code = e && e.code === 'CONFLICT' ? 409 : 400;
+    res.status(code).json({ error: String(e && e.message || e) });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('Merci Tekstil Materyaller API port ' + PORT + ' uzerinde calisiyor. DATA_DIR=' + DATA_DIR));
