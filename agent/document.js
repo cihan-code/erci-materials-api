@@ -68,6 +68,27 @@ function parseJsonLoose(text) {
   return JSON.parse(t);
 }
 
+// tuzel kisi eki (sirket / kurum / kargo vb.) - taraf adinda bunlardan biri varsa o parca taraftir.
+// Turkce-i normalize edilmis metne karsi test edilir.
+const CO_SUFFIX_RE = /(\ba\.?\s?s\.?\b|anonim\s+sirket|ltd\.?\s?sti\.?|limited\s+sirket|\bsan\.?\s+(ve\s+)?tic\.?|sanayi\s+ve\s+tic|ith\.?\s?ihr|ithalat\s+ihracat|dis\s+tic|\bholding\b|nakliyat|lojistik|tasimacilik|\bkargo\b|pazarlama|dagitim|musavirlik|mumessillik|\binsaat\b|\btekstil\b|\bgida\b|dernegi|vakfi|\bkoop\b|birligi|odasi|belediyesi|universitesi|mudurlugu|bakanligi|doner\s+sermaye|isletmesi|koll\.?\s?sti|kom\.?\s?sti)/;
+function normTrLoose(s) {
+  return String(s || '').toLocaleLowerCase('tr')
+    .replace(/[İıI]/g, 'i').replace(/ş/g, 's').replace(/ğ/g, 'g').replace(/ü/g, 'u')
+    .replace(/ö/g, 'o').replace(/ç/g, 'c').replace(/\s+/g, ' ').trim();
+}
+
+// "MERCİ TEKSTİL LTD ŞTİ / Cihan Berber" -> "MERCİ TEKSTİL LTD ŞTİ"
+function cleanPartyName(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  const parts = s.split(/\s*(?:\/|\||·|—|–|\n)\s*|\s+adına\s+|\s+nam[ıi]na\s+|\s+vekaleten\s+/i)
+    .map((x) => x.trim()).filter(Boolean);
+  if (parts.length <= 1) return s;
+  const co = parts.find((p) => CO_SUFFIX_RE.test(normTrLoose(p)));
+  return co || parts[0];
+}
+
 function toNum(v) {
   if (v == null) return null;
   const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/\./g, '').replace(',', '.').replace(/[^\d.-]/g, ''));
@@ -87,6 +108,13 @@ function normalizeExtraction(raw) {
   const dr = ['incoming', 'outgoing', 'unknown'];
   o.document_type = dt.includes(o.document_type) ? o.document_type : 'unknown';
   o.direction = dr.includes(o.direction) ? o.direction : (o.document_type === 'production_form' ? null : 'unknown');
+
+  // taraf adlari: "/", "|", yeni satir, "adina/vekaleten" ile ayrilmis kisi adini at,
+  // tuzel-kisi eki olan parcayi taraf kabul et (imza/operator adini eleme guvenlik agi)
+  if (o.document_type !== 'production_form') {
+    o.sender_name = cleanPartyName(o.sender_name);
+    o.receiver_name = cleanPartyName(o.receiver_name);
+  }
 
   // finans
   if (o.total == null && o.amount != null) o.total = o.amount;
@@ -126,19 +154,54 @@ function buildSystem() {
     'document_type: "payment_receipt" | "invoice" | "production_form" | "unknown".',
     '',
     '— DEKONT/FATURA ise:',
-    '  direction: para Merci\'ye geliyorsa "incoming", Merci\'den gidiyorsa "outgoing", belirsizse "unknown".',
-    '  Tutarlar SAYI (1.234,56 -> 1234.56). currency genelde "TRY". IBAN boşluksuz. Tarih YYYY-MM-DD.',
-    '  Fatura: invoice_number, subtotal (matrah), vat_amount (KDV), total, due_date.',
-    '  Dekont: reference_number (dekont/işlem/referans/FAST no), amount = total.',
+    '  Tutarlar SAYI (1.234,56 -> 1234.56; bazı PDF\'lerde İngiliz formatı 2,500.00 -> 2500).',
+    '  currency genelde "TRY". IBAN boşluksuz. Tarih YYYY-MM-DD.',
+    '  document_type ayrımı: banka logosu + "DEKONT / İŞLEM BİLGİLERİ" + Sorgu/Referans No + "e-Dekont',
+    '   yerine geçmez" => payment_receipt.  Kalem tablosu + Matrah + Hesaplanan KDV + ETTN => invoice.',
     '',
-    '  TARAF ADLARI (sender_name / receiver_name) — DİKKAT:',
-    '   • Gönderen/Alıcı etiketleri: "Gönderen", "Alıcı", "Gönderen Hesap", "Alıcı Hesap",',
-    '     "Ad-Soyad/Unvan", "Karşı Taraf", "Alıcı Ünvanı". Parayı GÖNDEREN sender, ALAN receiver.',
-    '   • Bir tarafta HEM şirket ünvanı (LTD, LTD.ŞTİ, A.Ş, AŞ, SAN, TİC, TİCARET, TEKSTİL, KARGO,',
-    '     LOJİSTİK, İNŞAAT vb.) HEM kişi adı yazıyorsa: o tarafın adı = ŞİRKET ÜNVANI.',
-    '     Kişi adı sadece hesap sahibi/yetkilidir — sender_name/receiver_name\'e kişi adını YAZMA.',
-    '   • Örn. "MERCİ TEKSTİL SAN. TİC. LTD. ŞTİ. / Cihan Berber" -> ad = "MERCİ TEKSTİL SAN. TİC. LTD. ŞTİ."',
-    '   • Karşı taraf gerçekten bir kişiyse (şirket ünvanı yok) kişi adını yaz.',
+    '  YÖN (direction) — şu öncelik sırasıyla:',
+    '   1. IBAN/VKN Merci ile eşleşiyorsa kesin (backend ayrıca kontrol eder, yine de doğru oku).',
+    '   2. "B/A" sütunu (İş Bankası/Enpara hesap hareketi): B=Borç=outgoing, A=Alacak=incoming.',
+    '   3. Başlık/fiil: "FAST GÖNDERİMİ","GİDEN FAST","HESAPTAN FAST","Hesaptan Havale","Giden EFT",',
+    '      "Hesabınızdan ... Çekilmiştir","borç kaydedilmiştir" => outgoing.  "Gelen FAST/EFT",',
+    '      "Hesabınıza ... yatmıştır","alacak kaydedilmiştir","Lehinize" => incoming.',
+    '   4. Negatif/"-" önekli tutar => outgoing.',
+    '   5. Masraf/komisyon/BSMV BU hesaptan alınmışsa hesap gönderendir => outgoing.',
+    '   6. Dekont sahibi ("Sayın ...","Müşteri Adı","MÜŞTERİ ÜNVANI", en üstteki IBAN bloğu):',
+    '      sahip=gönderen => outgoing, sahip=alıcı => incoming.',
+    '   Hiçbiri yoksa direction="unknown", confidence.direction<=0.4.',
+    '',
+    '  TARAF ADLARI (sender_name = parayı gönderen, receiver_name = parayı alan):',
+    '   • Etiketler: "Gönderen/Alıcı", "Gönderen Adı/Alıcı Adı", "Ad-Soyad/Unvan", "Ünvan",',
+    '     "Borçlu/Alacaklı", "Lehdar" (=alıcı), "Gönderilen Kişi". Değerin İÇERİĞİNE bak, etikete değil',
+    '     (bir banka "Gönderen Kişi" yazıp değere "... LTD. ŞTİ." koyabiliyor).',
+    '   • Bir taraf değerinde tüzel-kişi eki varsa (A.Ş, LTD.ŞTİ, SAN.TİC, İTH.İHR, HOLDİNG, NAKLİYAT,',
+    '     LOJİSTİK, KARGO, TAŞIMACILIK, İNŞAAT, TEKSTİL, GIDA, DERNEĞİ, VAKFI, BELEDİYESİ, ÜNİVERSİTESİ,',
+    '     MÜDÜRLÜĞÜ, DÖNER SERMAYE ...) o metnin TAMAMI taraf adıdır.',
+    '   • Aynı tarafta hem şirket ünvanı hem kişi adı varsa ("/","-","\\n","adına","vekaleten" ile',
+    '     ayrılmış) => taraf = ŞİRKET. Kişi adını sender_name/receiver_name\'e YAZMA.',
+    '   • ASLA taraf sayma: "İşlemi Yapan","Talimatı Veren","Kullanıcı Adı","Personel","Hazırlayan",',
+    '     "Onaylayan", imza satırı. Bunlar operatör.',
+    '   • Karşı taraf gerçekten kişiyse (hiç şirket eki yok) kişi adını yaz.',
+    '   • Kargo/kurye ödemesinde alıcı = kargo firmasının tüzel ünvanı (şube görevlisi değil).',
+    '',
+    '  sender_tax_number / receiver_tax_number: sadece o tarafa ait AÇIKÇA yazılı numara.',
+    '   10 hane = VKN (işletme), 11 hane = TCKN (kişi). Bireysel transferde genelde YOK => null.',
+    '',
+    '  reference_number önceliği: "Sorgu No/FAST Sorgu No" > "İşlem Referansı/İŞLEM REF" >',
+    '   "Referans No" > "Dekont No" > "İşlem No" > "Sıra No/Fiş No". KULLANMA: "Müşteri No",',
+    '   "Kolay Adres", "Mesaj Kodu/FAST Mesaj Kodu", "Mesaj Türü".',
+    '',
+    '  amount = net transfer tutarı. HARİÇ TUT: Masraf Tutarı, Komisyon, BSMV, Havale/EFT Ücreti,',
+    '   Mesaj Ücreti. "GİDEN FAST TUTARI" / "Aktarılan Tutar" doğru; "TOPLAM TAHSİLAT TUTARI" masraf',
+    '   dahil olabilir. Yazıyla yazılı tutar varsa çapraz kontrol et.',
+    '',
+    '  Fatura: invoice_number, subtotal (matrah), vat_amount (hesaplanan KDV), total (vergiler dahil),',
+    '   due_date (son ödeme/vade).',
+    '',
+    '  description: gerçek kullanıcı notu ("AÇIKLAMA:" sonrası veya son "/" sonrası). MATBU metinleri',
+    '   ATLA: "YUKARIDAKİ TUTAR ... KAYDEDİLMİŞTİR", "e-Dekont yerine geçmez", "(EFT) ÜCRETİ - FAST",',
+    '   "havale işlemi gerçekleştirilmiştir".',
     '  Örnek: ' + EXAMPLE_FINANCE,
     '',
     '— ÜRETİM FORMU ise (Merci iş emri; genelde "Sipariş No", "MRC-XX", beden dağılımı, baskı/nakış bölgeleri içerir):',
@@ -169,6 +232,7 @@ function mockExtraction(rec) {
   if (/uretim.?form|production.?form|is.?emri|siparis.?form|prodform/.test(n)) {
     name = /istisna|exception|haric|yok/.test(n) ? 'extract-production-form-exception.json' : 'extract-production-form.json';
   }
+  else if (/vakif.?kargo|kargo.?vakif|imza|signatory|operator/.test(n)) name = 'extract-vakif-cargo.json';
   else if (/kargo|cargo/.test(n)) name = 'extract-outgoing-cargo.json';
   else if (/giden|outgoing|odenen|payment-out/.test(n)) name = 'extract-outgoing-receipt.json';
   else if (/alis|purchase|gelen-fatura|incoming-invoice/.test(n)) name = 'extract-purchase-invoice.json';

@@ -297,6 +297,14 @@ async function main() {
   ok('kategori önerisi açıklamadan: "kargo gönderi bedeli" -> Kargo/Kurye', () => {
     assert.strictEqual(rCargo.classification.categoryHint, 'Kargo/Kurye');
   });
+  const upVak = docs.saveDocument(fakeBuf('vak'), 'vakif-kargo-imza-dekont.png', 'image/png');
+  const rVak = await extractDocument(upVak.id);
+  ok('imza/operatör adı ayıklanır: "... LTD. ŞTİ. / MURAT DEMİR" -> şirket', () => {
+    assert.strictEqual(rVak.extraction.sender_name, 'MERCİ TEKSTİL SANAYİ VE TİCARET LTD. ŞTİ.');
+    assert.strictEqual(rVak.classification.finalDirection, 'outgoing');
+    assert.strictEqual(rVak.classification.counterparty.name, 'YURTİÇİ KARGO SERVİSİ A.Ş.');
+    assert.strictEqual(rVak.classification.categoryHint, 'Kargo/Kurye');
+  });
   ok('suggestCategory: kapora/kalan/kira/maaş/vergi', () => {
     assert.strictEqual(suggestCategory('incoming', 'kapora ödemesi'), 'Kapora');
     assert.strictEqual(suggestCategory('incoming', 'kalan bakiye'), 'Kalan Tahsilat');

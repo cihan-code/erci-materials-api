@@ -16,25 +16,29 @@ function suggestCategory(direction, text) {
   if (!t) return null;
 
   if (direction === 'incoming') {
-    if (/(kapora|kaparo|avans|pesinat|on ?odeme|ilk ?odeme|ilk ?taksit|depozito)/.test(t)) return 'Kapora';
-    if (/(kalan|bakiye|son ?odeme|kapan(is|ış)|hesap ?kapama|kalan ?tahsilat)/.test(t)) return 'Kalan Tahsilat';
-    if (/(pesin|tamami|tamamı|full ?odeme)/.test(t)) return 'Peşin Ödeme';
-    if (/(is ?geliri|siparis ?bedeli|urun ?bedeli|hizmet ?bedeli)/.test(t)) return 'İş Geliri';
+    if (/(kapora|kaparo|rezervasyon|booking)/.test(t)) return 'Kapora';
+    if (/(avans|siparis ?avans)/.test(t)) return 'Kapora';
+    if (/(pesinat|on ?odeme|onodeme|ilk ?odeme|ilk ?taksit|depozito|teminat|guvence)/.test(t)) return 'Kapora';
+    if (/(kalan|bakiye|son ?odeme|son ?taksit|kapan(is|ış)|hesap ?kapama|kalan ?tahsilat|mahsuben|cari ?kapama)/.test(t)) return 'Kalan Tahsilat';
+    if (/(pesin ?odeme|pesin|tamami|tamamı|full ?odeme|tek ?cekim)/.test(t)) return 'Peşin Ödeme';
+    if (/(is ?geliri|siparis ?bedeli|siparis ?odemesi|urun ?bedeli|hizmet ?bedeli|mal ?bedeli|hakedis|numune ?bedeli)/.test(t)) return 'İş Geliri';
+    if (/(iade|geri ?odeme|fazla ?odeme)/.test(t)) return 'Diğer Gelir';
     return null; // -> 'Tahsilat' (backend notr varsayilan)
   }
 
   // outgoing (gider)
-  if (/(kargo|kurye|gonderi|sevk(iyat)?|lojistik|teslimat ?ucreti|nakliye|tasima)/.test(t)) return t.includes('nakliye') || t.includes('tasima') ? 'Nakliye' : 'Kargo/Kurye';
-  if (/(kumas|akrilik|penye|kaskorse|dokuma|iplik|ham ?bez|1x1|2x1|ribana|susen|selanik)/.test(t)) return 'Kumaş';
-  if (/(baski|nakis|serigraf|transfer ?baski|dtf|dtg|dijital ?baski|sublimasyon|patch)/.test(t)) return 'Baskı/Nakış';
+  if (/(nakliye|tasima|tasıma|navlun|sevk(iyat)?)/.test(t)) return 'Nakliye';
+  if (/(kargo|kurye|gonderi ?ucret|gönderi ?ucret|kapida ?odeme|kapıda ?odeme|teslimat ?ucret)/.test(t)) return 'Kargo/Kurye';
+  if (/(kumas|kumaş|akrilik|penye|kaskorse|kaşkorse|dokuma|iplik|ham ?bez|ribana|susen|selanik|aksesuar|fermuar|dugme|düğme|hammadde)/.test(t)) return 'Kumaş';
+  if (/(baski|baskı|nakis|nakış|serigraf|transfer ?baski|dtf|dtg|dijital ?baski|sublimasyon|patch)/.test(t)) return 'Baskı/Nakış';
   if (/(kesim)/.test(t)) return 'Kesim';
   if (/(dikim|konfeksiyon|fason|overlok|remayoz)/.test(t)) return 'Dikim';
-  if (/(utu|paket|ambalaj|poset|koli|etiket)/.test(t)) return 'Ütü-Paket';
-  if (/(kira|isyeri ?kira|depo ?kira|ofis ?kira)/.test(t)) return 'Kira';
-  if (/(maas|bordro|sgk|prim|avans ?odeme|personel|ucret ?odeme)/.test(t)) return 'Maaş';
-  if (/(vergi|kdv|muhtasar|beyanname|stopaj|damga|mtv|gecici ?vergi)/.test(t)) return 'Vergi';
-  if (/(isci(lik)?|yevmiye|gundelik|tadilat ?isci)/.test(t)) return 'İşçilik';
-  if (/(borc ?odeme|kredi ?taksit|kredi ?odeme|senet|cek ?odeme)/.test(t)) return 'Borç Ödemesi';
+  if (/(utu|ütü|paketleme|paket ?bedeli|ambalaj|poset|poşet|koli|etiket ?bedeli|kutu ?bedeli)/.test(t)) return 'Ütü-Paket';
+  if (/(kira|isyeri ?kira|işyeri ?kira|depo ?kira|ofis ?kira|dukkan ?kira|dükkan ?kira)/.test(t)) return 'Kira';
+  if (/(maas|maaş|bordro|sgk|prim|personel ?odeme|ucret ?odeme|huzur ?hakki|mesai)/.test(t)) return 'Maaş';
+  if (/(vergi|kdv|muhtasar|beyanname|stopaj|damga|mtv|gecici ?vergi|geçici ?vergi|harc|harç|ba-bs)/.test(t)) return 'Vergi';
+  if (/(iscilik|işçilik|yevmiye|gundelik|gündelik)/.test(t)) return 'İşçilik';
+  if (/(borc ?odeme|borç ?odeme|borc ?kapama|kredi ?taksit|kredi ?odeme|senet|cek ?odeme|çek ?odeme|odunc|ödünç)/.test(t)) return 'Borç Ödemesi';
   return null; // -> 'Diğer'
 }
 

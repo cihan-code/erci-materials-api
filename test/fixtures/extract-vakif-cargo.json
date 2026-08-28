@@ -1,0 +1,21 @@
+{
+  "document_type": "payment_receipt",
+  "direction": "outgoing",
+  "date": "2026-08-20",
+  "amount": 18750.5,
+  "currency": "TRY",
+  "sender_name": "MERCİ TEKSTİL SANAYİ VE TİCARET LTD. ŞTİ. / MURAT DEMİR",
+  "receiver_name": "YURTİÇİ KARGO SERVİSİ A.Ş.",
+  "sender_iban": "TR111122223333444455556666",
+  "receiver_iban": "TR000001500158000000123456",
+  "sender_tax_number": "6160906794",
+  "receiver_tax_number": null,
+  "invoice_number": null,
+  "reference_number": "2022003572846205",
+  "description": "Ağustos ayı kargo cari ödemesi",
+  "subtotal": null,
+  "vat_amount": null,
+  "total": 18750.5,
+  "due_date": null,
+  "confidence": { "document_type": 0.96, "direction": 0.9, "amount": 0.97 }
+}
