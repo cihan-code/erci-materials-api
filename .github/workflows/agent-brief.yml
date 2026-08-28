@@ -1,0 +1,87 @@
+name: Yonetim Ajani brifing
+
+# Her sabah 04:00 UTC = 07:00 Istanbul. Pazartesi ayrica haftalik review, ayin 1'i ayrica aylik rapor.
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      type:
+        description: "Uretilecek cikti tipi"
+        required: true
+        default: gunluk-brifing
+        type: choice
+        options:
+          - gunluk-brifing
+          - uretim-risk
+          - satis-takip
+          - finans
+          - haftalik-review
+          - aylik-rapor
+
+concurrency:
+  group: yonetim-ajani-brief
+  cancel-in-progress: false
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    env:
+      API_BASE: https://erci-materials-api.onrender.com
+      API_KEY: ${{ secrets.MERCI_API_KEY }}
+    steps:
+      - name: Hangi ciktilar uretilecek
+        id: plan
+        run: |
+          if [ -n "${{ github.event.inputs.type }}" ]; then
+            echo "types=${{ github.event.inputs.type }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          TYPES="gunluk-brifing"
+          DOW=$(date -u +%u)   # 1=Pazartesi
+          DOM=$(date -u +%d)
+          [ "$DOW" = "1" ] && TYPES="haftalik-review $TYPES"
+          [ "$DOM" = "01" ] && TYPES="aylik-rapor $TYPES"
+          echo "types=$TYPES" >> "$GITHUB_OUTPUT"
+          echo "Uretilecek: $TYPES"
+
+      - name: Render servisini uyandir
+        run: |
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -m 60 "$API_BASE/" || true)
+            echo "deneme $i -> HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 15
+          done
+          echo "Render uyanmadi ama yine de devam ediyoruz." >&2
+
+      - name: Brifingleri uret
+        run: |
+          set -e
+          for T in ${{ steps.plan.outputs.types }}; do
+            echo "::group::$T"
+            start=$(curl -s -m 120 -X POST "$API_BASE/api/agent/run?type=$T" \
+              -H "x-api-key: $API_KEY")
+            echo "run yaniti: $start"
+            case "$start" in
+              *'"started":true'*) : ;;
+              *) echo "run baslamadi: $start" >&2; exit 1 ;;
+            esac
+            # status.running false olana kadar bekle (max ~5 dk)
+            for i in $(seq 1 60); do
+              sleep 5
+              st=$(curl -s -m 30 "$API_BASE/api/agent/status" -H "x-api-key: $API_KEY")
+              case "$st" in
+                *'"running":false'*)
+                  echo "bitti: $st"
+                  case "$st" in
+                    *'"lastError":null'*) echo "OK: $T" ;;
+                    *) echo "uretim hatasi: $st" >&2; exit 1 ;;
+                  esac
+                  break
+                  ;;
+              esac
+              [ "$i" = "60" ] && { echo "zaman asimi: $T" >&2; exit 1; }
+            done
+            echo "::endgroup::"
+          done

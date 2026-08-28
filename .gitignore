@@ -1,0 +1,6 @@
+node_modules/
+# Local runtime data (panel-data.json, agent outputs, backups) — never commit business data
+data/
+*.log
+.env
+.env.*

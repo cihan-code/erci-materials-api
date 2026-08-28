@@ -13,6 +13,9 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+// Yonetim Ajani cikti deposu + brifing uretici (kendi ayri kovasi; /api/paneldata'ya dokunmaz).
+const agentStore = require('./agent/store');
+
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const API_KEY = process.env.API_KEY || '';
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
@@ -398,6 +401,75 @@ app.delete('/api/materials/:folder/:id', checkApiKey, (req, res) => {
   if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   saveMeta(slug, meta.filter(m => m.id !== req.params.id));
   res.json({ ok: true });
+});
+
+// ---- Yonetim Ajani ciktilari (gunluk brifing, uretim risk, finans, ...) ----
+// Ajan SADECE bu kovaya yazar. Panel is verisi (/api/paneldata) ajan icin salt-okunur.
+agentStore.ensureAgentDirs();
+
+// Meta listesi (markdown haric). ?type= ve ?limit= ile filtre.
+app.get('/api/agent/outputs', checkApiKey, (req, res) => {
+  try {
+    res.json(agentStore.listOutputs({ type: req.query.type, limit: req.query.limit }));
+  } catch (e) {
+    res.status(500).json({ error: 'Ajan ciktilari okunamadi.' });
+  }
+});
+
+// O tipteki en yeni cikti (panelin varsayilan gorunumu). ?type= zorunlu degil.
+app.get('/api/agent/latest', checkApiKey, (req, res) => {
+  const rec = agentStore.getLatest(req.query.type);
+  if (!rec) return res.status(404).json({ error: 'Bu tipte henuz cikti yok.' });
+  res.json(rec);
+});
+
+// Ajan calisma durumu ("hazirlaniyor..." gostergesi icin).
+app.get('/api/agent/status', checkApiKey, (req, res) => {
+  res.json(agentStore.readStatus());
+});
+
+// Tek ciktinin tam metni.
+app.get('/api/agent/outputs/:id', checkApiKey, (req, res) => {
+  const rec = agentStore.getOutput(req.params.id);
+  if (!rec) return res.status(404).json({ error: 'Cikti bulunamadi.' });
+  res.json(rec);
+});
+
+// Disaridan hazir bir markdown ciktisini kaydet (elle calistirilan Claude Code dongusunun
+// publish_output.sh'i buraya POST eder). generate.js kendi kaydini dogrudan store ile yapar.
+app.post('/api/agent/outputs', checkApiKey, (req, res) => {
+  const { type, title, date, markdown, meta } = req.body || {};
+  try {
+    const rec = agentStore.saveAgentOutput({ type, title, date, markdown, meta });
+    res.json({ ok: true, id: rec.id, type: rec.type, date: rec.date });
+  } catch (e) {
+    res.status(400).json({ error: String(e && e.message || e) });
+  }
+});
+
+// Brifing uretimini baslat. Anthropic cagrisi 20-60 sn surebilir; async baslatip hemen doneriz,
+// panel /api/agent/status'u poll eder.
+app.post('/api/agent/run', checkApiKey, (req, res) => {
+  const type = (req.query.type || req.body && req.body.type || 'gunluk-brifing');
+  if (!agentStore.OUTPUT_TYPES.includes(type)) {
+    return res.status(400).json({ error: 'Gecersiz tip: ' + type });
+  }
+  const status = agentStore.readStatus();
+  if (status.running) {
+    return res.status(409).json({ error: 'Ajan zaten calisiyor.', status });
+  }
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.status(503).json({ error: 'ANTHROPIC_API_KEY tanimli degil - otomatik uretim kapali.' });
+  }
+  // Isteği hemen yanitla, uretimi arka planda yap.
+  res.json({ started: true, type });
+  try {
+    const { generate } = require('./agent/generate');
+    generate(type).catch((e) => console.error('[api/agent/run] uretim hatasi:', e && e.message || e));
+  } catch (e) {
+    console.error('[api/agent/run] generate yuklenemedi:', e && e.message || e);
+    agentStore.writeStatus({ running: false, lastError: String(e && e.message || e) });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
