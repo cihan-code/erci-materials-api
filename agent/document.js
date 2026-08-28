@@ -129,7 +129,16 @@ function buildSystem() {
     '  direction: para Merci\'ye geliyorsa "incoming", Merci\'den gidiyorsa "outgoing", belirsizse "unknown".',
     '  Tutarlar SAYI (1.234,56 -> 1234.56). currency genelde "TRY". IBAN boşluksuz. Tarih YYYY-MM-DD.',
     '  Fatura: invoice_number, subtotal (matrah), vat_amount (KDV), total, due_date.',
-    '  Dekont: reference_number (dekont no), amount = total.',
+    '  Dekont: reference_number (dekont/işlem/referans/FAST no), amount = total.',
+    '',
+    '  TARAF ADLARI (sender_name / receiver_name) — DİKKAT:',
+    '   • Gönderen/Alıcı etiketleri: "Gönderen", "Alıcı", "Gönderen Hesap", "Alıcı Hesap",',
+    '     "Ad-Soyad/Unvan", "Karşı Taraf", "Alıcı Ünvanı". Parayı GÖNDEREN sender, ALAN receiver.',
+    '   • Bir tarafta HEM şirket ünvanı (LTD, LTD.ŞTİ, A.Ş, AŞ, SAN, TİC, TİCARET, TEKSTİL, KARGO,',
+    '     LOJİSTİK, İNŞAAT vb.) HEM kişi adı yazıyorsa: o tarafın adı = ŞİRKET ÜNVANI.',
+    '     Kişi adı sadece hesap sahibi/yetkilidir — sender_name/receiver_name\'e kişi adını YAZMA.',
+    '   • Örn. "MERCİ TEKSTİL SAN. TİC. LTD. ŞTİ. / Cihan Berber" -> ad = "MERCİ TEKSTİL SAN. TİC. LTD. ŞTİ."',
+    '   • Karşı taraf gerçekten bir kişiyse (şirket ünvanı yok) kişi adını yaz.',
     '  Örnek: ' + EXAMPLE_FINANCE,
     '',
     '— ÜRETİM FORMU ise (Merci iş emri; genelde "Sipariş No", "MRC-XX", beden dağılımı, baskı/nakış bölgeleri içerir):',
@@ -160,6 +169,7 @@ function mockExtraction(rec) {
   if (/uretim.?form|production.?form|is.?emri|siparis.?form|prodform/.test(n)) {
     name = /istisna|exception|haric|yok/.test(n) ? 'extract-production-form-exception.json' : 'extract-production-form.json';
   }
+  else if (/kargo|cargo/.test(n)) name = 'extract-outgoing-cargo.json';
   else if (/giden|outgoing|odenen|payment-out/.test(n)) name = 'extract-outgoing-receipt.json';
   else if (/alis|purchase|gelen-fatura|incoming-invoice/.test(n)) name = 'extract-purchase-invoice.json';
   else if (/satis|sales|kesilen|outgoing-invoice/.test(n)) name = 'extract-sales-invoice.json';
@@ -273,11 +283,32 @@ function classify(ext) {
     }
   }
 
+  const counterparty = pickCounterparty(ext, finalDirection);
+  const categoryHint = finalType === 'payment_receipt'
+    ? require('./financeCategory').suggestCategory(finalDirection, [ext.description, counterparty.name].filter(Boolean).join(' '))
+    : null;
+
   return {
     finalType, finalDirection, method, needsUserDecision, reason,
     modelSuggestion: { type: modelType, direction: modelDir },
     evidence: ev,
+    counterparty,
+    categoryHint,
   };
+}
+
+// Karsi taraf = Merci OLMAYAN taraf. Panel bunu "Firma / Kişi" alanina koyar.
+// Yon biliniyorsa net; bilinmiyorsa Merci olmayan tarafi tahmin et.
+function pickCounterparty(ext, dir) {
+  const S = { name: ext.sender_name || null, iban: ext.sender_iban || null, taxNumber: ext.sender_tax_number || null };
+  const R = { name: ext.receiver_name || null, iban: ext.receiver_iban || null, taxNumber: ext.receiver_tax_number || null };
+  if (dir === 'incoming') return S; // para gonderen = karsi taraf
+  if (dir === 'outgoing') return R; // para alan = karsi taraf
+  const sCo = cp.isCompanyName(ext.sender_name) || cp.isCompanyIban(ext.sender_iban) || cp.isCompanyVkn(ext.sender_tax_number);
+  const rCo = cp.isCompanyName(ext.receiver_name) || cp.isCompanyIban(ext.receiver_iban) || cp.isCompanyVkn(ext.receiver_tax_number);
+  if (sCo && !rCo) return R;
+  if (rCo && !sCo) return S;
+  return { name: ext.sender_name || ext.receiver_name || null, iban: null, taxNumber: null };
 }
 
 // Kullanici dostu sinif etiketi
@@ -356,7 +387,10 @@ function recomputeProdForm(id, patch) {
     special_instructions: Array.isArray(p.special_instructions) ? p.special_instructions : rec.extraction.special_instructions,
   });
   const qty = pf.computeQuantities(merged);
-  const match = pf.matchCostAndPrice(ct, merged, qty, p.chosenSizes || null);
+  // bnItems: kullanicinin girdigi baski/nakis kalemleri (bir bolgede birden fazla olabilir).
+  // Eski chosenSizes objesi de kabul edilir (geriye donuk uyum).
+  const bn = Array.isArray(p.bnItems) ? p.bnItems : (p.chosenSizes || null);
+  const match = pf.matchCostAndPrice(ct, merged, qty, bn);
   const prodComputation = { quantities: qty, costMatch: match, recomputedAt: new Date().toISOString() };
   return docs.updateDocument(id, { prodComputation, prodEdits: p });
 }

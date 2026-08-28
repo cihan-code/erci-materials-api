@@ -57,7 +57,8 @@ function calcTemplateCostItems(ct, templateName, totalQty, extraNames, baskiNaki
     const dict = it.type === 'baski' ? (ct.baski || {}) : (ct.nakis || {});
     const label = it.type === 'baski' ? 'Baskı' : 'Nakış';
     const q = it.qty != null ? it.qty : totalQty;
-    if (dict[it.size] != null) items.push({ category: label + ' (' + it.size + (it.area ? ' - ' + it.area : '') + ', ' + q + ' adet)', amount: round2(dict[it.size] * q) });
+    const tag = it.label || it.area || '';
+    if (dict[it.size] != null) items.push({ category: label + ' (' + (tag ? tag + ' - ' : '') + it.size + ', ' + q + ' adet)', amount: round2(dict[it.size] * q) });
   });
   return items;
 }

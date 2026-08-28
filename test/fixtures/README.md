@@ -15,6 +15,7 @@ Gerçek Anthropic çağrısı yapılmaz.
 | `extract-sales-invoice.json` | Merci müşteriye fatura kesmiş — satıcı VKN Merci |
 | `extract-ambiguous.json` | IBAN/VKN okunamadı, model güveni düşük |
 | `extract-conflict.json` | IBAN kanıtı "incoming" ama model "outgoing" dedi → kullanıcıya sor |
+| `extract-outgoing-cargo.json` | Merci → kargo firmasına ödeme; gönderen kişi adı (Cihan Berber) ama karşı taraf = "BASİT KARGO LOJİSTİK A.Ş." + kategori önerisi Kargo/Kurye |
 | `extract-production-form.json` | üretim formu (istisna yok) — finansa gitmez, İş Takip'e aktarılır |
 | `extract-production-form-exception.json` | üretim formu, "2 L bedende sırt baskısı yok" → sırt baskı 18, göğüs/kol 20 |
 

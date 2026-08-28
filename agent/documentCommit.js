@@ -16,9 +16,9 @@
 const store = require('./store');
 const docs = require('./documents');
 const inv = require('./invoices');
+const { INCOME_CATS, EXPENSE_CATS } = require('./financeCategory');
 
 const r2 = inv.round2;
-const INCOME_CATS = ['Kapora', 'Kalan Tahsilat', 'Peşin Ödeme', 'Tahsilat', 'İş Geliri', 'Diğer Gelir'];
 
 function num(v, label) {
   const n = Number(v);
@@ -139,7 +139,9 @@ function commitDocument(id, input) {
       }
     } else {
       const gid = nextId(data.expenses);
-      const cat = links.debt_id ? 'Borç Ödemesi' : (input.financeCategory || 'Diğer');
+      const cat = links.debt_id
+        ? 'Borç Ödemesi'
+        : (EXPENSE_CATS.includes(input.financeCategory) ? input.financeCategory : 'Diğer');
       data.expenses.unshift({
         id: gid, date, amount: total,
         category: String(cat).slice(0, 40),

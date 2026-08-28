@@ -99,44 +99,76 @@ function computeQuantities(input) {
   };
 }
 
+// Bir bolgenin (istisnalar uygulanmis) adedi. bnItems bu adedi taban alir.
+function areaQty(qtyResult, technique, area) {
+  const A = normArea(area);
+  const src = technique === 'baski' ? (qtyResult.printCounts || {}) : (qtyResult.embroideryCounts || {});
+  if (src[A] != null) return src[A];
+  return qtyResult.totalQty;
+}
+
+// Kullanicinin girdigi baski/nakis kalemlerini normalize et. Bir bolgede BIRDEN FAZLA baski olabilir.
+// items: [{type:'baski'|'nakis', area, size, qty?, label?}] | eski {baski:{area:size},nakis:{...}} objesi
+function normalizeBnItems(items, qtyResult) {
+  if (!items) return null; // ilk cikarimda otomatik tureteceğiz
+  let list = items;
+  if (!Array.isArray(items)) {
+    // eski chosenSizes objesi -> her bolge icin tek kalem
+    list = [];
+    ['baski', 'nakis'].forEach((t) => {
+      const m = items[t] || {};
+      Object.keys(m).forEach((area) => { if (m[area]) list.push({ type: t, area, size: m[area] }); });
+    });
+  }
+  return list
+    .filter((it) => it && (it.type === 'baski' || it.type === 'nakis'))
+    .map((it) => {
+      const technique = it.type;
+      const area = it.area ? normArea(it.area) : null;
+      const qty = Number.isFinite(Number(it.qty)) && Number(it.qty) > 0
+        ? Math.round(Number(it.qty))
+        : areaQty(qtyResult, technique === 'baski' ? 'baski' : 'nakis', area || '');
+      return { type: technique, area, size: it.size || null, qty, label: it.label || null };
+    });
+}
+
 // Panelin maliyet/fiyat motoruyla esle. ct = data.costTemplates.
-// input: uretim formu cikarimi. sizes: {baski: {area:'Orta Boyut'}, nakis:{...}} - kullanici secer,
-//        verilmemisse null -> "boyut manuel".
-// Doner: { templateMatch, costItems, costTotal, suggestedUnitPrice, priceTierAvailable, needsManual, notes:[] }
-function matchCostAndPrice(ct, input, qtyResult, chosenSizes) {
+// bnItemsInput: kullanicinin girdigi baski/nakis kalemleri (bir bolgede birden fazla olabilir).
+//   verilmezse: her print_area/embroidery_area icin boyutsuz bir taslak kalem uretilir.
+// Doner: { templateMatch, baskiNakisItems, costItems, costTotal, suggestedUnitPrice, priceTierAvailable, needsManual, notes:[] }
+function matchCostAndPrice(ct, input, qtyResult, bnItemsInput) {
   const notes = [];
   let needsManual = false;
   if (!ct || !(ct.products || []).length) {
-    return { templateMatch: null, costItems: [], costTotal: 0, suggestedUnitPrice: null, priceTierAvailable: false, needsManual: true, notes: ['Maliyet şablonları yüklü değil — manuel maliyet/fiyat gerekli.'] };
+    return { templateMatch: null, baskiNakisItems: [], costItems: [], costTotal: 0, suggestedUnitPrice: null, priceTierAvailable: false, needsManual: true, notes: ['Maliyet şablonları yüklü değil — manuel maliyet/fiyat gerekli.'] };
   }
   const tm = pe.matchTemplate(ct, input.product_type || input.product_description);
   if (!tm) {
     needsManual = true;
     notes.push('Ürün tipi "' + (input.product_type || '-') + '" bir maliyet şablonuyla eşleşmedi — manuel maliyet/fiyat gerekli.');
-    return { templateMatch: null, costItems: [], costTotal: 0, suggestedUnitPrice: null, priceTierAvailable: false, needsManual, notes };
+    return { templateMatch: null, baskiNakisItems: [], costItems: [], costTotal: 0, suggestedUnitPrice: null, priceTierAvailable: false, needsManual, notes };
   }
   if (tm.score < 0.75) notes.push('Şablon eşleşmesi kesin değil (%' + Math.round(tm.score * 100) + '): "' + tm.name + '" — kontrol edin.');
 
-  // baski/nakis kalemleri: her bolge icin adet qtyResult'tan, boyut kullanicidan
-  const bnItems = [];
-  const areaSize = (technique, area) => {
-    const cs = chosenSizes && chosenSizes[technique];
-    if (cs && cs[area]) return cs[area];
-    if (cs && cs['*']) return cs['*'];
-    return null;
-  };
-  Object.entries(qtyResult.printCounts).forEach(([area, qty]) => {
-    const size = areaSize('baski', area);
-    if (!size) { needsManual = true; notes.push('Baskı boyutu seçilmeli: "' + area + '" (' + qty + ' adet).'); }
-    else bnItems.push({ type: 'baski', size, area, qty });
+  let bnItems = normalizeBnItems(bnItemsInput, qtyResult);
+  if (bnItems == null) {
+    // ilk cikarim: her bolge icin boyutsuz taslak (kullanici onizlemede boyut secer, kalem ekler)
+    bnItems = [];
+    Object.entries(qtyResult.printCounts || {}).forEach(([area, qty]) => bnItems.push({ type: 'baski', area, size: null, qty, label: null }));
+    Object.entries(qtyResult.embroideryCounts || {}).forEach(([area, qty]) => bnItems.push({ type: 'nakis', area, size: null, qty, label: null }));
+  }
+
+  const priced = bnItems.filter((it) => it.size);
+  bnItems.filter((it) => !it.size).forEach((it) => {
+    needsManual = true;
+    notes.push((it.type === 'baski' ? 'Baskı' : 'Nakış') + ' boyutu seçilmeli: "' + (it.label || it.area || '?') + '" (' + it.qty + ' adet).');
   });
-  Object.entries(qtyResult.embroideryCounts).forEach(([area, qty]) => {
-    const size = areaSize('nakis', area);
-    if (!size) { needsManual = true; notes.push('Nakış boyutu seçilmeli: "' + area + '" (' + qty + ' adet).'); }
-    else bnItems.push({ type: 'nakis', size, area, qty });
+  priced.forEach((it) => {
+    const dict = it.type === 'baski' ? (ct.baski || {}) : (ct.nakis || {});
+    if (dict[it.size] == null) { needsManual = true; notes.push('"' + it.size + '" boyutu maliyet tablosunda yok — manuel.'); }
   });
 
-  const costItems = pe.calcTemplateCostItems(ct, tm.name, qtyResult.totalQty, [], bnItems);
+  const costItems = pe.calcTemplateCostItems(ct, tm.name, qtyResult.totalQty, [], priced);
   const costTotal = pe.totalOf(costItems);
 
   const sp = pe.suggestedPrice(ct, tm.name, qtyResult.totalQty);
@@ -154,4 +186,4 @@ function matchCostAndPrice(ct, input, qtyResult, chosenSizes) {
   };
 }
 
-module.exports = { computeQuantities, matchCostAndPrice, interpretInstructions, normArea, SIZE_KEYS, sizeTotal };
+module.exports = { computeQuantities, matchCostAndPrice, interpretInstructions, normalizeBnItems, normArea, SIZE_KEYS, sizeTotal };

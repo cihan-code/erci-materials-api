@@ -283,6 +283,54 @@ async function main() {
     assert.strictEqual(iv.status, 'Kısmi Tahsil Edildi');
   });
 
+  // 6f2 karsi taraf adi + kategori onerisi (kullanicinin bildirdigi buglar)
+  console.log('\n# 6f2 Dekont: karşı taraf + kategori');
+  const { suggestCategory } = require('../agent/financeCategory');
+  const upCargo = docs.saveDocument(fakeBuf('cargo'), 'giden-kargo-dekont.png', 'image/png');
+  const rCargo = await extractDocument(upCargo.id);
+  ok('giden kargo dekontu: yön outgoing, karşı taraf = kargo firması (kişi adı DEĞİL)', () => {
+    assert.strictEqual(rCargo.classification.finalDirection, 'outgoing');
+    assert.strictEqual(rCargo.classification.humanLabel, 'Yapılan Ödeme Dekontu');
+    assert.strictEqual(rCargo.classification.counterparty.name, 'BASİT KARGO LOJİSTİK A.Ş.');
+    assert.notStrictEqual(rCargo.classification.counterparty.name, 'Cihan Berber');
+  });
+  ok('kategori önerisi açıklamadan: "kargo gönderi bedeli" -> Kargo/Kurye', () => {
+    assert.strictEqual(rCargo.classification.categoryHint, 'Kargo/Kurye');
+  });
+  ok('suggestCategory: kapora/kalan/kira/maaş/vergi', () => {
+    assert.strictEqual(suggestCategory('incoming', 'kapora ödemesi'), 'Kapora');
+    assert.strictEqual(suggestCategory('incoming', 'kalan bakiye'), 'Kalan Tahsilat');
+    assert.strictEqual(suggestCategory('incoming', 'sipariş için gönderim'), null);
+    assert.strictEqual(suggestCategory('outgoing', 'ağustos kira'), 'Kira');
+    assert.strictEqual(suggestCategory('outgoing', 'personel maaş'), 'Maaş');
+    assert.strictEqual(suggestCategory('outgoing', 'kdv beyanname'), 'Vergi');
+  });
+  ok('giden dekont commit: gider kategorisi doğrulanır (geçersiz -> Diğer)', () => {
+    const n0 = store.readPanelRaw().data.expenses.length;
+    const cc = commitDocument(upCargo.id, {
+      confirm: true,
+      fields: { finalType: 'payment_receipt', finalDirection: 'outgoing', date: '2026-08-27', total: 2450, currency: 'TRY', counterparty_name: 'BASİT KARGO LOJİSTİK A.Ş.', reference_number: 'EFT-20260827-441' },
+      financeCategory: 'Kargo/Kurye',
+    });
+    assert(cc.ok);
+    const exp = store.readPanelRaw().data.expenses[0];
+    assert.strictEqual(exp.category, 'Kargo/Kurye');
+    assert.strictEqual(store.readPanelRaw().data.expenses.length, n0 + 1);
+    assert.strictEqual(exp.payee, 'BASİT KARGO LOJİSTİK A.Ş.');
+  });
+  ok('giden dekont commit: geçersiz gider kategorisi -> Diğer', () => {
+    const upX = docs.saveDocument(fakeBuf('cargo2'), 'giden-kargo-2.png', 'image/png');
+    // eslint-disable-next-line no-unused-vars
+    const cc = commitDocument(upX.id, {
+      confirm: true,
+      fields: { finalType: 'payment_receipt', finalDirection: 'outgoing', total: 100, counterparty_name: 'X', reference_number: 'r1' },
+      financeCategory: 'Uyduruk Kategori',
+    });
+    assert.strictEqual(store.readPanelRaw().data.expenses[0].category, 'Diğer');
+  });
+
+  seed();
+
   // 6g URETIM FORMU -> Is Takip (finansa gitmez)
   console.log('\n# 6g Üretim Formu (MOCK)');
   const { recomputeProdForm } = require('../agent/document');
@@ -321,6 +369,16 @@ async function main() {
     const items = rr.prodComputation.costMatch.costItems || [];
     assert(items.some((it) => /Baskı/.test(it.category)), 'baski kalemi yok');
     assert(rr.prodComputation.costMatch.costTotal > 0);
+  });
+  ok('recompute: bir bölgede BİRDEN FAZLA baskı -> ayrı kalemler', () => {
+    const rr = recomputeProdForm(upUF.id, { bnItems: [
+      { type: 'baski', area: 'göğüs', size: 'Küçük Boyut', label: 'logo' },
+      { type: 'baski', area: 'göğüs', size: 'Orta Boyut', label: 'yazı' },
+      { type: 'nakis', area: 'sol kol', size: 'Küçük Boyut' },
+    ] });
+    const baskis = (rr.prodComputation.costMatch.costItems || []).filter((it) => /^Baskı/.test(it.category));
+    assert.strictEqual(baskis.length, 2, 'göğüs için 2 ayrı baskı kalemi bekleniyordu, ' + baskis.length + ' bulundu');
+    assert(rr.prodComputation.costMatch.baskiNakisItems.filter((x) => x.area === 'göğüs').length === 2);
   });
 
   ok('confirm olmadan uretim formu commit reddedilir', () => {
