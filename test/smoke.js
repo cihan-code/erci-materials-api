@@ -215,7 +215,18 @@ async function main() {
 
   const upCF = docs.saveDocument(fakeBuf('cf'), 'celiski-dekont.png', 'image/png');
   const rCF = await extractDocument(upCF.id);
-  ok('celiskili belge -> needsUserDecision', () => assert.strictEqual(rCF.classification.needsUserDecision, true));
+  ok('isim kanıtı vs model çelişkisi -> needsUserDecision', () => {
+    assert.strictEqual(rCF.classification.needsUserDecision, true);
+    assert.strictEqual(rCF.classification.finalDirection, 'incoming'); // isim kanıtı kazanır
+  });
+  const upSO = docs.saveDocument(fakeBuf('so'), 'guclu-override-dekont.png', 'image/png');
+  const rSO = await extractDocument(upSO.id);
+  ok('güçlü IBAN kanıtı modeli EZER, kullanıcıya sormaz', () => {
+    assert.strictEqual(rSO.classification.finalDirection, 'incoming'); // receiver IBAN = Merci
+    assert.strictEqual(rSO.classification.needsUserDecision, false);
+    assert.strictEqual(rSO.classification.counterparty.name, 'PARLAK GİYİM PERAKENDE TİC. LTD. ŞTİ.');
+    assert.strictEqual(rSO.classification.categoryHint, 'Kalan Tahsilat');
+  });
 
   // 6c commit ONAY olmadan reddedilir
   ok('confirm olmadan commit reddedilir', () => {

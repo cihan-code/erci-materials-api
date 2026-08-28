@@ -21,6 +21,12 @@ const DEFAULT = {
     'Cihan Berber',
     'Mert Kıvanç Tekin',
   ],
+  // Merci yetkililerinin SAHSI adlari - bunlarla eslesen taraf "belki sahsi" demektir,
+  // yon kesin degil, kullaniciya sorulur (sirket tuzel adi eslesmesi kadar guclu degil).
+  persons: [
+    'Cihan Berber',
+    'Mert Kıvanç Tekin',
+  ],
   vkn: '6160906794',
   taxOffice: 'PENDİK VERGİ DAİRESİ MÜDÜRLÜĞÜ',
   ibans: [],
@@ -59,13 +65,19 @@ function get() {
   if (_cache) return _cache;
   const raw = loadRaw();
   const ibans = Array.from(new Set((raw.ibans || []).map(normIban).filter((x) => /^TR\d{24}$/.test(x))));
+  const personNorms = (raw.persons || []).map(normName).filter(Boolean);
+  const allNameNorms = (raw.names || []).map(normName).filter(Boolean);
   _cache = {
     names: Array.from(new Set((raw.names || []).filter(Boolean))),
+    persons: Array.from(new Set((raw.persons || []).filter(Boolean))),
     vkn: normVkn(raw.vkn),
     taxOffice: raw.taxOffice || '',
     ibans,
     ibanSet: new Set(ibans),
-    nameNorms: (raw.names || []).map(normName).filter(Boolean),
+    nameNorms: allNameNorms,
+    personNorms,
+    // tuzel sirket adlari (yetkili sahsi adlari haric) - "kesin sirket" eslesmesi icin
+    legalNameNorms: allNameNorms.filter((n) => !personNorms.includes(n)),
   };
   return _cache;
 }
@@ -81,6 +93,18 @@ function isCompanyName(name) {
   if (!n) return false;
   return get().nameNorms.some((cn) => cn && (n.includes(cn) || cn.includes(n)));
 }
+// Taraf adi Merci YETKILISININ SAHSI adiyla mi eslesiyor? (sirket tuzel adi degil)
+function isPersonName(name) {
+  const n = normName(name);
+  if (!n) return false;
+  return get().personNorms.some((cn) => cn && (n === cn || n.includes(cn) || cn.includes(n)));
+}
+// Taraf adi Merci'nin TUZEL sirket adiyla mi eslesiyor? (yetkili sahsi adi haric)
+function isLegalName(name) {
+  const n = normName(name);
+  if (!n) return false;
+  return get().legalNameNorms.some((cn) => cn && (n.includes(cn) || cn.includes(n)));
+}
 
 // Modele giden MINIMUM profil (isim listesi kisa + vkn + ibans). Panel verisi yok.
 function forPrompt() {
@@ -94,7 +118,7 @@ function forPrompt() {
 }
 
 module.exports = {
-  get, forPrompt, isCompanyIban, isCompanyVkn, isCompanyName,
+  get, forPrompt, isCompanyIban, isCompanyVkn, isCompanyName, isPersonName, isLegalName,
   normIban, normName, normVkn,
   _reset: () => { _cache = null; },
 };

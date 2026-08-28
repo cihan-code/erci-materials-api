@@ -17,6 +17,12 @@ Gerçek Anthropic çağrısı yapılmaz.
 | `extract-conflict.json` | IBAN kanıtı "incoming" ama model "outgoing" dedi → kullanıcıya sor |
 | `extract-outgoing-cargo.json` | Merci → kargo firmasına ödeme; gönderen kişi adı (Cihan Berber) ama karşı taraf = "BASİT KARGO LOJİSTİK A.Ş." + kategori önerisi Kargo/Kurye |
 | `extract-vakif-cargo.json` | VakıfBank tarzı; sender "... LTD. ŞTİ. / MURAT DEMİR" → operatör adı ayıklanır, taraf = şirket; karşı taraf Yurtiçi Kargo A.Ş. |
+| `extract-strong-override.json` | model "outgoing" der ama alıcı IBAN = Merci → güçlü kanıt modeli ezer, kullanıcıya SORULMAZ |
+
+`test/dekont-real.js` (`npm run dekont`) — kullanıcının yüklediği 6 GERÇEK dekonttan
+(Denizbank/İş Bankası/Akbank/Yapı Kredi/Garanti x2) elle transcribe edilen JSON'ları
+`classify` zincirinden geçirir; API'siz. Merci yetkilisinin şahsi adıyla eşleşen dekontlar
+→ `needsUserDecision` (iş mi şahsi mi).
 
 Gerçek Türk banka dekont formatları (alan adları, gönderen/alıcı etiketleri, şirket-vs-kişi
 ayrımı, referans no önceliği, yön sinyalleri) → `DEKONT_FORMATS.md`.

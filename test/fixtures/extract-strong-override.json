@@ -1,0 +1,21 @@
+{
+  "document_type": "payment_receipt",
+  "direction": "outgoing",
+  "date": "2026-08-27",
+  "amount": 63000,
+  "currency": "TRY",
+  "sender_name": "PARLAK GİYİM PERAKENDE TİC. LTD. ŞTİ.",
+  "receiver_name": "MERCI TEKSTİL SANAYİ VE TİCARET",
+  "sender_iban": "TR555544443333222211110000",
+  "receiver_iban": "TR111122223333444455556666",
+  "sender_tax_number": null,
+  "receiver_tax_number": null,
+  "invoice_number": null,
+  "reference_number": "SRG-771",
+  "description": "sipariş kalan ödeme",
+  "subtotal": null,
+  "vat_amount": null,
+  "total": 63000,
+  "due_date": null,
+  "confidence": { "document_type": 0.95, "direction": 0.82, "amount": 0.97 }
+}

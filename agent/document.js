@@ -159,17 +159,16 @@ function buildSystem() {
     '  document_type ayrımı: banka logosu + "DEKONT / İŞLEM BİLGİLERİ" + Sorgu/Referans No + "e-Dekont',
     '   yerine geçmez" => payment_receipt.  Kalem tablosu + Matrah + Hesaplanan KDV + ETTN => invoice.',
     '',
-    '  YÖN (direction) — şu öncelik sırasıyla:',
-    '   1. IBAN/VKN Merci ile eşleşiyorsa kesin (backend ayrıca kontrol eder, yine de doğru oku).',
-    '   2. "B/A" sütunu (İş Bankası/Enpara hesap hareketi): B=Borç=outgoing, A=Alacak=incoming.',
-    '   3. Başlık/fiil: "FAST GÖNDERİMİ","GİDEN FAST","HESAPTAN FAST","Hesaptan Havale","Giden EFT",',
-    '      "Hesabınızdan ... Çekilmiştir","borç kaydedilmiştir" => outgoing.  "Gelen FAST/EFT",',
-    '      "Hesabınıza ... yatmıştır","alacak kaydedilmiştir","Lehinize" => incoming.',
-    '   4. Negatif/"-" önekli tutar => outgoing.',
-    '   5. Masraf/komisyon/BSMV BU hesaptan alınmışsa hesap gönderendir => outgoing.',
-    '   6. Dekont sahibi ("Sayın ...","Müşteri Adı","MÜŞTERİ ÜNVANI", en üstteki IBAN bloğu):',
-    '      sahip=gönderen => outgoing, sahip=alıcı => incoming.',
-    '   Hiçbiri yoksa direction="unknown", confidence.direction<=0.4.',
+    '  YÖN (direction) — HER ZAMAN MERCİ AÇISINDAN. Para Merci\'ye/Merci adına geliyorsa "incoming",',
+    '  Merci\'den/Merci adına gidiyorsa "outgoing".',
+    '   • Dekont sahibi ("Sayın ...","Müşteri Bilgisi","MÜŞTERİ ÜNVANI", en üstteki IBAN/VKN bloğu) KİM?',
+    '     - Sahip MERCİ ise: "GİDEN FAST / HESAPTAN / Çekilmiştir / Borç / negatif tutar" => outgoing;',
+    '       "GELEN FAST / Hesabınıza yatmıştır / Alacak" => incoming.',
+    '     - Sahip Merci DEĞİL, karşı tarafta Merci adı/IBAN/VKN var ise: dekonttaki GİDEN/GELEN o kişinin',
+    '       yönüdür — Merci için TERSİNE çevir. (Sahip birine "Giden FAST" ile Merci\'ye para yolladıysa',
+    '       Merci için bu "incoming".)',
+    '   • "B/A" sütunu da dekont sahibinin yönüdür (B=Borç=sahip için çıkış, A=Alacak=sahip için giriş).',
+    '   • Hiçbir sahip/Merci işareti yoksa direction="unknown", confidence.direction<=0.4.',
     '',
     '  TARAF ADLARI (sender_name = parayı gönderen, receiver_name = parayı alan):',
     '   • Etiketler: "Gönderen/Alıcı", "Gönderen Adı/Alıcı Adı", "Ad-Soyad/Unvan", "Ünvan",',
@@ -238,6 +237,7 @@ function mockExtraction(rec) {
   else if (/alis|purchase|gelen-fatura|incoming-invoice/.test(n)) name = 'extract-purchase-invoice.json';
   else if (/satis|sales|kesilen|outgoing-invoice/.test(n)) name = 'extract-sales-invoice.json';
   else if (/belirsiz|ambiguous|unknown/.test(n)) name = 'extract-ambiguous.json';
+  else if (/override|guclu|strong/.test(n)) name = 'extract-strong-override.json';
   else if (/celiski|conflict|wrong-iban/.test(n)) name = 'extract-conflict.json';
   try { return JSON.parse(fs.readFileSync(path.join(fxDir, name), 'utf8')); }
   catch (e) { return JSON.parse(fs.readFileSync(path.join(fxDir, 'extract-incoming-receipt.json'), 'utf8')); }
@@ -290,27 +290,34 @@ function classify(ext) {
     };
   }
 
-  const senderCo = cp.isCompanyIban(ext.sender_iban) || cp.isCompanyName(ext.sender_name);
-  const receiverCo = cp.isCompanyIban(ext.receiver_iban) || cp.isCompanyName(ext.receiver_name);
-  const sellerVknCo = cp.isCompanyVkn(ext.sender_tax_number); // faturayi kesen = satici
-  const buyerVknCo = cp.isCompanyVkn(ext.receiver_tax_number);
+  const senderIbanCo = cp.isCompanyIban(ext.sender_iban);
+  const receiverIbanCo = cp.isCompanyIban(ext.receiver_iban);
+  const senderVknCo = cp.isCompanyVkn(ext.sender_tax_number);
+  const receiverVknCo = cp.isCompanyVkn(ext.receiver_tax_number);
+  const senderNameCo = cp.isCompanyName(ext.sender_name);
+  const receiverNameCo = cp.isCompanyName(ext.receiver_name);
+  const senderCo = senderIbanCo || senderNameCo || senderVknCo;
+  const receiverCo = receiverIbanCo || receiverNameCo || receiverVknCo;
 
   let detType = 'unknown';
   let detDir = 'unknown';
+  let strong = false; // IBAN veya VKN eslesmesi -> guclu kanit
   const ev = [];
 
   if (modelType === 'payment_receipt' || (ext.reference_number && !ext.invoice_number)) {
     detType = 'payment_receipt';
-    if (cp.isCompanyIban(ext.receiver_iban)) { detDir = 'incoming'; ev.push('alıcı IBAN Merci hesabı'); }
-    else if (cp.isCompanyIban(ext.sender_iban)) { detDir = 'outgoing'; ev.push('gönderen IBAN Merci hesabı'); }
-    else if (receiverCo && !senderCo) { detDir = 'incoming'; ev.push('alıcı adı Merci'); }
-    else if (senderCo && !receiverCo) { detDir = 'outgoing'; ev.push('gönderen adı Merci'); }
+    if (receiverIbanCo) { detDir = 'incoming'; strong = true; ev.push('alıcı IBAN Merci hesabı'); }
+    else if (senderIbanCo) { detDir = 'outgoing'; strong = true; ev.push('gönderen IBAN Merci hesabı'); }
+    else if (receiverVknCo && !senderVknCo) { detDir = 'incoming'; strong = true; ev.push('alıcı VKN Merci'); }
+    else if (senderVknCo && !receiverVknCo) { detDir = 'outgoing'; strong = true; ev.push('gönderen VKN Merci'); }
+    else if (receiverNameCo && !senderNameCo) { detDir = 'incoming'; ev.push('alıcı adı Merci'); }
+    else if (senderNameCo && !receiverNameCo) { detDir = 'outgoing'; ev.push('gönderen adı Merci'); }
   } else if (modelType === 'invoice' || ext.invoice_number) {
     detType = 'invoice';
-    if (sellerVknCo && !buyerVknCo) { detDir = 'outgoing'; ev.push('satıcı VKN Merci (kesilen/satış faturası)'); }
-    else if (buyerVknCo && !sellerVknCo) { detDir = 'incoming'; ev.push('alıcı VKN Merci (gelen/alış faturası)'); }
-    else if (cp.isCompanyName(ext.sender_name) && !cp.isCompanyName(ext.receiver_name)) { detDir = 'outgoing'; ev.push('satıcı adı Merci'); }
-    else if (cp.isCompanyName(ext.receiver_name) && !cp.isCompanyName(ext.sender_name)) { detDir = 'incoming'; ev.push('alıcı adı Merci'); }
+    if (senderVknCo && !receiverVknCo) { detDir = 'outgoing'; strong = true; ev.push('satıcı VKN Merci (kesilen/satış faturası)'); }
+    else if (receiverVknCo && !senderVknCo) { detDir = 'incoming'; strong = true; ev.push('alıcı VKN Merci (gelen/alış faturası)'); }
+    else if (senderNameCo && !receiverNameCo) { detDir = 'outgoing'; ev.push('satıcı adı Merci'); }
+    else if (receiverNameCo && !senderNameCo) { detDir = 'incoming'; ev.push('alıcı adı Merci'); }
   }
 
   const finalType = detType !== 'unknown' ? detType : (modelType !== 'unknown' ? modelType : 'unknown');
@@ -320,12 +327,25 @@ function classify(ext) {
   let reason = '';
   let method = 'deterministic';
 
+  // Merci tarafi tuzel sirket adi mi, yoksa yetkilinin SAHSI adi mi eslesti?
+  const merciSideName = detDir === 'incoming' ? ext.receiver_name : (detDir === 'outgoing' ? ext.sender_name : null);
+  const personOnly = !strong && detDir !== 'unknown' && cp.isPersonName(merciSideName) && !cp.isLegalName(merciSideName);
+
   if (detDir !== 'unknown') {
     finalDirection = detDir;
     if (modelDir !== 'unknown' && modelDir !== detDir) {
-      // celiski: deterministik kanit modelle celisiyor -> KULLANICIYA SOR
+      if (strong) {
+        // IBAN/VKN kesin - modeli ez, kullaniciya sorma ama not dus
+        reason = ev.join('; ') + ' (model "' + modelDir + '" demişti; IBAN/VKN kanıtı esas alındı)';
+      } else {
+        // yalniz isim eslesmesi + model celisiyor -> KULLANICIYA SOR
+        needsUserDecision = true;
+        reason = 'Belge yönü kesin belirlenemedi: isim kanıtı "' + detDir + '" diyor, model "' + modelDir + '" dedi. Dekont sahibi Merci değilse yön Merci açısından ters olabilir.';
+      }
+    } else if (personOnly) {
+      // Merci yetkilisinin sahsi adiyla eslesti - is mi sahsi mi belirsiz
       needsUserDecision = true;
-      reason = 'Belge yönü kesin belirlenemedi: IBAN/VKN kanıtı "' + detDir + '" diyor, model "' + modelDir + '" dedi.';
+      reason = ev.join('; ') + ' — ancak bu Merci yetkilisinin ŞAHSİ adı. İşlem şirket işi mi yoksa şahsi mi, kontrol edin.';
     } else {
       reason = ev.join('; ');
     }
