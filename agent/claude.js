@@ -1,11 +1,40 @@
 // Tek Anthropic cagri noktasi. generate.js ve act.js buradan gecer.
 // - Streaming (SSE elle ayristirma, SDK yok) -> buyuk max_tokens'ta HTTP timeout yok.
 // - HER cagri store.logUsage ile kaydedilir: model, opType, input/output token, tahmini USD.
+// - AGENT_MOCK=1 (yalniz yerel gelistirme): gercek API'ye gitmez, sahte yanit doner, $0 loglar.
+//   Boylece tum akis (sinyal -> prompt -> parse -> kayit -> uc -> panel) para harcamadan test edilir.
+//   Render'da bu degisken ASLA set edilmez; canli akis her zaman gercek.
 
 const store = require('./store');
 const { estCostUsd } = require('./pricing');
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
+const MOCK = process.env.AGENT_MOCK === '1';
+
+// Sahte yanit: act icin sema-uyumlu bos JSON; rapor icin kisa markdown iskeleti.
+function mockText(opts) {
+  if (opts.schema) {
+    return JSON.stringify({
+      reply: '[MOCK] Gercek API cagrisi yapilmadi (AGENT_MOCK=1). Istek: ' + String(opts.user || '').slice(-120),
+      actions: [],
+    });
+  }
+  const t = opts.opType || 'rapor';
+  return [
+    '# [MOCK] ' + t + ' — ' + new Date().toISOString().slice(0, 10),
+    '',
+    '## Veri Guveni',
+    'Bu bir SAHTE ciktidir (AGENT_MOCK=1). Anthropic API cagrilmadi, ucret olusmadi.',
+    '',
+    '## Prompt kontrolu',
+    '- system uzunlugu: ' + String(opts.system || '').length + ' kar',
+    '- user uzunlugu: ' + String(opts.user || '').length + ' kar (~' + Math.round(String(opts.user || '').length / 4) + ' token)',
+    '- model: ' + opts.model + ' | maxTokens: ' + (opts.maxTokens || 8000) + (opts.effort ? ' | effort: ' + opts.effort : ''),
+    '',
+    '## user metninin ilk 400 karakteri',
+    String(opts.user || '').slice(0, 400),
+  ].join('\n');
+}
 
 async function streamOnce(body, key) {
   const res = await fetch(ANTHROPIC_URL, {
@@ -70,6 +99,16 @@ async function streamOnce(body, key) {
 
 // opts: { model, opType, system, user, maxTokens, thinking, effort, schema }
 async function callClaude(opts) {
+  // ---- MOCK: gercek cagriyi atla, $0 logla ----
+  if (MOCK) {
+    const text = mockText(opts);
+    const inTok = Math.round(String(opts.system || '').length / 4 + String(opts.user || '').length / 4);
+    const outTok = Math.round(text.length / 4);
+    store.logUsage({ opType: opts.opType || 'unknown', model: opts.model, inputTokens: inTok, outputTokens: outTok, costUsd: 0, stopReason: 'end_turn', ok: true, mock: true });
+    console.log('[claude] MOCK yanit (%s) - API cagrilmadi, $0', opts.opType);
+    return { text, stopReason: 'end_turn', model: opts.model, inputTokens: inTok, outputTokens: outTok, costUsd: 0, mock: true };
+  }
+
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) throw new Error('ANTHROPIC_API_KEY tanimli degil (Render > Environment).');
 
