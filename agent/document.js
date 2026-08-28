@@ -19,41 +19,64 @@ const { suggestLinks } = require('./documentMatch');
 
 const MOCK = process.env.AGENT_MOCK === '1';
 
-const EXTRACTION_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['document_type', 'direction', 'amount', 'currency', 'confidence'],
-  properties: {
-    document_type: { type: 'string', enum: ['payment_receipt', 'invoice', 'unknown'] },
-    direction: { type: 'string', enum: ['incoming', 'outgoing', 'unknown'] },
-    date: { type: ['string', 'null'] },
-    amount: { type: ['number', 'null'] },
-    currency: { type: ['string', 'null'] },
-    sender_name: { type: ['string', 'null'] },
-    receiver_name: { type: ['string', 'null'] },
-    sender_iban: { type: ['string', 'null'] },
-    receiver_iban: { type: ['string', 'null'] },
-    sender_tax_number: { type: ['string', 'null'] },
-    receiver_tax_number: { type: ['string', 'null'] },
-    invoice_number: { type: ['string', 'null'] },
-    reference_number: { type: ['string', 'null'] },
-    description: { type: ['string', 'null'] },
-    subtotal: { type: ['number', 'null'] },
-    vat_amount: { type: ['number', 'null'] },
-    total: { type: ['number', 'null'] },
-    due_date: { type: ['string', 'null'] },
-    confidence: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['document_type', 'direction', 'amount'],
-      properties: {
-        document_type: { type: 'number' },
-        direction: { type: 'number' },
-        amount: { type: 'number' },
-      },
-    },
-  },
-};
+// NOT: output_config.format (structured output) kullanmiyoruz - Anthropic "Schema is too complex"
+// diyor (20+ alan + null union'lar). Bunun yerine prompt'ta net sema + "yalniz JSON" +
+// saglam JSON ayiklama. Bu sema yalniz REFERANS / normalize icin.
+const EXTRACTION_FIELDS = [
+  'document_type', 'direction', 'date', 'amount', 'currency',
+  'sender_name', 'receiver_name', 'sender_iban', 'receiver_iban',
+  'sender_tax_number', 'receiver_tax_number', 'invoice_number', 'reference_number',
+  'description', 'subtotal', 'vat_amount', 'total', 'due_date',
+];
+const NUM_FIELDS = new Set(['amount', 'subtotal', 'vat_amount', 'total']);
+
+const EXAMPLE_JSON = JSON.stringify({
+  document_type: 'payment_receipt', direction: 'incoming', date: '2026-08-28',
+  amount: 78500, currency: 'TRY', sender_name: '...', receiver_name: '...',
+  sender_iban: null, receiver_iban: '...', sender_tax_number: null, receiver_tax_number: null,
+  invoice_number: null, reference_number: '...', description: '...',
+  subtotal: null, vat_amount: null, total: 78500, due_date: null,
+  confidence: { document_type: 0.98, direction: 0.95, amount: 0.99 },
+});
+
+// metinden JSON ayikla (```json ... ``` cit veya prose ile gelse bile)
+function parseJsonLoose(text) {
+  let t = String(text || '').trim();
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) t = fence[1].trim();
+  if (t[0] !== '{') {
+    const i = t.indexOf('{'); const j = t.lastIndexOf('}');
+    if (i >= 0 && j > i) t = t.slice(i, j + 1);
+  }
+  return JSON.parse(t);
+}
+
+// modelden geleni normalize et: eksik alan null, sayilari coerce, string trim
+function normalizeExtraction(raw) {
+  const o = { confidence: {} };
+  EXTRACTION_FIELDS.forEach((k) => {
+    let v = raw[k];
+    if (v === '' || v === undefined) v = null;
+    if (v != null && NUM_FIELDS.has(k)) {
+      const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/\./g, '').replace(',', '.').replace(/[^\d.-]/g, ''));
+      v = Number.isFinite(n) ? n : null;
+    }
+    if (v != null && typeof v === 'string') v = v.trim();
+    o[k] = v;
+  });
+  const dt = ['payment_receipt', 'invoice', 'unknown'];
+  const dr = ['incoming', 'outgoing', 'unknown'];
+  o.document_type = dt.includes(o.document_type) ? o.document_type : 'unknown';
+  o.direction = dr.includes(o.direction) ? o.direction : 'unknown';
+  const c = raw.confidence || {};
+  ['document_type', 'direction', 'amount'].forEach((k) => {
+    const n = Number(c[k]);
+    o.confidence[k] = Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0.5;
+  });
+  if (o.total == null && o.amount != null) o.total = o.amount;
+  if (o.amount == null && o.total != null) o.amount = o.total;
+  return o;
+}
 
 function buildSystem() {
   const p = cp.forPrompt();
@@ -66,10 +89,15 @@ function buildSystem() {
     '',
     'document_type: banka dekontu ise "payment_receipt", fatura ise "invoice", ayırt edemiyorsan "unknown".',
     'direction: para Merci\'ye geliyorsa "incoming", Merci\'den gidiyorsa "outgoing", belirsizse "unknown".',
-    'Tutarlar sayı olsun (1.234,56 -> 1234.56). currency genelde "TRY".',
+    'Tutarlar SAYI olsun (1.234,56 -> 1234.56). currency genelde "TRY".',
     'IBAN\'ları boşluksuz büyük harf yaz. Tarihleri YYYY-MM-DD.',
     'Fatura ise: invoice_number, subtotal (matrah), vat_amount (KDV), total (genel toplam), due_date.',
     'Dekont ise: reference_number (dekont/işlem no), amount = total.',
+    'confidence: her alan için 0-1 arası güven.',
+    '',
+    'ÇIKTI ŞU JSON ŞEKLİNDE OLACAK (başka hiçbir metin YOK, ```json``` yok):',
+    EXAMPLE_JSON,
+    'Alanlar: ' + EXTRACTION_FIELDS.join(', ') + ', confidence{document_type,direction,amount}.',
     '',
     'MERCİ ŞİRKET BİLGİSİ (yön tespiti için — bu isimler/VKN/IBAN Merci tarafıdır):',
     JSON.stringify(p),
@@ -91,7 +119,7 @@ function mockExtraction(rec) {
 }
 
 async function runVision(rec) {
-  if (MOCK) return { extraction: mockExtraction(rec), model: SONNET, costUsd: 0, inputTokens: 0, outputTokens: 0 };
+  if (MOCK) return { extraction: normalizeExtraction(mockExtraction(rec)), model: SONNET, costUsd: 0, inputTokens: 0, outputTokens: 0 };
 
   const b64 = docs.fileBase64(rec).replace(/\s+/g, '');
   const block = rec.mime === 'application/pdf'
@@ -102,14 +130,13 @@ async function runVision(rec) {
     model: SONNET,
     opType: 'document_extract',
     system: buildSystem(),
-    user: [block, { type: 'text', text: 'Bu belgeyi çıkar. Yalnız şemaya uygun JSON döndür.' }],
-    maxTokens: 1500,
-    schema: EXTRACTION_SCHEMA,
+    user: [block, { type: 'text', text: 'Bu belgeyi çıkar. YALNIZ JSON döndür, başka metin yok.' }],
+    maxTokens: 1200,
   });
-  let extraction;
-  try { extraction = JSON.parse(resp.text); }
-  catch (e) { throw new Error('Model yanıtı JSON değil: ' + String(resp.text).slice(0, 200)); }
-  return { extraction, model: resp.model, costUsd: resp.costUsd, inputTokens: resp.inputTokens, outputTokens: resp.outputTokens };
+  let raw;
+  try { raw = parseJsonLoose(resp.text); }
+  catch (e) { throw new Error('Model yanıtı JSON olarak ayrıştırılamadı: ' + String(resp.text).slice(0, 200)); }
+  return { extraction: normalizeExtraction(raw), model: resp.model, costUsd: resp.costUsd, inputTokens: resp.inputTokens, outputTokens: resp.outputTokens };
 }
 
 // ---- DETERMINISTIK SINIFLANDIRMA ----
@@ -215,4 +242,4 @@ async function extractDocument(id) {
   return updated;
 }
 
-module.exports = { extractDocument, classify, humanClass, EXTRACTION_SCHEMA, buildSystem };
+module.exports = { extractDocument, classify, humanClass, buildSystem, parseJsonLoose, normalizeExtraction, EXTRACTION_FIELDS };

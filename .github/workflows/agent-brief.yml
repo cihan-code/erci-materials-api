@@ -1,9 +1,9 @@
 name: Yonetim Ajani brifing
 
-# Her sabah 04:00 UTC = 07:00 Istanbul. Pazartesi ayrica haftalik review, ayin 1'i ayrica aylik rapor.
+# Her sabah 05:00 UTC = 08:00 Istanbul. Pazartesi ayrica haftalik review, ayin 1'i ayrica aylik rapor.
 on:
   schedule:
-    - cron: "0 4 * * *"
+    - cron: "0 5 * * *"
   workflow_dispatch:
     inputs:
       type:
