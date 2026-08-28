@@ -283,6 +283,84 @@ async function main() {
     assert.strictEqual(iv.status, 'Kısmi Tahsil Edildi');
   });
 
+  // 6g URETIM FORMU -> Is Takip (finansa gitmez)
+  console.log('\n# 6g Üretim Formu (MOCK)');
+  const { recomputeProdForm } = require('../agent/document');
+  const upUF = docs.saveDocument(fakeBuf('uf'), 'MRC-101-uretim-form.png', 'image/png');
+  const rUF = await extractDocument(upUF.id);
+  ok('uretim formu -> Üretim Formu, yon yok, finans mutasyonu YOK', () => {
+    assert.strictEqual(rUF.classification.finalType, 'production_form');
+    assert.strictEqual(rUF.classification.humanLabel, 'Üretim Formu');
+    assert.strictEqual(rUF.classification.finalDirection, null);
+    assert.strictEqual(rUF.status, 'extracted');
+    const pd = store.readPanelRaw();
+    assert.strictEqual((pd.data.incomes || []).filter((i) => i.document_id === upUF.id).length, 0);
+    assert.strictEqual((pd.data.expenses || []).filter((e) => e.document_id === upUF.id).length, 0);
+  });
+  ok('uretim formu -> sablon eslesti (Sweatshirt), adetler hesaplandi', () => {
+    const pc = rUF.prodComputation || {};
+    assert(pc.quantities && pc.quantities.totalQty === 40);
+    assert(pc.costMatch && pc.costMatch.templateMatch && pc.costMatch.templateMatch.name === 'Sweatshirt');
+  });
+
+  const upUFX = docs.saveDocument(fakeBuf('ufx'), 'MRC-102-uretim-form-istisna.png', 'image/png');
+  const rUFX = await extractDocument(upUFX.id);
+  ok('istisna: "2 L bedende sırt baskısı yok" -> sırt 18, göğüs/kol 20', () => {
+    const q = rUFX.prodComputation.quantities;
+    assert.strictEqual(q.printCounts['göğüs'], 20);
+    assert.strictEqual(q.printCounts['kol'], 20);
+    assert.strictEqual(q.printCounts['sırt'], 18);
+    assert(q.unresolved.length >= 1, 'cozulemeyen talimat isaretlenmedi');
+  });
+  ok('istisna: Şort sablonu yok -> manuel maliyet/fiyat gerekli', () => {
+    assert.strictEqual(rUFX.prodComputation.costMatch.needsManual, true);
+  });
+
+  ok('recompute: baski boyutu secilince maliyet kalemi olusur', () => {
+    const rr = recomputeProdForm(upUF.id, { chosenSizes: { baski: { 'göğüs': 'Orta Boyut' }, nakis: { 'sol kol': 'Küçük Boyut' } } });
+    const items = rr.prodComputation.costMatch.costItems || [];
+    assert(items.some((it) => /Baskı/.test(it.category)), 'baski kalemi yok');
+    assert(rr.prodComputation.costMatch.costTotal > 0);
+  });
+
+  ok('confirm olmadan uretim formu commit reddedilir', () => {
+    assert.throws(() => commitDocument(upUF.id, { fields: { finalType: 'production_form', order_no: 'MRC-101' } }), /confirm/);
+  });
+
+  const jobsBefore = store.readPanelRaw().data.jobs.length;
+  const cUF = commitDocument(upUF.id, {
+    confirm: true,
+    fields: { finalType: 'production_form', order_no: 'MRC-101', order_title: 'Kulüp Sweatshirt', product_type: 'Sweatshirt', total_quantity: 40, unit_price: 700, status: 'Onaylandı', delivery_date: '2026-09-15', cost_items: [{ category: 'Kumaş', amount: 8064 }] },
+    links: { customer_id: null },
+  });
+  ok('uretim formu commit -> yeni is (jobs) kaydi', () => {
+    assert(cUF.ok && cUF.created.some((x) => x.kind === 'job'));
+    const pd = store.readPanelRaw();
+    assert.strictEqual(pd.data.jobs.length, jobsBefore + 1);
+    const j = pd.data.jobs.find((x) => x.id === cUF.jobId);
+    assert.strictEqual(j.job_no, 'MRC-101');
+    assert.strictEqual(j.quantity, 40);
+    assert.strictEqual(j.unit_price, 700);
+    assert.strictEqual(j.document_id, upUF.id);
+    assert.strictEqual(docs.getDocument(upUF.id).status, 'committed');
+  });
+
+  const upUF2 = docs.saveDocument(fakeBuf('uf2'), 'MRC-101-uretim-form.png', 'image/png');
+  await extractDocument(upUF2.id);
+  ok('ayni Sipariş No -> ikinci is otomatik acilmaz, karar sorulur', () => {
+    const rr = commitDocument(upUF2.id, { confirm: true, fields: { finalType: 'production_form', order_no: 'MRC-101', product_type: 'Sweatshirt', total_quantity: 40 } });
+    assert(rr.needsExistingJobDecision && rr.needsExistingJobDecision.jobNo === 'MRC-101');
+    assert.notStrictEqual(docs.getDocument(upUF2.id).status, 'committed');
+  });
+  ok('karar "update" -> mevcut is guncellenir, yeni kayit yok', () => {
+    const n = store.readPanelRaw().data.jobs.length;
+    const rr = commitDocument(upUF2.id, { confirm: true, existingJobAction: 'update', fields: { finalType: 'production_form', order_no: 'MRC-101', product_type: 'Sweatshirt', total_quantity: 45, unit_price: 720 } });
+    assert(rr.ok);
+    const pd = store.readPanelRaw();
+    assert.strictEqual(pd.data.jobs.length, n);
+    assert.strictEqual(pd.data.jobs.find((x) => x.id === rr.jobId).quantity, 45);
+  });
+
   seed(); // belge testi mutasyonlarini geri al
 
   console.log('\n=== ' + pass + ' gecti, ' + fail + ' basarisiz ===');

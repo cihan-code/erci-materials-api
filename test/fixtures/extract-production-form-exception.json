@@ -1,0 +1,20 @@
+{
+  "document_type": "production_form",
+  "order_no": "MRC-102",
+  "order_title": "Fire Ants Şort",
+  "delivery_date": "2026-09-05",
+  "product_description": "Antrenman şortu, göğüs + kol baskı, sırt baskı bazı bedenlerde yok",
+  "product_type": "Şort",
+  "color": "Koyu Lacivert",
+  "print_areas": ["göğüs", "kol", "sırt"],
+  "embroidery_areas": [],
+  "size_breakdown": { "XS": 0, "S": 4, "M": 6, "L": 6, "XL": 3, "XXL": 1, "3XL": 0 },
+  "total_quantity": 20,
+  "special_instructions": [
+    { "text": "2 L bedende sırt baskısı yok", "affects": "print", "area": "sırt", "delta": -2 },
+    { "text": "logo baskıya daha sonra iletilecek", "affects": "print", "area": null, "delta": null }
+  ],
+  "customer_name": null,
+  "notes": "Sipariş sahibi kişiye özel isim baskısı isteyebilir, teyit bekleniyor.",
+  "confidence": { "document_type": 0.96, "total_quantity": 0.9 }
+}

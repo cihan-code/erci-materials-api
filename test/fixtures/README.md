@@ -15,3 +15,8 @@ Gerçek Anthropic çağrısı yapılmaz.
 | `extract-sales-invoice.json` | Merci müşteriye fatura kesmiş — satıcı VKN Merci |
 | `extract-ambiguous.json` | IBAN/VKN okunamadı, model güveni düşük |
 | `extract-conflict.json` | IBAN kanıtı "incoming" ama model "outgoing" dedi → kullanıcıya sor |
+| `extract-production-form.json` | üretim formu (istisna yok) — finansa gitmez, İş Takip'e aktarılır |
+| `extract-production-form-exception.json` | üretim formu, "2 L bedende sırt baskısı yok" → sırt baskı 18, göğüs/kol 20 |
+
+Dosya adında `uretim-form` / `production-form` / `is-emri` / `siparis-form` geçen yükleme
+üretim formu fixture'ına yönlenir; ek olarak `istisna` / `exception` geçerse exception fixture'ı.

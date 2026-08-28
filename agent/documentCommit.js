@@ -40,6 +40,12 @@ function commitDocument(id, input) {
   const f = input.fields || {};
   const type = f.finalType || (rec.classification && rec.classification.finalType);
   const dir = f.finalDirection || (rec.classification && rec.classification.finalDirection);
+
+  // ---------- URETIM FORMU -> IS TAKIP (jobs). Finansa dokunmaz. ----------
+  if (type === 'production_form') {
+    return commitProductionForm(rec, input, f);
+  }
+
   if (!type || type === 'unknown' || !dir || dir === 'unknown') {
     throw new Error('Belge türü/yönü belirsiz — önizleme ekranında seçim yapılmalı.');
   }
@@ -176,4 +182,124 @@ function commitDocument(id, input) {
   return { ok: true, created, updatedAt };
 }
 
-module.exports = { commitDocument, INCOME_CATS };
+// ---------- URETIM FORMU -> jobs (Is Takip) ----------
+const JOB_STATUSES = ['Teklif', 'Onaylandı', 'Üretimde', 'Teslim Edildi', 'İptal'];
+const SIZE_KEYS = ['XS', 'S', 'M', 'L', 'XL', 'XXL', '3XL'];
+
+function sizeSum(sb) {
+  if (!sb || typeof sb !== 'object') return 0;
+  return SIZE_KEYS.reduce((s, k) => s + (parseInt(sb[k], 10) || 0), 0);
+}
+
+function commitProductionForm(rec, input, f) {
+  const raw = store.readPanelRaw();
+  if (!raw || !raw.data) throw new Error('panel-data.json yok.');
+  const data = raw.data;
+  data.jobs = data.jobs || [];
+
+  const links = input.links || {};
+  const orderNo = String(f.order_no || '').trim();
+  if (!orderNo) throw new Error('Sipariş No boş — önizleme ekranında girilmeli.');
+
+  const qty = Number.isFinite(Number(f.total_quantity)) && Number(f.total_quantity) > 0
+    ? Math.round(Number(f.total_quantity))
+    : sizeSum(f.size_breakdown);
+  if (!qty) throw new Error('Toplam adet belirlenemedi — önizleme ekranında girilmeli.');
+
+  const status = JOB_STATUSES.includes(f.status) ? f.status : 'Onaylandı';
+  const unitPrice = Number.isFinite(Number(f.unit_price)) ? r2(Number(f.unit_price)) : 0;
+  const costItems = Array.isArray(f.cost_items)
+    ? f.cost_items.filter((x) => x && x.category).map((x) => ({ category: String(x.category).slice(0, 80), amount: r2(Number(x.amount) || 0) }))
+    : [];
+  const bnSecim = (f.baski_nakis_secim && typeof f.baski_nakis_secim === 'object') ? f.baski_nakis_secim : null;
+
+  // mevcut is ile ayni siparis no?
+  const existing = data.jobs.find((j) => String(j.job_no || '').trim().toLowerCase() === orderNo.toLowerCase());
+  if (existing && !input.existingJobAction) {
+    return {
+      needsExistingJobDecision: {
+        jobId: existing.id, jobNo: existing.job_no, status: existing.status,
+        title: existing.title,
+      },
+      reason: '"' + orderNo + '" numaralı iş zaten mevcut. Mevcut işi güncellemek mi, yeni kayıt oluşturmak mı istiyorsunuz?',
+    };
+  }
+  const action = input.existingJobAction === 'update' && existing ? 'update' : 'new';
+
+  const now = new Date().toISOString();
+  const noteText = ['[Üretim Formu ' + rec.id + ']', f.color ? 'Renk: ' + f.color : '', f.notes || '']
+    .filter(Boolean).join(' · ').slice(0, 500);
+
+  const common = {
+    title: String(f.order_title || f.product_description || orderNo).slice(0, 200),
+    customer_id: links.customer_id || null,
+    customer_name_free: links.customer_id ? null : (String(f.customer_name || '').slice(0, 160) || null),
+    product_type: String(f.product_type || '').slice(0, 80) || null,
+    quantity: qty,
+    unit_price: unitPrice,
+    cost_items: costItems,
+    delivery_date: isDate(f.delivery_date) ? f.delivery_date : null,
+    baski_nakis_secim: bnSecim,
+    document_id: rec.id,
+    document_hash: rec.sha256,
+    prod_size_breakdown: f.size_breakdown || null,
+    prod_print_areas: Array.isArray(f.print_areas) ? f.print_areas : [],
+    prod_embroidery_areas: Array.isArray(f.embroidery_areas) ? f.embroidery_areas : [],
+    prod_special_instructions: Array.isArray(f.special_instructions) ? f.special_instructions : [],
+  };
+
+  let jobId;
+  if (action === 'update') {
+    jobId = existing.id;
+    Object.assign(existing, common, {
+      status: JOB_STATUSES.includes(f.status) ? f.status : existing.status,
+      note: (existing.note ? existing.note + ' | ' : '') + noteText,
+      updated_at: now,
+    });
+  } else {
+    jobId = nextId(data.jobs);
+    data.jobs.unshift({
+      id: jobId,
+      job_no: orderNo,
+      order_date: isDate(f.order_date) ? f.order_date : todayISO(),
+      status,
+      manual_total_cost: 0,
+      deposit_received: 0,
+      problem_note: null,
+      note: noteText,
+      created_at: now,
+      updated_at: now,
+      ...common,
+    });
+  }
+
+  // opsiyonel: uretim takip kaydi
+  const created = [{ kind: 'job', id: jobId, action, jobNo: orderNo }];
+  if (input.createUretimTakip) {
+    data.uretimTakip = data.uretimTakip || [];
+    const utId = nextId(data.uretimTakip);
+    data.uretimTakip.unshift({
+      id: utId,
+      date: todayISO(),
+      customer_name: String(f.customer_name || common.customer_name_free || common.title).slice(0, 160),
+      est_delivery: isDate(f.delivery_date) ? f.delivery_date : null,
+      quantity: qty,
+      status: 'Planlandı',
+      note: '[Üretim Formu ' + rec.id + '] ' + (f.product_type || '') + (f.color ? ' / ' + f.color : ''),
+      problem_note: null,
+      follow_up_date: null,
+      job_no: orderNo,
+    });
+    created.push({ kind: 'uretimTakip', id: utId });
+  }
+
+  const updatedAt = store.writePanelData(data, raw.updatedAt);
+  docs.updateDocument(rec.id, {
+    status: 'committed',
+    committedRecord: { kind: 'job', created, at: now },
+    finalFields: f,
+  });
+  return { ok: true, created, updatedAt, jobId };
+}
+
+module.exports = { commitDocument, commitProductionForm, INCOME_CATS, JOB_STATUSES };

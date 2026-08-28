@@ -581,6 +581,18 @@ app.post('/api/agent/documents/:id/extract', checkApiKey, async (req, res) => {
   }
 });
 
+// Uretim formu: onizlemede alan/boyut degisince adet+maliyeti yeniden hesapla (panel verisine dokunmaz).
+app.post('/api/agent/documents/:id/recompute', checkApiKey, (req, res) => {
+  try {
+    const { recomputeProdForm } = require('./agent/document');
+    const rec = recomputeProdForm(req.params.id, req.body || {});
+    const { storedName, ...safe } = rec;
+    res.json(safe);
+  } catch (e) {
+    res.status(400).json({ error: String(e && e.message || e) });
+  }
+});
+
 // Onaylanan belgeyi finansa isle (kullanici duzenlemeleri + confirm).
 app.post('/api/agent/documents/:id/commit', checkApiKey, (req, res) => {
   try {

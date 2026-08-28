@@ -80,8 +80,10 @@ function metaOf(rec) {
     sha256: rec.sha256, status: rec.status, uploadedAt: rec.uploadedAt,
     documentType: rec.classification && rec.classification.finalType || null,
     direction: rec.classification && rec.classification.finalDirection || null,
+    humanLabel: rec.classification && rec.classification.humanLabel || null,
     amount: rec.extraction && rec.extraction.total != null ? rec.extraction.total
       : (rec.extraction && rec.extraction.amount) || null,
+    orderNo: rec.extraction && rec.extraction.order_no || null,
     committedKind: rec.committedRecord && rec.committedRecord.kind || null,
   };
 }

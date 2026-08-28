@@ -1,0 +1,17 @@
+{
+  "document_type": "production_form",
+  "order_no": "MRC-101",
+  "order_title": "Kulüp Sweatshirt",
+  "delivery_date": "2026-09-15",
+  "product_description": "Kapüşonlu sweatshirt, ön göğüs baskı + sol kol nakış",
+  "product_type": "Sweatshirt",
+  "color": "Antrasit",
+  "print_areas": ["göğüs"],
+  "embroidery_areas": ["sol kol"],
+  "size_breakdown": { "XS": 0, "S": 8, "M": 14, "L": 10, "XL": 6, "XXL": 2, "3XL": 0 },
+  "total_quantity": 40,
+  "special_instructions": [],
+  "customer_name": "İTÜ Rover",
+  "notes": "Yaka etiketi kulüp logolu olacak.",
+  "confidence": { "document_type": 0.97, "total_quantity": 0.95 }
+}

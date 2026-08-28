@@ -28,6 +28,36 @@ function suggestLinks(ext, classification) {
 
   const type = classification.finalType;
   const dir = classification.finalDirection;
+
+  // ---- URETIM FORMU: siparis no -> mevcut is, isim -> musteri ----
+  if (type === 'production_form') {
+    const out = { customers: [], suppliers: [], jobs: [], invoices: [], debts: [], existingJob: null };
+    const orderNo = String(ext.order_no || '').trim().toLowerCase();
+    const nCust = nn(ext.customer_name);
+    (data.jobs || []).forEach((j) => {
+      const jn = String(j.job_no || '').trim().toLowerCase();
+      if (orderNo && jn && jn === orderNo) {
+        const c = (data.customers || []).find((x) => x.id === j.customer_id);
+        const label = (j.job_no || '#' + j.id) + ' · ' + ((c && c.name) || j.customer_name_free || '-') + ' · ' + (j.product_type || '-') + ' · ' + (j.status || '-');
+        out.jobs.push({ id: j.id, label, score: 1, reason: 'Sipariş No birebir eşleşti' });
+        out.existingJob = { id: j.id, jobNo: j.job_no, status: j.status };
+      }
+    });
+    if (nCust) {
+      (data.customers || []).forEach((c) => {
+        const n = nn(c.name);
+        if (!n) return;
+        let s = 0;
+        if (n === nCust) s = 1;
+        else if (n.includes(nCust) || nCust.includes(n)) s = 0.7;
+        if (s >= 0.6) out.customers.push({ id: c.id, label: c.name, score: r2(s), reason: 'isim benzerliği' });
+      });
+      out.customers.sort((a, b) => b.score - a.score);
+      out.customers = out.customers.slice(0, 6);
+    }
+    return out;
+  }
+
   const partyName = counterpartyName(ext, dir);
   const partyVkn = String(counterpartyVkn(ext, dir) || '').replace(/\D/g, '');
   const amount = r2(ext.total != null ? ext.total : ext.amount);
