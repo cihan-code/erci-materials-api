@@ -27,6 +27,15 @@ function custMap(data) {
   return m;
 }
 
+// Panel uzun durum etiketlerini temiz kisa forma cevir (model kisaltma uydurmasın).
+function cleanStatus(s) {
+  const map = {
+    'Ütü-Pakette-Teslimat Bekliyor': 'Ütü-Paket (teslimat bekliyor)',
+    'Ütü-Paket-Teslimat Bekliyor': 'Ütü-Paket (teslimat bekliyor)',
+  };
+  return map[String(s || '').trim()] || String(s || '').trim() || '-';
+}
+
 // ---------------- PRODUCTION ----------------
 function production(data, T) {
   const out = ['## URETIM (uretimTakip - acik kayitlar)'];
@@ -40,7 +49,7 @@ function production(data, T) {
     else if (gec != null && gec >= -3) flag = 'YAKIN';
     out.push('  [' + (flag || 'akis') + '] id=' + (u.id != null ? u.id : '-') +
       ' | ' + String(u.customer_name || '').trim() +
-      ' | durum=' + (u.status || '-') +
+      ' | durum=' + cleanStatus(u.status) +
       ' | tah.teslim=' + (u.est_delivery || '-') + ' (' + (gec != null ? (gec > 0 ? '+' : '') + gec + ' gun' : '-') + ')' +
       ' | adet=' + (u.quantity != null ? u.quantity : '-') +
       ' | problem=' + (u.problem_note || '-') +
