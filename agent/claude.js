@@ -9,7 +9,31 @@ const store = require('./store');
 const { estCostUsd } = require('./pricing');
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
+
+// --- AGENT_MOCK guvenlik kilidi ---
+// Mock modu SADECE yerel/gelistirme icindir. Production (Render) ortaminda AGENT_MOCK=1
+// yanlislikla set edilirse uygulama BASLAMAZ - sahte brifingin canliya yazilmasini onler.
+// Render tum servislerinde RENDER=true tanimlar; ayrica NODE_ENV=production kontrol edilir.
 const MOCK = process.env.AGENT_MOCK === '1';
+if (MOCK) {
+  const prodSignals = [];
+  if (process.env.RENDER) prodSignals.push('RENDER=' + process.env.RENDER);
+  if (process.env.RENDER_SERVICE_ID) prodSignals.push('RENDER_SERVICE_ID');
+  if (process.env.NODE_ENV === 'production') prodSignals.push('NODE_ENV=production');
+  if (process.env.AGENT_ENV === 'production') prodSignals.push('AGENT_ENV=production');
+
+  if (prodSignals.length) {
+    console.error(
+      '\n==================================================================\n' +
+      ' KRITIK: AGENT_MOCK=1 ama ortam PRODUCTION gorunuyor (' + prodSignals.join(', ') + ').\n' +
+      ' Mock modu yalnizca yerel gelistirme icindir. Uygulama durduruluyor.\n' +
+      ' Render > Environment altindan AGENT_MOCK degiskenini SILIN.\n' +
+      '==================================================================\n'
+    );
+    process.exit(1);
+  }
+  console.warn('[claude] AGENT_MOCK=1 - SAHTE yanit modu (yerel). Anthropic API cagrilmayacak, ucret olusmayacak.');
+}
 
 // Sahte yanit: act icin sema-uyumlu bos JSON; rapor icin kisa markdown iskeleti.
 function mockText(opts) {

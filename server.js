@@ -15,6 +15,9 @@ const crypto = require('crypto');
 
 // Yonetim Ajani cikti deposu + brifing uretici (kendi ayri kovasi; /api/paneldata'ya dokunmaz).
 const agentStore = require('./agent/store');
+// Eager yukle: AGENT_MOCK guvenlik kilidi burada; production'da AGENT_MOCK=1 ise uygulama
+// app.listen'e gelmeden process.exit(1) yapar.
+require('./agent/claude');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const API_KEY = process.env.API_KEY || '';
