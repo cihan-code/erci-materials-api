@@ -19,6 +19,8 @@ function statusMatch(list, v) {
   return list.find((s) => s.toLowerCase() === String(v || '').trim().toLowerCase()) || null;
 }
 
+const INCOME_CATS = ['Kapora', 'Kalan Tahsilat', 'Peşin Ödeme', 'Tahsilat', 'İş Geliri', 'Diğer Gelir'];
+
 function todayISO() { return new Date().toISOString().slice(0, 10); }
 function nextId(arr) {
   let mx = 0;
@@ -27,6 +29,28 @@ function nextId(arr) {
 }
 function str(v, max) { return v == null ? '' : String(v).slice(0, max || 300); }
 function isISODate(s) { return /^\d{4}-\d{2}-\d{2}$/.test(String(s || '')); }
+// Yonetici adini tam forma cevir; eslesme yoksa hata (yanlis kisiye atama engeli).
+function resolveManager(v) {
+  const q = String(v || '').trim().toLowerCase();
+  if (!q) return '';
+  const hit = MANAGERS.find((m) => m.toLowerCase().includes(q) || q.includes(m.split(' ')[0].toLowerCase()));
+  if (!hit) throw new Error('Geçersiz kişi "' + v + '". Geçerli: ' + MANAGERS.join(', '));
+  return hit;
+}
+// Tarih bugune gore makul araligada mi (+-400 gun)? Model yil hatasi yapmasin.
+function saneDate(s, label) {
+  if (!isISODate(s)) throw new Error((label || 'Tarih') + ' YYYY-MM-DD olmalı');
+  const diff = Math.abs((new Date(s + 'T00:00:00Z') - new Date(todayISO() + 'T00:00:00Z')) / 86400000);
+  if (diff > 400) throw new Error((label || 'Tarih') + ' bugünden çok uzak (' + s + ') - yıl hatası olabilir');
+  return s;
+}
+function round2(v) { return Math.round((v || 0) * 100) / 100; }
+// Bir odemenin DELTA tutari. Model bazen farkli isim kullaniyor - hepsini "bu seferki odeme" say.
+function paymentDelta(p) {
+  return p.odeme_tutari != null ? p.odeme_tutari
+    : (p.odeme != null ? p.odeme
+      : (p.amount != null ? p.amount : p.paid_amount));
+}
 
 // id ile veya serbest metin eslemesiyle tek kayit bul. Birden fazla eslesme -> hata.
 function findOne(list, p, textFields, label) {
@@ -51,17 +75,18 @@ const ACTIONS = {
     describe: (p) => 'Görev ekle: "' + str(p.title, 80) + '" → ' + (p.assigned_to || 'atanmamış') + ' (' + (p.date || todayISO()) + ')',
     apply: (data, p) => {
       if (!p.title) throw new Error('title gerekli');
-      if (p.date && !isISODate(p.date)) throw new Error('date YYYY-MM-DD olmali');
+      const date = p.date ? saneDate(p.date, 'Görev tarihi') : todayISO();
+      const kisi = p.assigned_to ? resolveManager(p.assigned_to) : '';
       data.tasks = data.tasks || [];
       const id = nextId(data.tasks);
       data.tasks.unshift({
         id, title: str(p.title, 200), note: str(p.note, 500),
-        assigned_to: p.assigned_to && MANAGERS.find((m) => m.toLowerCase().includes(String(p.assigned_to).toLowerCase())) || p.assigned_to || '',
-        created_by: 'Yönetim Ajanı', date: p.date || todayISO(),
+        assigned_to: kisi,
+        created_by: 'Yönetim Ajanı', date,
         done: false, carried_forward: false, carried_from: null,
         created_date: todayISO(),
       });
-      return 'Görev #' + id + ' eklendi';
+      return 'Görev #' + id + ' eklendi: "' + str(p.title, 80) + '" → ' + (kisi || 'atanmamış') + ' (' + date + ')';
     },
   },
   complete_task: {
@@ -78,19 +103,20 @@ const ACTIONS = {
     describe: (p) => 'Görevi ata: ' + (p.id != null ? '#' + p.id : '"' + str(p.match, 60) + '"') + ' → ' + p.assigned_to,
     apply: (data, p) => {
       if (!p.assigned_to) throw new Error('assigned_to gerekli');
+      const kisi = resolveManager(p.assigned_to);
       const t = findOne(data.tasks, p, ['title', 'note'], 'Görev');
-      t.assigned_to = MANAGERS.find((m) => m.toLowerCase().includes(String(p.assigned_to).toLowerCase())) || p.assigned_to;
-      return 'Görev #' + t.id + ' → ' + t.assigned_to;
+      t.assigned_to = kisi;
+      return 'Görev #' + t.id + ' "' + str(t.title, 60) + '" → ' + kisi;
     },
   },
   set_task_date: {
     risk: RISK.SAFE, domain: 'tasks',
     describe: (p) => 'Görev tarihi: ' + (p.id != null ? '#' + p.id : '"' + str(p.match, 60) + '"') + ' → ' + p.date,
     apply: (data, p) => {
-      if (!isISODate(p.date)) throw new Error('date YYYY-MM-DD olmali');
+      const date = saneDate(p.date, 'Görev tarihi');
       const t = findOne(data.tasks, p, ['title', 'note'], 'Görev');
-      t.date = p.date;
-      return 'Görev #' + t.id + ' tarihi → ' + p.date;
+      t.date = date;
+      return 'Görev #' + t.id + ' "' + str(t.title, 60) + '" tarihi → ' + date;
     },
   },
   set_production_status: {
@@ -109,9 +135,8 @@ const ACTIONS = {
     risk: RISK.SAFE, domain: 'production',
     describe: (p) => 'Tahmini teslim: ' + (p.id != null ? 'id=' + p.id : '"' + str(p.customer_name, 40) + '"') + ' → ' + p.est_delivery,
     apply: (data, p) => {
-      if (!isISODate(p.est_delivery)) throw new Error('est_delivery YYYY-MM-DD olmali');
       const u = findOne(data.uretimTakip, p, ['customer_name', 'note'], 'Üretim kaydı');
-      u.est_delivery = p.est_delivery;
+      u.est_delivery = saneDate(p.est_delivery, 'Tahmini teslim');
       return 'Üretim (' + (u.customer_name || u.id) + ') tah. teslim → ' + p.est_delivery;
     },
   },
@@ -119,11 +144,11 @@ const ACTIONS = {
     risk: RISK.SAFE, domain: 'sales',
     describe: (p) => 'Fırsat takip tarihi: ' + (p.id != null ? 'id=' + p.id : '"' + str(p.customer_name, 40) + '"') + ' → ' + p.follow_up_date,
     apply: (data, p) => {
-      if (!isISODate(p.follow_up_date)) throw new Error('follow_up_date YYYY-MM-DD olmali');
+      const fu = saneDate(p.follow_up_date, 'Takip tarihi');
       const pl = findOne(data.pipeline, p, ['customer_name', 'description', 'note'], 'Fırsat');
-      pl.follow_up_date = p.follow_up_date;
+      pl.follow_up_date = fu;
       if (p.note !== undefined) pl.note = str(p.note, 300);
-      return 'Fırsat (' + (pl.customer_name || pl.id) + ') takip → ' + p.follow_up_date;
+      return 'Fırsat (' + (pl.customer_name || pl.id) + ') takip → ' + fu;
     },
   },
   set_pipeline_status: {
@@ -133,8 +158,10 @@ const ACTIONS = {
       const pl = findOne(data.pipeline, p, ['customer_name', 'description', 'note'], 'Fırsat');
       const s = statusMatch(PIPELINE_STATUSES, p.status);
       if (!s) throw new Error('Geçersiz fırsat durumu. Geçerli: ' + PIPELINE_STATUSES.join(', '));
+      const eski = pl.status;
       pl.status = s;
-      return 'Fırsat (' + (pl.customer_name || pl.id) + ') → ' + pl.status;
+      const not = (s === 'Kazanıldı') ? ' — bu fırsat için ayrıca İşler sekmesinden bir iş kaydı açılmalı (panelde elle).' : '';
+      return 'Fırsat (' + (pl.customer_name || pl.id) + ') ' + eski + ' → ' + pl.status + not;
     },
   },
   append_customer_note: {
@@ -152,29 +179,29 @@ const ACTIONS = {
     risk: RISK.SAFE, domain: 'sales',
     describe: (p) => 'Okul takip tarihi: "' + str(p.okul_adi || p.match, 40) + '" → ' + p.takip_tarihi,
     apply: (data, p) => {
-      if (!isISODate(p.takip_tarihi)) throw new Error('takip_tarihi YYYY-MM-DD olmali');
+      const tt = saneDate(p.takip_tarihi, 'Takip tarihi');
       const o = findOne(data.okulTakip, { id: p.id, match: p.okul_adi || p.match }, ['okul_adi'], 'Okul kaydı');
-      o.takip_tarihi = p.takip_tarihi;
+      o.takip_tarihi = tt;
       if (p.gorusme_durumu !== undefined) o.gorusme_durumu = str(p.gorusme_durumu, 80);
-      return 'Okul (' + o.okul_adi + ') takip → ' + p.takip_tarihi;
+      return 'Okul (' + o.okul_adi + ') takip → ' + tt;
     },
   },
 
   // ---------------- CONFIRM (finansal / kritik / silme) ----------------
   add_income: {
     risk: RISK.CONFIRM, domain: 'finance',
-    describe: (p) => 'GELİR kaydı ekle: ' + Number(p.amount || 0).toLocaleString('tr-TR') + ' TL — ' + str(p.source, 40) + ' (' + (p.category || 'Diğer Gelir') + ')',
+    describe: (p) => 'GELİR kaydı ekle: ' + Number(p.amount || 0).toLocaleString('tr-TR') + ' TL — ' + str(p.source, 40) + ' (' + (statusMatch(INCOME_CATS, p.category) || 'Diğer Gelir') + ')',
     apply: (data, p) => {
       const amount = Number(p.amount);
-      if (!Number.isFinite(amount) || amount <= 0) throw new Error('amount pozitif sayi olmali');
+      if (!Number.isFinite(amount) || amount <= 0) throw new Error('amount pozitif sayı olmalı');
       data.incomes = data.incomes || [];
       const id = nextId(data.incomes);
       data.incomes.unshift({
         id, date: isISODate(p.date) ? p.date : todayISO(), amount,
-        category: str(p.category, 40) || 'Diğer Gelir', source: str(p.source, 120),
+        category: statusMatch(INCOME_CATS, p.category) || 'Diğer Gelir', source: str(p.source, 120),
         job_id: p.job_id || null, payment_method: str(p.payment_method, 40), note: str(p.note, 300),
       });
-      return 'Gelir #' + id + ' eklendi (' + amount.toLocaleString('tr-TR') + ' TL)';
+      return 'Gelir #' + id + ' eklendi (' + amount.toLocaleString('tr-TR') + ' TL, ' + (statusMatch(INCOME_CATS, p.category) || 'Diğer Gelir') + ')';
     },
   },
   add_expense: {
@@ -193,16 +220,41 @@ const ACTIONS = {
       return 'Gider #' + id + ' eklendi (' + amount.toLocaleString('tr-TR') + ' TL)';
     },
   },
+  // Bir borca/alacağa ÖDEME İŞLE. odeme_tutari = bu seferki ödeme (delta), TOPLAM değil.
+  // Panelin formBorcOdeme'siyle aynı: paid_amount += odeme, + otomatik Gelir(Alacak)/Gider(Borç).
+  // Model bakiye HESAPLAMAZ; backend düşürür.
   update_debt_payment: {
     risk: RISK.CONFIRM, domain: 'finance',
-    describe: (p) => 'Borç/Alacak ödeme güncelle: ' + (p.id != null ? 'id=' + p.id : '"' + str(p.party_name, 40) + '"') + ' → ödenen ' + Number(p.paid_amount || 0).toLocaleString('tr-TR') + ' TL',
+    describe: (p) => {
+      const o = Number(paymentDelta(p)) || 0;
+      return 'Borç/Alacak ödemesi: ' + (p.id != null ? 'id=' + p.id : '"' + str(p.party_name, 40) + '"') +
+        ' → ' + o.toLocaleString('tr-TR') + ' TL ödeme işle (kalan bakiye bu kadar düşer + otomatik gelir/gider kaydı)';
+    },
     apply: (data, p) => {
       const x = findOne(data.debts, { id: p.id, match: p.party_name }, ['party_name', 'category'], 'Borç/Alacak');
-      const paid = Number(p.paid_amount);
-      if (!Number.isFinite(paid) || paid < 0) throw new Error('paid_amount 0 veya pozitif olmali');
-      x.paid_amount = paid;
+      const odeme = Number(paymentDelta(p));
+      if (!Number.isFinite(odeme) || odeme <= 0) throw new Error('odeme_tutari pozitif bir ödeme tutarı olmalı (bu seferki ödeme, toplam değil)');
+      const tutar = Number(x.amount) || 0;
+      const oncekiOdenen = Number(x.paid_amount) || 0;
+      const oncekiKalan = round2(tutar - oncekiOdenen);
+      x.paid_amount = round2(oncekiOdenen + odeme);
       x.update_date = todayISO();
-      return x.party_name + ' ödenen tutar → ' + paid.toLocaleString('tr-TR') + ' TL';
+      x.note = (x.note ? x.note + ' | ' : '') + '[' + todayISO() + ' Ajan] ' + odeme.toLocaleString('tr-TR') + ' TL ödeme';
+      const yeniKalan = round2(tutar - x.paid_amount);
+
+      // panelin recordDebtAutoTransaction'ı: Alacak -> Gelir, Borç -> Gider
+      const not = '[Borç/Alacak] ' + x.party_name + ' — ödeme (Ajan)';
+      if (x.type === 'Alacak') {
+        data.incomes = data.incomes || [];
+        data.incomes.unshift({ id: nextId(data.incomes), date: todayISO(), amount: odeme, category: 'Tahsilat', source: x.party_name, job_id: null, payment_method: str(p.payment_method, 40), note: not });
+      } else {
+        data.expenses = data.expenses || [];
+        data.expenses.unshift({ id: nextId(data.expenses), date: todayISO(), amount: odeme, category: 'Borç Ödemesi', payee: x.party_name, job_id: null, payment_method: str(p.payment_method, 40), note: not });
+      }
+      const warn = yeniKalan < -1 ? '  ⚠️ FAZLA ÖDEME (kalan negatif — kontrol edin)' : '';
+      return x.party_name + ' (' + x.type + ') · ' + odeme.toLocaleString('tr-TR') + ' TL ödeme + otomatik ' +
+        (x.type === 'Alacak' ? 'Gelir' : 'Gider') + ' kaydı · kalan bakiye ' +
+        oncekiKalan.toLocaleString('tr-TR') + ' → ' + yeniKalan.toLocaleString('tr-TR') + ' TL' + warn;
     },
   },
   add_job_payment: {
@@ -269,4 +321,18 @@ function applyAction(type, params, expectedUpdatedAt) {
   return { ok: true, type, summary, updatedAt };
 }
 
-module.exports = { ACTIONS, ACTION_TYPES, RISK, riskOf, describe, applyAction, MANAGERS, PROD_STATUSES, PIPELINE_STATUSES, JOB_STATUSES };
+// KURU CALISMA: panel verisini KLONLA, aksiyonu uygula, ozeti dondur - KAYDETMEZ.
+// Onay bekleyen aksiyonlarin kartinda "ne olacak" onizlemesi icin (kalan bakiye vb.).
+function dryRun(type, params) {
+  const def = ACTIONS[type];
+  if (!def) throw new Error('Bilinmeyen aksiyon tipi: ' + type);
+  const raw = store.readPanelRaw();
+  if (!raw || !raw.data) throw new Error('panel-data.json yok.');
+  const clone = JSON.parse(JSON.stringify(raw.data));
+  return def.apply(clone, params || {}); // clone mutate olur, kaydedilmez
+}
+
+module.exports = {
+  ACTIONS, ACTION_TYPES, RISK, riskOf, describe, applyAction, dryRun,
+  MANAGERS, PROD_STATUSES, PIPELINE_STATUSES, JOB_STATUSES, INCOME_CATS,
+};

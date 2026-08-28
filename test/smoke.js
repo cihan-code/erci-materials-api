@@ -113,21 +113,52 @@ async function main() {
 
   console.log('\n# 3. Panel aksiyonlari (offline, gercek mutasyon)');
   ok('create_task', () => {
-    const r = actions.applyAction('create_task', { title: 'smoke test', assigned_to: 'erdem', date: '2026-08-29' });
+    const r = actions.applyAction('create_task', { title: 'smoke test', assigned_to: 'erdem', date: TODAY });
     assert(/Görev #\d+/.test(r.summary));
+    assert(/Erdem Küçükarslan/.test(r.summary), 'kisi tam ada cevrilmedi');
+  });
+  ok('create_task gecersiz kisi reddedilir', () => {
+    assert.throws(() => actions.applyAction('create_task', { title: 'x', assigned_to: 'Ahmet' }), /Geçersiz kişi/);
+  });
+  ok('gecersiz uretim durumu reddedilir', () => {
+    assert.throws(() => actions.applyAction('set_production_status', { id: 11, status: 'Kargoda' }), /Geçersiz üretim/);
   });
   ok('unknown action reddedilir', () => {
     assert.throws(() => actions.applyAction('nuke', {}));
   });
   ok('confirm risk siniflari dogru', () => {
     assert.strictEqual(actions.riskOf('add_expense'), 'confirm');
+    assert.strictEqual(actions.riskOf('update_debt_payment'), 'confirm');
     assert.strictEqual(actions.riskOf('create_task'), 'safe');
     assert.strictEqual(actions.riskOf('delete_task'), 'confirm');
   });
-  // temizle
-  const raw = store.readPanelRaw();
-  raw.data.tasks = raw.data.tasks.filter((t) => t.title !== 'smoke test');
-  store.writePanelData(raw.data);
+
+  console.log('\n# 3b. update_debt_payment DELTA + otomatik gelir (bug fix)');
+  ok('odeme paid_amount += delta, silmez', () => {
+    const raw = store.readPanelRaw();
+    const alacak = raw.data.debts.find((d) => d.type === 'Alacak' && (d.amount - (d.paid_amount || 0)) > 20000);
+    assert(alacak, 'test icin uygun alacak yok');
+    const oncekiOdenen = alacak.paid_amount || 0;
+    const oncekiGelirSayisi = raw.data.incomes.length;
+    const r = actions.dryRun('update_debt_payment', { id: alacak.id, odeme_tutari: 10000 });
+    // dryRun clone'da calisir - gercek veri degismedi
+    const raw2 = store.readPanelRaw();
+    assert.strictEqual(raw2.data.debts.find((d) => d.id === alacak.id).paid_amount, oncekiOdenen, 'dryRun gercek veriyi degistirdi!');
+    assert.strictEqual(raw2.data.incomes.length, oncekiGelirSayisi, 'dryRun gelir ekledi!');
+    assert(/kalan bakiye/i.test(r) && /→/.test(r), 'onizleme kalan bakiye gostermeli: ' + r);
+    // simdi gercekten uygula
+    actions.applyAction('update_debt_payment', { id: alacak.id, odeme_tutari: 10000 });
+    const raw3 = store.readPanelRaw();
+    const after = raw3.data.debts.find((d) => d.id === alacak.id);
+    assert.strictEqual(after.paid_amount, oncekiOdenen + 10000, 'paid_amount delta ile artmadi: ' + after.paid_amount);
+    assert(after.amount - after.paid_amount > 0, 'borc silinmis! kalan: ' + (after.amount - after.paid_amount));
+    assert.strictEqual(raw3.data.incomes.length, oncekiGelirSayisi + 1, 'otomatik gelir eklenmedi');
+    assert.strictEqual(raw3.data.incomes[0].amount, 10000);
+    assert.strictEqual(raw3.data.incomes[0].category, 'Tahsilat');
+  });
+
+  // temizle: bu turda eklenen ajan gorevleri + geri al edilemeyen mutasyonlar icin taze seed
+  seed();
 
   console.log('\n# 4. Usage log');
   ok('mock cagrilari $0 loglandi', () => {

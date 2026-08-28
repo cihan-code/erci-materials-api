@@ -40,18 +40,6 @@ const SCHEMA = {
   },
 };
 
-function pickDomains(instruction) {
-  const s = String(instruction || '').toLowerCase();
-  const set = new Set();
-  if (/gorev|görev|task|yapılacak|atama|ata /.test(s)) set.add('tasks');
-  if (/uretim|üretim|kesim|dikim|teslim|kargo|nakış|baskı|production/.test(s)) set.add('production');
-  if (/firsat|fırsat|pipeline|teklif|takip|okul|satış|satis|müşteri aday/.test(s)) set.add('sales');
-  if (/müşteri|musteri|customer|not ekle|iletişim/.test(s)) set.add('crm');
-  if (/gelir|gider|ödeme|odeme|tahsilat|borç|borc|alacak|kapora|fatura|nakit|finans/.test(s)) set.add('finance');
-  if (set.size === 0) { set.add('tasks'); set.add('production'); set.add('sales'); }
-  return Array.from(set);
-}
-
 // instruction: kullanici metni. Donen: { reply, applied:[], pending:[], errors:[], usage }
 async function interpretAndAct(instruction) {
   const text = String(instruction || '').trim();
@@ -62,13 +50,14 @@ async function interpretAndAct(instruction) {
   if (!data) throw new Error('panel-data.json yok - once panelden veri kaydedilmeli.');
 
   const today = process.env.PANEL_TODAY || new Date().toISOString().slice(0, 10);
-  const domains = pickDomains(text);
-  const signals = buildSignals(data, today, domains);
+  // Tum domain'ler - haiku'da ~6k token, ~$0.006. Domain tahmini kaybetmek riski daha buyuk:
+  // model bir kaydi goremezse id ile eslesemez.
+  const signals = buildSignals(data, today, undefined);
 
   const user = [
     'Bugün: ' + today,
     '',
-    '## İlgili panel sinyalleri (' + domains.join(', ') + ')',
+    '## Panel metrik tablosu (kayıtları id ile eşleştir)',
     signals,
     '',
     '## Yöneticinin isteği',
@@ -93,7 +82,8 @@ async function interpretAndAct(instruction) {
   catch (e) { throw new Error('Model yaniti JSON degil: ' + resp.text.slice(0, 200)); }
 
   const applied = [], pending = [], errors = [];
-  const rawActions = Array.isArray(parsed.actions) ? parsed.actions : [];
+  let rawActions = Array.isArray(parsed.actions) ? parsed.actions : [];
+  rawActions = dedupeActions(rawActions, errors);
 
   for (const a of rawActions) {
     let params = {};
@@ -101,20 +91,26 @@ async function interpretAndAct(instruction) {
     catch (e) { errors.push({ type: a.type, error: 'params_json parse edilemedi' }); continue; }
 
     if (!actions.ACTIONS[a.type]) { errors.push({ type: a.type, error: 'bilinmeyen aksiyon' }); continue; }
-
     const risk = actions.riskOf(a.type);
-    const desc = actions.describe(a.type, params);
 
     if (risk === actions.RISK.CONFIRM) {
-      pending.push({ type: a.type, params, reason: a.reason || '', risk, describe: desc });
+      // Onizleme: kuru calisma ile "ne olacak" (kalan bakiye vb.). Basarisizsa describe'e dus.
+      let preview;
+      try { preview = actions.dryRun(a.type, params); }
+      catch (e) { preview = null; errors.push({ type: a.type, describe: actions.describe(a.type, params), error: String(e && e.message || e) }); }
+      if (preview == null && errors.length && errors[errors.length - 1].type === a.type) continue;
+      pending.push({
+        type: a.type, params, reason: a.reason || '', risk,
+        describe: preview || actions.describe(a.type, params),
+      });
       continue;
     }
     // safe -> hemen uygula
     try {
-      const r = actions.applyAction(a.type, params); // expectedUpdatedAt: readPanelRaw icinde guncel alinir
-      applied.push({ type: a.type, params, reason: a.reason || '', summary: r.summary, describe: desc });
+      const r = actions.applyAction(a.type, params);
+      applied.push({ type: a.type, params, reason: a.reason || '', summary: r.summary, describe: r.summary });
     } catch (e) {
-      errors.push({ type: a.type, describe: desc, error: String(e && e.message || e) });
+      errors.push({ type: a.type, describe: actions.describe(a.type, params), error: String(e && e.message || e) });
     }
   }
 
@@ -127,6 +123,20 @@ async function interpretAndAct(instruction) {
     costUsd: resp.costUsd,
     panelUpdatedAtBefore: updatedAt,
   };
+}
+
+// Model hem update_debt_payment hem add_income/add_expense urettiyse: borc odemesi zaten
+// otomatik gelir/gider ekliyor -> fazlalik olani dusur (cift gelir/gider engeli).
+function dedupeActions(list, errors) {
+  const hasDebtPay = list.some((a) => a.type === 'update_debt_payment');
+  if (!hasDebtPay) return list;
+  return list.filter((a) => {
+    if (a.type === 'add_income' || a.type === 'add_expense') {
+      errors.push({ type: a.type, error: 'atlandı: borç/alacak ödemesi geliri/gideri zaten otomatik ekliyor (çift kayıt önlendi)' });
+      return false;
+    }
+    return true;
+  });
 }
 
 // Onaylanmis tek aksiyonu uygula (Claude cagrisi yok). action: { type, params }.
