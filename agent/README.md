@@ -77,7 +77,7 @@ Bu makinede node yoksa: `export ELECTRON_RUN_AS_NODE=1; NODE="/Applications/Visu
 
 ## Zamanlama
 
-`.github/workflows/agent-brief.yml` — her gün 04:00 UTC (07:00 İstanbul) `gunluk-brifing`;
+`.github/workflows/agent-brief.yml` — her gün 05:00 UTC (08:00 İstanbul) `gunluk-brifing`;
 Pazartesi + `haftalik-review`; ayın 1'i + `aylik-rapor`.
 
 ## Finansal belge işleme (dekont / fatura)
