@@ -42,13 +42,84 @@ function recentContext(type, n) {
   }).filter(Boolean).join('\n\n');
 }
 
+// Tek bir streaming istegi. SSE'yi elle ayristirir (SDK yok). text + usage + stop_reason dondurur.
+async function streamOnce(body, key) {
+  const res = await fetch(ANTHROPIC_URL, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (res.status === 429 || res.status >= 500) {
+    const t = await res.text().catch(() => '');
+    const err = new Error('Anthropic HTTP ' + res.status + ': ' + t.slice(0, 300));
+    err.retryable = true;
+    throw err;
+  }
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    const err = new Error('Anthropic HTTP ' + res.status + ': ' + t.slice(0, 500));
+    err.retryable = false; // 400/401/404 - tekrar denemek anlamsiz
+    throw err;
+  }
+  if (!res.body) throw new Error('Anthropic yanitinda govde (stream) yok.');
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let text = '';
+  let usage = null;
+  let stopReason = null;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep;
+    while ((sep = buf.indexOf('\n\n')) !== -1) {
+      const chunk = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      const dataStr = chunk.split('\n')
+        .filter((l) => l.startsWith('data:'))
+        .map((l) => l.slice(5).trim())
+        .join('');
+      if (!dataStr || dataStr === '[DONE]') continue;
+      let evt;
+      try { evt = JSON.parse(dataStr); } catch (e) { continue; }
+      if (evt.type === 'content_block_delta' && evt.delta && evt.delta.type === 'text_delta') {
+        text += evt.delta.text || '';
+      } else if (evt.type === 'message_start' && evt.message && evt.message.usage) {
+        usage = Object.assign({}, evt.message.usage);
+      } else if (evt.type === 'message_delta') {
+        if (evt.delta && evt.delta.stop_reason) stopReason = evt.delta.stop_reason;
+        if (evt.usage) usage = Object.assign(usage || {}, evt.usage);
+      } else if (evt.type === 'error') {
+        const err = new Error('Anthropic stream hatasi: ' + JSON.stringify(evt.error || {}));
+        err.retryable = /overloaded|rate_limit|timeout/i.test(JSON.stringify(evt.error || {}));
+        throw err;
+      }
+    }
+  }
+
+  return { text: text.trim(), usage, stopReason };
+}
+
 async function callClaude(system, userText) {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) throw new Error('ANTHROPIC_API_KEY tanimli degil (Render > Environment).');
 
+  // Streaming + genis max_tokens: kisa max_tokens brifingi cumlenin ortasinda kesiyordu
+  // (Sonnet 5 adaptive thinking'i de token harciyor). Sonnet 5 budget_tokens'i reddeder -
+  // adaptive tek dogru mod.
   const body = {
     model: MODEL,
-    max_tokens: 4000,
+    max_tokens: 16000,
+    thinking: { type: 'adaptive' },
+    stream: true,
     system,
     messages: [{ role: 'user', content: userText }],
   };
@@ -56,34 +127,16 @@ async function callClaude(system, userText) {
   let lastErr = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const res = await fetch(ANTHROPIC_URL, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-api-key': key,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify(body),
-      });
-      if (res.status === 429 || res.status >= 500) {
-        lastErr = new Error('Anthropic HTTP ' + res.status + ': ' + (await res.text()).slice(0, 300));
-        await new Promise((r) => setTimeout(r, attempt * 4000));
-        continue;
+      const out = await streamOnce(body, key);
+      if (!out.text) throw new Error('Anthropic bos yanit dondu.');
+      if (out.stopReason === 'max_tokens') {
+        console.warn('[generate] UYARI: yanit max_tokens (%d) sinirinda kesilmis olabilir.', body.max_tokens);
       }
-      if (!res.ok) {
-        throw new Error('Anthropic HTTP ' + res.status + ': ' + (await res.text()).slice(0, 500));
-      }
-      const json = await res.json();
-      const text = (json.content || [])
-        .filter((b) => b.type === 'text')
-        .map((b) => b.text)
-        .join('\n')
-        .trim();
-      if (!text) throw new Error('Anthropic bos yanit dondu.');
-      return { text, usage: json.usage || null };
+      return out;
     } catch (e) {
       lastErr = e;
-      await new Promise((r) => setTimeout(r, attempt * 4000));
+      if (e && e.retryable === false) throw e;
+      if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 5000));
     }
   }
   throw lastErr || new Error('Anthropic cagrisi basarisiz.');
@@ -125,7 +178,7 @@ async function generate(type) {
 
     console.log('[generate] tip=%s bugun=%s sinyal_uzunlugu=%d kar', type, today, signals.length);
 
-    const { text, usage } = await callClaude(system, userText);
+    const { text, usage, stopReason } = await callClaude(system, userText);
 
     const dateMatch = text.match(/\b(20\d{2}-\d{2}-\d{2})\b/);
     const rec = store.saveAgentOutput({
@@ -136,10 +189,13 @@ async function generate(type) {
       meta: {
         model: MODEL,
         panelUpdatedAt: updatedAt,
-        generatedBy: 'cron/generate.js',
+        generatedBy: 'generate.js',
+        stopReason: stopReason || null,
+        truncated: stopReason === 'max_tokens',
         usage: usage || null,
       },
     });
+    console.log('[generate] uzunluk=%d kar stop_reason=%s', text.length, stopReason);
 
     store.writeStatus({ running: false, type, finishedAt: new Date().toISOString(), lastError: null, lastOutputId: rec.id });
     console.log('[generate] tamam id=%s', rec.id);
