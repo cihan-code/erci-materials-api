@@ -196,6 +196,37 @@ async function main() {
     assert.strictEqual(raw3.data.incomes[0].category, 'Tahsilat');
   });
 
+  console.log('\n# 3c. writePanelDataFull — tek atomik yazma yolu');
+  {
+    const raw0 = store.readPanelRaw();
+    ok('expectedUpdatedAt uyuşmazsa CONFLICT', () => {
+      assert.throws(() => store.writePanelDataFull({ data: raw0.data, expectedUpdatedAt: 'yanlış-zaman' }),
+        (e) => e.code === 'CONFLICT');
+    });
+    ok('requireExpected + expectedUpdatedAt yok -> STALE_WRITE', () => {
+      assert.throws(() => store.writePanelDataFull({ data: raw0.data, requireExpected: true }),
+        (e) => e.code === 'STALE_WRITE');
+    });
+    ok('data nesne değilse BAD_INPUT', () => {
+      assert.throws(() => store.writePanelDataFull({ data: null }), (e) => e.code === 'BAD_INPUT');
+    });
+    ok('auth verilmezse diskteki auth korunur; verilirse güncellenir', () => {
+      const cur = store.readPanelRaw();
+      store.writePanelDataFull({ data: cur.data, expectedUpdatedAt: cur.updatedAt }); // auth yok
+      assert.deepStrictEqual(store.readPanelRaw().auth, cur.auth || null);
+      const cur2 = store.readPanelRaw();
+      store.writePanelDataFull({ data: cur2.data, auth: { passwordHash: 'YENİ' }, expectedUpdatedAt: cur2.updatedAt });
+      assert.strictEqual(store.readPanelRaw().auth.passwordHash, 'YENİ');
+    });
+    ok('atomik: yazmadan sonra dosya geçerli JSON, tmp dosyası kalmadı', () => {
+      const raw = store.readPanelRaw();
+      assert(raw && raw.data && raw.updatedAt);
+      const fs2 = require('fs'); const path2 = require('path');
+      const leftover = fs2.readdirSync(path2.dirname(store.PANEL_DATA_FILE)).filter((f) => f.includes('.tmp-'));
+      assert.strictEqual(leftover.length, 0, 'geçici yazma dosyası temizlenmemiş: ' + leftover);
+    });
+  }
+
   // temizle: bu turda eklenen ajan gorevleri + geri al edilemeyen mutasyonlar icin taze seed
   seed();
 

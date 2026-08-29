@@ -88,24 +88,49 @@ function backupPanelData() {
   } catch (e) { /* yedek basarisiz olsa da yazma devam etsin */ }
 }
 
-// Panel verisini geri yaz. expectedUpdatedAt verilirse ve diskteki farkliysa 409 firlatir
-// (panelin kendi optimistic-concurrency mantigiyla ayni). auth alanina dokunmaz.
-function writePanelData(newData, expectedUpdatedAt) {
+// Panel is verisini yaz - TEK ATOMIK YOL. Hem server.js POST'u hem aksiyonlar buradan gecer.
+// opts: {
+//   data            (zorunlu, nesne)
+//   auth            (verilmezse diskteki auth korunur - aksiyonlar sifreye dokunmasin)
+//   expectedUpdatedAt (verilir ve diskle uyusmazsa -> CONFLICT)
+//   requireExpected  (dosya varsa ve expectedUpdatedAt yoksa -> STALE_WRITE; bayat sekme koruması)
+// }
+function writePanelDataFull(opts) {
+  const { data, auth, expectedUpdatedAt, requireExpected } = opts || {};
+  if (!data || typeof data !== 'object') {
+    const e = new Error('data alanı gerekli (nesne).'); e.code = 'BAD_INPUT'; throw e;
+  }
   const cur = readPanelRaw();
-  if (!cur || !cur.data) throw new Error('panel-data.json yok - once panelden veri kaydedilmeli.');
-  if (expectedUpdatedAt != null && cur.updatedAt !== expectedUpdatedAt) {
-    const err = new Error('Cakisma: panel verisi bu arada baska yerden guncellenmis.');
-    err.code = 'CONFLICT';
-    throw err;
+  const exists = !!(cur && cur.data);
+  if (exists) {
+    if (expectedUpdatedAt != null && cur.updatedAt !== expectedUpdatedAt) {
+      const err = new Error('Çakışma: panel verisi bu arada başka yerden güncellenmiş. Sayfayı yenileyip tekrar deneyin.');
+      err.code = 'CONFLICT'; err.currentUpdatedAt = cur.updatedAt || null;
+      throw err;
+    }
+    if (requireExpected && expectedUpdatedAt == null) {
+      const err = new Error('Bulut verisi doğrulanamadı (expectedUpdatedAt yok) — bayat veriyle üzerine yazmayı engelledim. Sayfayı yenileyin.');
+      err.code = 'STALE_WRITE'; err.currentUpdatedAt = cur.updatedAt || null;
+      throw err;
+    }
   }
   backupPanelData();
-  const payload = { data: newData, auth: cur.auth || null, updatedAt: new Date().toISOString() };
-  // server.js ile ayni bicim (kompakt) - dosya boyutu ikiye katlanmasin.
+  const payload = {
+    data,
+    auth: (auth !== undefined) ? auth : ((cur && cur.auth) || null),
+    updatedAt: new Date().toISOString(),
+  };
   ensureDir(path.dirname(PANEL_DATA_FILE));
   const tmp = PANEL_DATA_FILE + '.tmp-' + crypto.randomBytes(4).toString('hex');
   fs.writeFileSync(tmp, JSON.stringify(payload));
   fs.renameSync(tmp, PANEL_DATA_FILE);
   return payload.updatedAt;
+}
+
+// Aksiyonlar icin ince sarmalayici (auth'a dokunmaz, dosya yoksa hata).
+function writePanelData(newData, expectedUpdatedAt) {
+  if (!readPanelRaw()) throw new Error('panel-data.json yok - once panelden veri kaydedilmeli.');
+  return writePanelDataFull({ data: newData, expectedUpdatedAt });
 }
 
 // ---- API cagri maliyet gunlugu (her Anthropic cagrisi) ----
@@ -261,9 +286,9 @@ function writeStatus(patch) {
 }
 
 module.exports = {
-  DATA_DIR, AGENT_DIR, OUTPUTS_DIR, PANEL_DATA_FILE,
+  DATA_DIR, AGENT_DIR, OUTPUTS_DIR, PANEL_DATA_FILE, PANEL_BACKUPS_DIR,
   OUTPUT_TYPES, TYPE_LABELS,
-  ensureAgentDirs, loadPanelData, readPanelRaw, writePanelData,
+  ensureAgentDirs, loadPanelData, readPanelRaw, writePanelData, writePanelDataFull, backupPanelData,
   saveAgentOutput, listOutputs, getOutput, getLatest, deleteOutput, deleteOutputs,
   readStatus, writeStatus,
   logUsage, readUsage, istanbulDay,

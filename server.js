@@ -114,32 +114,11 @@ app.get('/', (req, res) => {
 });
 
 // ---- Panel verisi (Isler, Gelir, Gider, Gorevler vs.) - tum kullanicilar ayni veriyi paylassin diye ----
-const PANEL_DATA_FILE = path.join(DATA_DIR, 'panel-data.json');
-// Her kaydetmeden ONCE, o ana kadarki mevcut veriyi bir yedek dosyasina kopyaliyoruz. Boylece
-// biri yanlislikla eski/eksik bir veriyi kaydedip ustune yazsa bile, bir onceki (ve ondan onceki
-// N tanesi) hep saklaniyor ve geri yuklenebiliyor. Daha once bu yedekleme yoktu; 12 Agustos 2026'da
-// yasanan "coğu sekmede veri kayboldu" olayindan sonra eklendi.
-const BACKUPS_DIR = path.join(DATA_DIR, 'paneldata-backups');
-const MAX_BACKUPS = 200; // JSON kucuk oldugu icin bu kadar yedek diskte onemsiz yer kaplar
-
-function backupCurrentPanelData() {
-  try {
-    if (!fs.existsSync(PANEL_DATA_FILE)) return;
-    ensureDir(BACKUPS_DIR);
-    const raw = fs.readFileSync(PANEL_DATA_FILE, 'utf8');
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    fs.writeFileSync(path.join(BACKUPS_DIR, 'panel-data-' + stamp + '.json'), raw);
-    // En eski yedekleri temizle, sadece son MAX_BACKUPS tanesini tut.
-    const files = fs.readdirSync(BACKUPS_DIR).filter(f => f.endsWith('.json')).sort();
-    if (files.length > MAX_BACKUPS) {
-      files.slice(0, files.length - MAX_BACKUPS).forEach(f => {
-        try { fs.unlinkSync(path.join(BACKUPS_DIR, f)); } catch (e) {}
-      });
-    }
-  } catch (e) {
-    // Yedekleme basarisiz olsa bile asil kaydetme islemini engellemesin.
-  }
-}
+// panel-data.json yolu ve yedek klasoru + yedekleme + ATOMIK yazma: hepsi agent/store.js'te
+// (tek kaynak). Eskiden burada ikinci, ATOMIK OLMAYAN bir kopya vardi (yazma ortasinda cokme =
+// tum is verisi bozulur). 12 Agustos 2026 veri kaybi -> yedekleme; simdi tek atomik yol.
+const PANEL_DATA_FILE = agentStore.PANEL_DATA_FILE;
+const BACKUPS_DIR = agentStore.PANEL_BACKUPS_DIR;
 
 app.get('/api/paneldata', checkApiKey, (req, res) => {
   if (!fs.existsSync(PANEL_DATA_FILE)) return res.json({ data: null, auth: null, updatedAt: null });
@@ -154,37 +133,21 @@ app.get('/api/paneldata', checkApiKey, (req, res) => {
 app.post('/api/paneldata', checkApiKey, (req, res) => {
   const body = req.body || {};
   if (!body.data) return res.status(400).json({ error: 'data alani gerekli.' });
-  // Iyimser eszamanlilik kontrolu (optimistic concurrency): eger istemci en son cektigi
-  // veriyle birlikte "expectedUpdatedAt" gonderdiyse, sunucudaki GUNCEL updatedAt ile
-  // birebir eslesmiyorsa kaydetmeyi REDDEDIYORUZ. Bu, uzun sure acik kalmis / eski bir
-  // sekmenin -baska biri arada guncelleme yapmisken- kendi bayat verisini ustune yazip
-  // gunler suren calismayi silmesini engelliyor (12 Agustos 2026 olayinin ana nedeni).
-  // expectedUpdatedAt gonderilmezse (eski istemciler icin geriye donuk uyumluluk) kontrol
-  // atlanir - bu yuzden panel guncellenene kadar risk devam eder, mumkun oldugunca hizli
-  // deploy edilmeli.
-  if (body.expectedUpdatedAt !== undefined && body.expectedUpdatedAt !== null) {
-    let currentUpdatedAt = null;
-    if (fs.existsSync(PANEL_DATA_FILE)) {
-      try { currentUpdatedAt = JSON.parse(fs.readFileSync(PANEL_DATA_FILE, 'utf8')).updatedAt || null; } catch (e) {}
-    }
-    if (currentUpdatedAt !== body.expectedUpdatedAt) {
-      return res.status(409).json({
-        error: 'Çakışma: veriler siz düzenlerken başka biri tarafından güncellenmiş. Sayfayı yenileyip tekrar deneyin.',
-        currentUpdatedAt,
-      });
-    }
-  }
-  const payload = {
-    data: body.data,
-    auth: body.auth || null,
-    updatedAt: new Date().toISOString(),
-  };
+  // Atomik yazma + iyimser eszamanlilik (expectedUpdatedAt) + yedekleme: agentStore.writePanelDataFull.
+  // expectedUpdatedAt uyusmazsa CONFLICT (409). Su an null gelirse yine kaydeder (geriye donuk uyum);
+  // B1 (null'i da reddet) panel banner'iyla birlikte ayri adimda acilacak.
   try {
-    ensureDir(DATA_DIR);
-    backupCurrentPanelData();
-    fs.writeFileSync(PANEL_DATA_FILE, JSON.stringify(payload));
-    res.json({ ok: true, updatedAt: payload.updatedAt });
+    const updatedAt = agentStore.writePanelDataFull({
+      data: body.data,
+      auth: body.auth || null,
+      expectedUpdatedAt: (body.expectedUpdatedAt === undefined ? null : body.expectedUpdatedAt),
+    });
+    res.json({ ok: true, updatedAt });
   } catch (e) {
+    if (e && (e.code === 'CONFLICT' || e.code === 'STALE_WRITE')) {
+      return res.status(409).json({ error: String(e.message), currentUpdatedAt: e.currentUpdatedAt || null });
+    }
+    if (e && e.code === 'BAD_INPUT') return res.status(400).json({ error: String(e.message) });
     res.status(500).json({ error: 'Panel verisi kaydedilemedi.' });
   }
 });
