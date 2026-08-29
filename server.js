@@ -641,7 +641,11 @@ app.post('/api/sdr/research', checkApiKey, (req, res) => {
   }
   const { query, city, type } = req.body || {};
   if (!query || !String(query).trim()) return res.status(400).json({ error: 'query (araştırma hedefi) gerekli.' });
-  if (sdrStore.readStatus().running) return res.status(409).json({ error: 'Bir araştırma zaten çalışıyor.' });
+  // "running" bayragi takili kalabilir (sunucu arastirma ortasinda yeniden baslarsa). 15 dk'dan
+  // eski bir "running" bayat sayilir - yeni istegi engelleme.
+  const st = sdrStore.readStatus();
+  const fresh = st.running && st.startedAt && (Date.now() - new Date(st.startedAt).getTime()) < 15 * 60 * 1000;
+  if (fresh) return res.status(409).json({ error: 'Bir araştırma zaten çalışıyor.' });
   try {
     const { researchAndScore } = require('./agent/sdr/flow');
     researchAndScore({ query, city, type }).catch((e) => console.error('[sdr/research] hata:', e && e.message || e));
