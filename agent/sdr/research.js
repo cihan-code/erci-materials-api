@@ -14,8 +14,12 @@ const { gatherSources } = require('./sources');
 const MOCK = process.env.AGENT_MOCK === '1';
 const IDENTITY = fs.readFileSync(path.join(__dirname, 'prompts', 'identity.md'), 'utf8');
 const RESEARCH_PROMPT = fs.readFileSync(path.join(__dirname, 'prompts', 'research.md'), 'utf8');
-const MAX_WEB_SEARCHES = parseInt(process.env.SDR_MAX_WEB_SEARCHES, 10) || 8;
-const MAX_WEB_FETCHES = parseInt(process.env.SDR_MAX_WEB_FETCHES, 10) || 5;
+// Maliyet: web_search/web_fetch sonuclari her tur context'e birikir -> input token'lar sisiyor
+// (bir arastirma ~180k input token gorduk). Cap'ler dusuk tutuluyor; kaynak katmani (sources.js)
+// + Google Places anahtari devredeyse model zaten daha az aramaya ihtiyac duyar.
+const MAX_WEB_SEARCHES = parseInt(process.env.SDR_MAX_WEB_SEARCHES, 10) || 5;
+const MAX_WEB_FETCHES = parseInt(process.env.SDR_MAX_WEB_FETCHES, 10) || 2;
+const WEB_FETCH_MAX_CONTENT = parseInt(process.env.SDR_WEB_FETCH_MAX_CONTENT, 10) || 4000;
 
 function fixture(name) {
   return JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'test', 'fixtures', name), 'utf8'));
@@ -78,13 +82,15 @@ async function runResearch({ query, city, type } = {}) {
       model: HAIKU,
       opType: 'sdr-research',
       system: IDENTITY + '\n\n---\n\n' + RESEARCH_PROMPT,
+      cacheSystem: true, // statik sistem promptu -> tekrar arastirmalarda cache
       user,
-      maxTokens: 8000,
+      maxTokens: 6000,
       // Haiku 4.5 (Opus/Sonnet 4.6 oncesi) -> TEMEL arac varyantlari. _20260209
       // (dynamic filtering) yalniz Opus 4.6+ / Sonnet 4.6+ modellerde; Haiku'da 400 doner.
+      // max_content_tokens: web_fetch'in cektigi sayfayi kirp (input token patlamasini onle).
       tools: [
         { type: 'web_search_20250305', name: 'web_search', max_uses: MAX_WEB_SEARCHES },
-        { type: 'web_fetch_20250910', name: 'web_fetch', max_uses: MAX_WEB_FETCHES },
+        { type: 'web_fetch_20250910', name: 'web_fetch', max_uses: MAX_WEB_FETCHES, max_content_tokens: WEB_FETCH_MAX_CONTENT },
       ],
     });
     raw = parseModelJson(resp.text, 'SDR araştırma');

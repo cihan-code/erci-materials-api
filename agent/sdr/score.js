@@ -38,6 +38,7 @@ async function scoreCandidates(candidates) {
       model: HAIKU,
       opType: 'sdr-score',
       system: IDENTITY + '\n\n---\n\n' + SCORE_PROMPT,
+      cacheSystem: true,
       user: 'Adaylar (giriş sırası önemli):\n' + JSON.stringify(slim, null, 1),
       maxTokens: 4000,
     });

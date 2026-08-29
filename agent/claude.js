@@ -139,8 +139,9 @@ async function streamOnce(body, key) {
   return { text: text.trim(), usage, stopReason, truncated: stopReason === 'max_tokens' };
 }
 
-// opts: { model, opType, system, user, maxTokens, thinking, effort, schema, tools }
+// opts: { model, opType, system, user, maxTokens, thinking, effort, schema, tools, cacheSystem }
 //   user: string  VEYA  content-block dizisi (image/document + text) - Vision icin.
+//   cacheSystem: true -> statik sistem promptunu ephemeral cache_control ile isaretle.
 //   tools: Anthropic server-tool dizisi (or. Haiku icin web_search_20250305/web_fetch_20250910)
 //          - SDR arastirmasi icin. NOT: _20260209 varyantlari yalniz Opus/Sonnet 4.6+.
 //          Server tool'lar Anthropic sunucusunda calisir, ayni stream'de sonuc doner;
@@ -168,7 +169,11 @@ async function callClaude(opts) {
     model: opts.model,
     max_tokens: opts.maxTokens || 8000,
     stream: true,
-    system: opts.system,
+    // cacheSystem: statik sistem promptunu cache'le (5 dk TTL) - sik tekrar eden cagrilarda
+    // input token maliyetini dusurur. Prefix degismezse cache_read_input_tokens > 0 olur.
+    system: opts.cacheSystem && typeof opts.system === 'string'
+      ? [{ type: 'text', text: opts.system, cache_control: { type: 'ephemeral' } }]
+      : opts.system,
     messages: [{ role: 'user', content: opts.user }], // string veya content-block dizisi
   };
   if (opts.thinking) body.thinking = opts.thinking;
