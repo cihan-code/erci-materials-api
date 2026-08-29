@@ -12,6 +12,8 @@ process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'mock-key-not-u
 const DATA_DIR = process.env.DATA_DIR;
 const PANEL_FILE = path.join(DATA_DIR, 'panel-data.json');
 
+let _origPanel = null; // testler panel-data.json'a yazar; sonunda AYNEN geri yuklenir (test-izolasyon)
+
 function seed() {
   const src = process.argv[2];
   if (src) {
@@ -21,6 +23,10 @@ function seed() {
   } else if (!fs.existsSync(PANEL_FILE)) {
     throw new Error('panel-data.json yok ve snapshot verilmedi.');
   }
+  if (_origPanel == null) _origPanel = fs.readFileSync(PANEL_FILE);
+}
+function restorePanel() {
+  if (_origPanel != null) { try { fs.writeFileSync(PANEL_FILE, _origPanel); } catch (e) { /* yok say */ } }
 }
 
 let pass = 0; let fail = 0;
@@ -159,9 +165,32 @@ async function main() {
     assert.strictEqual(sdrStore.research.get(rec.id), null);
   });
 
-  seed(); // panel-data'yı geri al
+  console.log('\n# 6. Kaynak katmanı (Overpass + Places, MOCK)');
+  const { gatherSources } = require('../agent/sdr/sources');
+  const { mergeCandidates } = require('../agent/sdr/research');
+  const { normalizeCandidate } = require('../agent/sdr/leads');
+  const sg = await gatherSources({ query: 'üniversite', city: 'Ankara', type: 'Üniversite' });
+  ok('gatherSources MOCK: iki kaynağı birleştirir, isimle dedup eder', () => {
+    assert(Array.isArray(sg.candidates) && sg.candidates.length >= 2);
+    const dup = sg.candidates.filter((c) => /örnek teknik/i.test(c.kurum_adi));
+    assert.strictEqual(dup.length, 1); // aynı üni hem overpass hem places -> tek kayıt
+    assert(dup[0].website && dup[0].phones.length >= 2); // birleşince Places web'i + 2 telefon
+  });
+  ok('gatherSources sources[] raporu döner (Places + OpenStreetMap)', () => {
+    assert.deepStrictEqual(sg.sources.map((s) => s.name).sort(), ['Google Places', 'OpenStreetMap']);
+  });
+  ok('mergeCandidates: kaynakta olup modelde olmayanı ekler, uydurma iletişim yok', () => {
+    const model = [normalizeCandidate({ kurum_adi: 'Örnek Teknik Üniversitesi', kurum_tipi: 'Üniversite' })];
+    const merged = mergeCandidates(model, sg.candidates);
+    assert(merged.length > 1);
+    const added = merged.find((c) => /deneme koleji/i.test(c.kurum_adi));
+    assert(added, 'Places-only kurum eklendi');
+    assert.deepStrictEqual(added.ilgili_kisiler, []); // uydurma kişi yok
+  });
+
+  restorePanel(); // panel-data.json'u testten önceki haline AYNEN döndür
 
   console.log('\n=== ' + pass + ' geçti, ' + fail + ' başarısız ===');
   process.exit(fail ? 1 : 0);
 }
-main().catch((e) => { console.error('sdr HATA:', e); process.exit(1); });
+main().catch((e) => { console.error('sdr HATA:', e); restorePanel(); process.exit(1); });

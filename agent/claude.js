@@ -128,12 +128,21 @@ async function streamOnce(body, key) {
     err.retryable = true;
     throw err;
   }
+  // pause_turn: server tool (web_search/web_fetch) cok tur calisti, API isteğin yeniden
+  // gonderilmesini bekliyor. Bu helper tek atislik -> tam istegi retry et (max_uses cap korur).
+  // Yonetim Ajani server tool kullanmaz; bu dal yalniz SDR arastirmasinda tetiklenir.
+  if (stopReason === 'pause_turn') {
+    const err = new Error('Anthropic pause_turn (server tool devam ediyor) - istek yeniden gonderilecek.');
+    err.retryable = true;
+    throw err;
+  }
   return { text: text.trim(), usage, stopReason, truncated: stopReason === 'max_tokens' };
 }
 
 // opts: { model, opType, system, user, maxTokens, thinking, effort, schema, tools }
 //   user: string  VEYA  content-block dizisi (image/document + text) - Vision icin.
-//   tools: Anthropic server-tool dizisi ( or. web_search_20260209) - SDR arastirmasi icin.
+//   tools: Anthropic server-tool dizisi (or. Haiku icin web_search_20250305/web_fetch_20250910)
+//          - SDR arastirmasi icin. NOT: _20260209 varyantlari yalniz Opus/Sonnet 4.6+.
 //          Server tool'lar Anthropic sunucusunda calisir, ayni stream'de sonuc doner;
 //          stream parser sadece text_delta biriktirir - arac bloklari gormezden gelinir.
 async function callClaude(opts) {
@@ -187,8 +196,9 @@ async function callClaude(opts) {
 
   const inTok = (out && out.usage && out.usage.input_tokens) || 0;
   const outTok = (out && out.usage && out.usage.output_tokens) || 0;
-  // web_search server tool ayri ucretlendirilir (~$10 / 1000 arama)
-  const webSearches = (out && out.usage && out.usage.server_tool_use && out.usage.server_tool_use.web_search_requests) || 0;
+  // web_search / web_fetch server tool ayri ucretlendirilir (~$10 / 1000 istek)
+  const stu = (out && out.usage && out.usage.server_tool_use) || {};
+  const webSearches = (stu.web_search_requests || 0) + (stu.web_fetch_requests || 0);
   const costUsd = Math.round((estCostUsd(opts.model, inTok, outTok) + webSearches * 0.01) * 1e6) / 1e6;
   store.logUsage({
     opType: opts.opType || 'unknown',

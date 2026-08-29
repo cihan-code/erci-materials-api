@@ -1,4 +1,4 @@
-// Satis Ajani (SDR) deposu: arastirma loglari + status + gunluk arastirma sayaci.
+// Satis Ajani (SDR) deposu: arastirma loglari + gonderim loglari + status + gunluk sayaclar.
 // panel-data.json'a DOKUNMAZ (leads[] oraya sdr/leads.js yazar). Kendi kovasi.
 
 const fs = require('fs');
@@ -9,6 +9,7 @@ const { istanbulDay } = require('../lib/util');
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', '..', 'data');
 const SDR_DIR = path.join(DATA_DIR, 'sdr');
 const RESEARCH_DIR = path.join(SDR_DIR, 'research');
+const SENT_DIR = path.join(SDR_DIR, 'sent');
 const STATUS_FILE = path.join(SDR_DIR, 'status.json');
 
 // Gunluk arastirma limiti (maliyet korumasi). Render env: SDR_DAILY_RESEARCH_CAP.
@@ -21,6 +22,27 @@ const research = jsonIndexStore(RESEARCH_DIR, {
     mock: !!(r.meta && r.meta.mock),
   }),
 });
+
+// Gonderilen mailler (Gmail). leadId, alici, konu, Gmail message-id/thread-id.
+// panel-data.json'daki lead.gonderilen_mailler kullanici-yuzu; bu kova denetim/limit kaydidir.
+const sent = jsonIndexStore(SENT_DIR, {
+  metaOf: (r) => ({
+    id: r.id, createdAt: r.createdAt, leadId: r.leadId != null ? r.leadId : null,
+    to: r.to || null, subject: r.subject || null,
+    messageId: r.messageId || null, threadId: r.threadId || null, mock: !!r.mock,
+  }),
+});
+
+// Bugun (Istanbul) kac mail gonderildi? Gunluk gonderim limiti kontrolu icin.
+// jsonIndexStore.list en fazla 200 dondurur; gunluk cap << 200 oldugu icin yeterli.
+function sentCountToday() {
+  const today = istanbulDay(new Date());
+  return sent.list({ limit: 200 }).filter((m) => istanbulDay(m.createdAt) === today).length;
+}
+function saveSent(rec) {
+  const id = sent.newId();
+  return sent.save(Object.assign({ id, createdAt: new Date().toISOString() }, rec));
+}
 
 function readJson(f, fb) { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return fb; } }
 function writeAtomic(f, obj) {
@@ -53,8 +75,9 @@ function saveResearch(rec) {
 }
 
 module.exports = {
-  SDR_DIR, RESEARCH_DIR, DAILY_CAP,
+  SDR_DIR, RESEARCH_DIR, SENT_DIR, DAILY_CAP,
   research, saveResearch,
+  sent, saveSent, sentCountToday,
   readStatus, writeStatus,
   researchCountToday, dailyCapReached,
 };

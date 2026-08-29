@@ -23,6 +23,8 @@ process.env.MERCI_COMPANY_PROFILE = process.env.MERCI_COMPANY_PROFILE || JSON.st
 const DATA_DIR = process.env.DATA_DIR;
 const PANEL_FILE = path.join(DATA_DIR, 'panel-data.json');
 
+let _origPanel = null; // testler panel-data.json'a yazar; sonunda AYNEN geri yuklenir (test-izolasyon)
+
 function seed() {
   const src = process.argv[2];
   if (src) {
@@ -33,6 +35,10 @@ function seed() {
   } else if (!fs.existsSync(PANEL_FILE)) {
     throw new Error('panel-data.json yok ve snapshot verilmedi. Kullanim: node test/smoke.js snapshot.json');
   }
+  if (_origPanel == null && fs.existsSync(PANEL_FILE)) _origPanel = fs.readFileSync(PANEL_FILE);
+}
+function restorePanel() {
+  if (_origPanel != null) { try { fs.writeFileSync(PANEL_FILE, _origPanel); } catch (e) { /* yok say */ } }
 }
 
 let pass = 0, fail = 0;
@@ -592,10 +598,10 @@ async function main() {
     ok('deleteDocuments: ölçüt yoksa hiçbir şey silmez', () => assert.strictEqual(docs.deleteDocuments({}).deleted, 0));
   }
 
-  seed(); // belge testi mutasyonlarini geri al
+  restorePanel(); // panel-data.json'u testten onceki haline AYNEN dondur
 
   console.log('\n=== ' + pass + ' gecti, ' + fail + ' basarisiz ===');
   process.exit(fail ? 1 : 0);
 }
 
-main().catch((e) => { console.error('smoke HATA:', e); process.exit(1); });
+main().catch((e) => { console.error('smoke HATA:', e); restorePanel(); process.exit(1); });

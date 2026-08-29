@@ -149,6 +149,8 @@ function updateLead(id, patch, input) {
       tarih: todayISO(),
       konu: (patch.konu != null ? normStr(patch.konu) : lead.mail_taslagi.konu),
       kanal: normStr(patch.kanal) || 'email (manuel)',
+      alici: patch.to != null ? normStr(patch.to) : null,
+      message_id: patch.message_id != null ? normStr(patch.message_id) : null,
     });
     lead.durum = 'Mail Gönderildi';
     if (!lead.followup_tarihi) {

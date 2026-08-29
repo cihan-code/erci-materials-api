@@ -5,6 +5,11 @@
 //   API_KEY       -> panelin gonderdigi gizli anahtar (rastgele uzun bir metin sen belirlersin)
 //   CORS_ORIGIN   -> panelin yayinlandigi adres, orn: https://cihan-code.github.io
 //   PORT          -> Render otomatik verir, dokunma
+//   ANTHROPIC_API_KEY -> Yonetim Ajani + SDR arastirma/puanlama/mail taslagi
+// Satis Ajani (SDR) - opsiyonel:
+//   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REDIRECT_URI -> Gmail gonderim (OAuth)
+//   GOOGLE_PLACES_API_KEY -> musteri arastirma kaynak katmani (Google Places, yoksa sadece OpenStreetMap)
+//   SDR_GMAIL_DAILY_CAP (20) · SDR_DAILY_RESEARCH_CAP (6) · SDR_MAX_WEB_SEARCHES (8) · SDR_MAX_WEB_FETCHES (5)
 
 const express = require('express');
 const multer = require('multer');
@@ -627,6 +632,7 @@ app.post('/api/agent/documents/delete', checkApiKey, (req, res) => {
 // kendi kovası (DATA_DIR/sdr/). leads[] panel-data.json içinde (agent/sdr/leads.js yazar).
 const sdrStore = require('./agent/sdr/store');
 const sdrLeads = require('./agent/sdr/leads');
+const sdrGmail = require('./agent/sdr/gmail');
 
 // Araştırma başlat (async) - panel /api/sdr/status poll eder.
 app.post('/api/sdr/research', checkApiKey, (req, res) => {
@@ -645,8 +651,13 @@ app.post('/api/sdr/research', checkApiKey, (req, res) => {
   }
 });
 app.get('/api/sdr/status', checkApiKey, (req, res) => {
+  const sdrSources = require('./agent/sdr/sources');
   res.json(Object.assign(sdrStore.readStatus(), {
     dailyCap: sdrStore.DAILY_CAP, researchToday: sdrStore.researchCountToday(),
+    sources: {
+      overpass: true, // ucretsiz, her zaman aktif
+      places: sdrSources.placesConfigured(),
+    },
   }));
 });
 app.get('/api/sdr/research', checkApiKey, (req, res) => {
@@ -724,6 +735,93 @@ app.delete('/api/sdr/leads/:id', checkApiKey, (req, res) => {
     const r = sdrLeads.deleteLead(req.params.id);
     res.status(r.deleted ? 200 : 404).json(r.deleted ? r : { error: 'Bulunamadı.' });
   } catch (e) { res.status(400).json({ error: String(e && e.message || e) }); }
+});
+
+// ---- SDR Gmail entegrasyonu (Faz 2) ----
+// Scope: gmail.send + openid email (gelen kutusu OKUNMAZ). Onaylı tekli gönderim. Toplu/otomatik YOK.
+function sdrGmailReady(res) {
+  if (sdrGmail.configured() || process.env.SDR_GMAIL_MOCK === '1') return true;
+  res.status(503).json({ error: 'Gmail bağlantısı yapılandırılmadı (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REDIRECT_URI).' });
+  return false;
+}
+function htmlEsc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function gmailCallbackPage(title, message, ok) {
+  return '<!doctype html><html lang="tr"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+    '<title>' + htmlEsc(title) + '</title>' +
+    '<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f6fa;color:#12213b;' +
+    'display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}' +
+    '.card{background:#fff;border:1px solid #d9e0ea;border-radius:14px;padding:28px 32px;max-width:420px;text-align:center;box-shadow:0 6px 24px rgba(18,33,59,.08)}' +
+    '.ico{font-size:40px}h1{font-size:18px;margin:12px 0 6px}p{color:#5a6474;font-size:14px;line-height:1.5;margin:0}' +
+    '</style></head><body><div class="card"><div class="ico">' + (ok ? '✅' : '⚠️') + '</div>' +
+    '<h1>' + htmlEsc(title) + '</h1><p>' + htmlEsc(message) + '</p>' +
+    '<p style="margin-top:14px;font-size:12px;color:#8a94a6">Bu sekmeyi kapatıp panele dönebilirsiniz.</p></div>' +
+    '<script>setTimeout(function(){window.close()},4000)</script></body></html>';
+}
+
+// OAuth başlat: panel bu URL'yi alıp kullanıcıyı Google'a yönlendirir.
+app.get('/api/sdr/gmail/auth', checkApiKey, (req, res) => {
+  if (!sdrGmailReady(res)) return;
+  try { res.json({ url: sdrGmail.buildAuthUrl() }); }
+  catch (e) { res.status(503).json({ error: String(e && e.message || e) }); }
+});
+
+// Google buraya döner (tarayıcı yönlendirmesi — x-api-key yok, state ile korunur).
+app.get('/api/sdr/gmail/callback', async (req, res) => {
+  const { code, state, error } = req.query || {};
+  if (error) {
+    return res.status(400).type('html').send(gmailCallbackPage('Bağlantı iptal edildi', 'Google yetkilendirmesi tamamlanmadı: ' + error, false));
+  }
+  try {
+    const r = await sdrGmail.handleCallback({ code, state });
+    res.type('html').send(gmailCallbackPage('Gmail bağlandı', r.email + ' hesabı Satış Ajanına bağlandı.', true));
+  } catch (e) {
+    res.status(400).type('html').send(gmailCallbackPage('Bağlantı hatası', String(e && e.message || e), false));
+  }
+});
+
+app.get('/api/sdr/gmail/status', checkApiKey, (req, res) => {
+  res.json(sdrGmail.status());
+});
+
+app.post('/api/sdr/gmail/disconnect', checkApiKey, async (req, res) => {
+  try { res.json(await sdrGmail.disconnect()); }
+  catch (e) { res.status(400).json({ error: String(e && e.message || e) }); }
+});
+
+// Onaylı tekli gönderim: lead'in KAYITLI taslağını info@mercitex.com'dan gönderir.
+// Body (opsiyonel): { to, konu, govde, force }
+app.post('/api/sdr/leads/:id/send', checkApiKey, async (req, res) => {
+  if (!sdrGmailReady(res)) return;
+  try {
+    const { data } = agentStore.loadPanelData();
+    const lead = sdrLeads.getLead(data || {}, req.params.id);
+    if (!lead) return res.status(404).json({ error: 'Lead bulunamadı.' });
+
+    const body = req.body || {};
+    const konu = (body.konu && String(body.konu).trim()) || (lead.mail_taslagi && lead.mail_taslagi.konu) || null;
+    const govde = (body.govde && String(body.govde).trim()) || (lead.mail_taslagi && lead.mail_taslagi.govde) || null;
+    if (!konu || !govde) {
+      return res.status(400).json({ error: 'Bu lead için kayıtlı mail taslağı yok. Önce "Mail Taslağı Oluştur" ile taslağı hazırlayıp kaydedin.' });
+    }
+    const to = sdrGmail.resolveRecipient(lead, body.to);
+    if (!to) return res.status(400).json({ error: 'Bu lead için alıcı e-posta adresi yok. Gönderim ekranından adres girin.' });
+
+    if (body.force !== true && sdrGmail.recentlySentTo(lead.id)) {
+      return res.status(429).json({ error: 'Bu lead\'e son 24 saat içinde zaten mail gönderildi. Yine de göndermek için tekrar onaylayın.' });
+    }
+
+    const sent = await sdrGmail.sendEmail({ to, subject: konu, body: govde, leadId: lead.id });
+    const upd = sdrLeads.updateLead(req.params.id, {
+      mark_sent: true, konu, kanal: 'email (Gmail)', to, message_id: sent.messageId,
+    }, { confirm: true });
+    res.json({ ok: true, sent, lead: upd.lead });
+  } catch (e) {
+    const code = e && e.code === 'DAILY_CAP' ? 429 : 400;
+    res.status(code).json({ error: String(e && e.message || e) });
+  }
 });
 
 const PORT = process.env.PORT || 3000;

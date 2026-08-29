@@ -1,0 +1,47 @@
+{
+  "_comment": "MOCK fixture for agent/sdr/sources.js — used when AGENT_MOCK=1. No network.",
+  "overpass": [
+    {
+      "kurum_adi": "Örnek Teknik Üniversitesi",
+      "kurum_tipi": "Üniversite",
+      "website": "ornekteknik.edu.tr",
+      "phones": ["+90 312 000 00 00"],
+      "emails": [],
+      "adres": "Üniversiteler Mah. Çankaya Ankara",
+      "kaynak": "OpenStreetMap",
+      "kaynak_url": "https://www.openstreetmap.org/way/12345"
+    },
+    {
+      "kurum_adi": "Başkent Spor Kulübü",
+      "kurum_tipi": "Spor Kulübü",
+      "website": null,
+      "phones": [],
+      "emails": [],
+      "adres": "Yenimahalle Ankara",
+      "kaynak": "OpenStreetMap",
+      "kaynak_url": "https://www.openstreetmap.org/node/67890"
+    }
+  ],
+  "places": [
+    {
+      "kurum_adi": "Örnek Teknik Üniversitesi",
+      "kurum_tipi": "Üniversite",
+      "sektor": "Üniversite",
+      "website": "https://www.ornekteknik.edu.tr",
+      "phones": ["+90 312 111 11 11"],
+      "adres": "Üniversiteler Mahallesi, 06800 Çankaya/Ankara",
+      "kaynak": "Google Places",
+      "kaynak_url": "https://maps.google.com/?cid=123"
+    },
+    {
+      "kurum_adi": "Deneme Koleji Özel Lise",
+      "kurum_tipi": "Özel Lise",
+      "sektor": "Özel okul",
+      "website": "https://denemekoleji.k12.tr",
+      "phones": ["+90 312 222 22 22"],
+      "adres": "Çayyolu, Çankaya/Ankara",
+      "kaynak": "Google Places",
+      "kaynak_url": "https://maps.google.com/?cid=456"
+    }
+  ]
+}
