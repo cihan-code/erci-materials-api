@@ -13,8 +13,10 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-// Yonetim Ajani cikti deposu + brifing uretici (kendi ayri kovasi; /api/paneldata'ya dokunmaz).
+// Yonetim Ajani modulleri (kendi ayri kovasi; /api/paneldata'ya dokunmaz).
 const agentStore = require('./agent/store');
+const agentDocs = require('./agent/documents');
+const { validatePanelData } = require('./agent/panelSchema');
 // Eager yukle: AGENT_MOCK guvenlik kilidi burada; production'da AGENT_MOCK=1 ise uygulama
 // app.listen'e gelmeden process.exit(1) yapar.
 require('./agent/claude');
@@ -135,7 +137,6 @@ app.post('/api/paneldata', checkApiKey, (req, res) => {
   if (!body.data) return res.status(400).json({ error: 'data alani gerekli.' });
   // Hafif dogrulama: "bu kesinlikle bozuk" durumlari (dizi olmasi gereken alan obje olmus,
   // para alaninda "abc"/"1.234,56" gibi cop). Sema katiligi YOK.
-  const { validatePanelData } = require('./agent/panelSchema');
   const v = validatePanelData(body.data);
   if (!v.ok) {
     return res.status(422).json({
@@ -528,8 +529,7 @@ app.post('/api/agent/documents', checkApiKey, (req, res) => {
     if (err) return res.status(400).json({ error: err.message || 'Yükleme başarısız.' });
     if (!req.file) return res.status(400).json({ error: 'Dosya bulunamadı (alan adı: file).' });
     try {
-      const docs = require('./agent/documents');
-      const r = docs.saveDocument(req.file.buffer, req.file.originalname, req.file.mimetype);
+      const r = agentDocs.saveDocument(req.file.buffer, req.file.originalname, req.file.mimetype);
       res.json(r);
     } catch (e) {
       res.status(400).json({ error: String(e && e.message || e) });
@@ -539,25 +539,22 @@ app.post('/api/agent/documents', checkApiKey, (req, res) => {
 
 app.get('/api/agent/documents', checkApiKey, (req, res) => {
   try {
-    const docs = require('./agent/documents');
-    res.json(docs.listDocuments({ status: req.query.status, limit: req.query.limit }));
+    res.json(agentDocs.listDocuments({ status: req.query.status, limit: req.query.limit }));
   } catch (e) { res.status(500).json({ error: 'Belge listesi okunamadı.' }); }
 });
 
 app.get('/api/agent/documents/:id', checkApiKey, (req, res) => {
-  const docs = require('./agent/documents');
-  const rec = docs.getDocument(req.params.id);
+  const rec = agentDocs.getDocument(req.params.id);
   if (!rec) return res.status(404).json({ error: 'Belge bulunamadı.' });
   const { storedName, ...safe } = rec;
   res.json(safe);
 });
 
 app.get('/api/agent/documents/:id/file', checkApiKey, (req, res) => {
-  const docs = require('./agent/documents');
-  const rec = docs.getDocument(req.params.id);
+  const rec = agentDocs.getDocument(req.params.id);
   if (!rec) return res.status(404).json({ error: 'Belge bulunamadı.' });
   try {
-    const buf = docs.fileBuffer(rec);
+    const buf = agentDocs.fileBuffer(rec);
     res.setHeader('Content-Type', rec.mime);
     res.setHeader('Content-Disposition', 'inline; filename="' + encodeURIComponent(rec.originalName) + '"');
     res.send(buf);
@@ -608,8 +605,7 @@ app.post('/api/agent/documents/:id/commit', checkApiKey, (req, res) => {
 // islenmis belgenin olusturdugu gelir/gider/is kaydi yerinde kalir (yanit committedRecord ile bildirir).
 app.delete('/api/agent/documents/:id', checkApiKey, (req, res) => {
   try {
-    const docs = require('./agent/documents');
-    res.json(docs.deleteDocument(req.params.id));
+    res.json(agentDocs.deleteDocument(req.params.id));
   } catch (e) {
     res.status(e && /bulunamad/i.test(String(e.message)) ? 404 : 400).json({ error: String(e && e.message || e) });
   }
@@ -622,8 +618,7 @@ app.post('/api/agent/documents/delete', checkApiKey, (req, res) => {
     return res.status(400).json({ error: 'status, before veya ids gerekli.' });
   }
   try {
-    const docs = require('./agent/documents');
-    res.json({ ok: true, ...docs.deleteDocuments({ status, before, ids }) });
+    res.json({ ok: true, ...agentDocs.deleteDocuments({ status, before, ids }) });
   } catch (e) { res.status(400).json({ error: String(e && e.message || e) }); }
 });
 
