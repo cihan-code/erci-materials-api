@@ -133,14 +133,17 @@ app.get('/api/paneldata', checkApiKey, (req, res) => {
 app.post('/api/paneldata', checkApiKey, (req, res) => {
   const body = req.body || {};
   if (!body.data) return res.status(400).json({ error: 'data alani gerekli.' });
-  // Atomik yazma + iyimser eszamanlilik (expectedUpdatedAt) + yedekleme: agentStore.writePanelDataFull.
-  // expectedUpdatedAt uyusmazsa CONFLICT (409). Su an null gelirse yine kaydeder (geriye donuk uyum);
-  // B1 (null'i da reddet) panel banner'iyla birlikte ayri adimda acilacak.
+  // Atomik yazma + iyimser eszamanlilik + yedekleme: agentStore.writePanelDataFull.
+  // requireExpected: dosya VARSA ve expectedUpdatedAt yoksa REDDET (409). Bu, panelin ilk
+  // pull'u basarisiz olup (Render soguk baslangic) bayat yerel veriyle buluttaki guncel
+  // veriyi sessizce ezmesini engeller - 12 Agustos 2026 veri kaybinin hala ulasilabilir yolu.
+  // Ilk yazma (dosya yok) yine serbest.
   try {
     const updatedAt = agentStore.writePanelDataFull({
       data: body.data,
       auth: body.auth || null,
       expectedUpdatedAt: (body.expectedUpdatedAt === undefined ? null : body.expectedUpdatedAt),
+      requireExpected: true,
     });
     res.json({ ok: true, updatedAt });
   } catch (e) {
@@ -223,8 +226,7 @@ app.post('/api/stokdata', checkApiKey, (req, res) => {
     updatedAt: new Date().toISOString(),
   };
   try {
-    ensureDir(DATA_DIR);
-    fs.writeFileSync(STOK_DATA_FILE, JSON.stringify(payload));
+    agentStore.writeJsonCompactAtomic(STOK_DATA_FILE, payload); // atomik (temp + rename)
     res.json({ ok: true, updatedAt: payload.updatedAt });
   } catch (e) {
     res.status(500).json({ error: 'Stok verisi kaydedilemedi.' });

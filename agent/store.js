@@ -52,6 +52,13 @@ function writeJsonAtomic(file, obj) {
   fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
   fs.renameSync(tmp, file);
 }
+// Kompakt (girintisiz) atomik JSON yazma - panel-data / stok-data gibi buyuk dosyalar icin.
+function writeJsonCompactAtomic(file, obj) {
+  ensureDir(path.dirname(file));
+  const tmp = file + '.tmp-' + crypto.randomBytes(4).toString('hex');
+  fs.writeFileSync(tmp, JSON.stringify(obj));
+  fs.renameSync(tmp, file);
+}
 
 function loadIndex() {
   const idx = readJson(INDEX_FILE, null);
@@ -120,10 +127,7 @@ function writePanelDataFull(opts) {
     auth: (auth !== undefined) ? auth : ((cur && cur.auth) || null),
     updatedAt: new Date().toISOString(),
   };
-  ensureDir(path.dirname(PANEL_DATA_FILE));
-  const tmp = PANEL_DATA_FILE + '.tmp-' + crypto.randomBytes(4).toString('hex');
-  fs.writeFileSync(tmp, JSON.stringify(payload));
-  fs.renameSync(tmp, PANEL_DATA_FILE);
+  writeJsonCompactAtomic(PANEL_DATA_FILE, payload);
   return payload.updatedAt;
 }
 
@@ -289,6 +293,7 @@ module.exports = {
   DATA_DIR, AGENT_DIR, OUTPUTS_DIR, PANEL_DATA_FILE, PANEL_BACKUPS_DIR,
   OUTPUT_TYPES, TYPE_LABELS,
   ensureAgentDirs, loadPanelData, readPanelRaw, writePanelData, writePanelDataFull, backupPanelData,
+  writeJsonCompactAtomic,
   saveAgentOutput, listOutputs, getOutput, getLatest, deleteOutput, deleteOutputs,
   readStatus, writeStatus,
   logUsage, readUsage, istanbulDay,
