@@ -1,10 +1,11 @@
 // Fatura (invoices) yardimcilari. remaining_amount ve status BACKEND hesaplar.
 // invoices, panel-data.json icinde yasar (jobs/incomes gibi).
 
-function round2(v) { return Math.round((v || 0) * 100) / 100; }
-
-const INCOMING_STATUSES = ['Ödenmedi', 'Kısmi Ödendi', 'Ödendi', 'İptal'];
-const OUTGOING_STATUSES = ['Tahsil Edilmedi', 'Kısmi Tahsil Edildi', 'Tahsil Edildi', 'İptal'];
+const { round2, nextId } = require('./lib/util');
+const {
+  INVOICE_INCOMING_STATUSES: INCOMING_STATUSES,
+  INVOICE_OUTGOING_STATUSES: OUTGOING_STATUSES,
+} = require('./lib/enums');
 
 // Bir faturanin kalan tutari ve durumu (deterministik).
 function computeStatus(inv) {
@@ -27,11 +28,7 @@ function enrich(inv) {
   return Object.assign({}, inv, { remaining_amount: c.remaining, status: c.status });
 }
 
-function nextInvoiceId(list) {
-  let mx = 0;
-  (list || []).forEach((x) => { const n = Number(x && x.id); if (Number.isFinite(n) && n > mx) mx = n; });
-  return mx + 1;
-}
+function nextInvoiceId(list) { return nextId(list); }
 
 // (invoice_number + tax_number) ayni mi? veya cok yakin (tutar+tarih+taraf)?
 function findDuplicate(list, cand) {

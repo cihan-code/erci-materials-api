@@ -17,11 +17,10 @@
 //  S10 id gercek benzersiz kimlik; tekrarli job_no otomatik birlestirilmez.
 //  S11 aylik Tamamlanan Is teslim tarihine gore olcus; teslim tarihi alani yoksa "olculemiyor".
 
-const JOB_STATUSES = ['Teklif', 'Onaylandı', 'Üretimde', 'Teslim Edildi', 'İptal'];
-const JOB_ACTIVE = ['Onaylandı', 'Üretimde'];
-const URETIM_STATUSES = ['Kumaş Bekleniyor', 'Kumaş Geldi', 'Kesimde', 'Baskı/Nakışta', 'Dikimde', 'Ütü-Pakette-Teslimat Bekliyor', 'Teslim Edildi'];
-const PIPELINE_STATUSES = ['Potansiyel', 'Fiyat Verildi', 'Görüşülüyor', 'Kazanıldı', 'Kaybedildi'];
-const PIPELINE_CLOSED = ['Kazanıldı', 'Kaybedildi'];
+const {
+  JOB_STATUSES, JOB_ACTIVE, URETIM_STATUSES, PIPELINE_STATUSES, PIPELINE_CLOSED,
+} = require('./lib/enums');
+const { round2, daysBetween } = require('./lib/util');
 
 function d(s) {
   if (!s) return null;
@@ -30,9 +29,7 @@ function d(s) {
   const dt = new Date(m + 'T00:00:00Z');
   return isNaN(dt.getTime()) ? null : dt;
 }
-function daysBetween(a, b) { return Math.round((a.getTime() - b.getTime()) / 86400000); }
 function ym(s) { return String(s || '').slice(0, 7); }
-function round2(v) { return Math.round((v || 0) * 100) / 100; }
 function tl(n) { return (Math.round(n || 0)).toLocaleString('tr-TR') + ' TL'; }
 function pct(n) { return (Math.round((n || 0) * 1000) / 10).toFixed(1) + '%'; }
 function num(n) { return (n == null ? '-' : Number(n).toLocaleString('tr-TR')); }

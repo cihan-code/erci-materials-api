@@ -51,6 +51,39 @@ async function main() {
   const { data } = store.loadPanelData();
   const TODAY = '2026-08-28';
 
+  console.log('\n# -1. agent/lib — ortak yardımcılar + enum tek kaynak');
+  const util = require('../agent/lib/util');
+  const enums = require('../agent/lib/enums');
+  ok('lib/util: round2 / nextId / todayISO / istanbulDay', () => {
+    assert.strictEqual(util.round2(3.14159), 3.14);
+    assert.strictEqual(util.round2(0.1 + 0.2), 0.3);
+    assert.strictEqual(util.round2(null), 0);
+    assert.strictEqual(util.nextId([{ id: 3 }, { id: 'x' }, { id: 1 }]), 4);
+    assert.strictEqual(util.nextId([]), 1);
+    assert.strictEqual(util.nextId([{ id: NaN }, {}]), 1); // eski panel Math.max burada NaN üretiyordu
+    assert.strictEqual(util.todayISO(), new Date().toISOString().slice(0, 10));
+    assert.strictEqual(util.istanbulDay('2026-08-28T22:30:00.000Z'), '2026-08-29');
+  });
+  ok('lib/enums: panelin gerçek enum değerleriyle birebir', () => {
+    assert.deepStrictEqual(enums.JOB_STATUSES, ['Teklif', 'Onaylandı', 'Üretimde', 'Teslim Edildi', 'İptal']);
+    assert.deepStrictEqual(enums.JOB_ACTIVE, ['Onaylandı', 'Üretimde']);
+    assert.deepStrictEqual(enums.INCOME_CATS, ['Kapora', 'Kalan Tahsilat', 'Peşin Ödeme', 'Tahsilat', 'İş Geliri', 'Diğer Gelir']);
+    assert(enums.EXPENSE_CATS.includes('Kargo/Kurye') && enums.EXPENSE_CATS.includes('Diğer'));
+    assert.deepStrictEqual(enums.MANAGERS, ['Cihan Berber', 'Erdem Küçükarslan', 'Mert Kıvanç Tekin']);
+  });
+  ok('lib: tüm eski tanımlar lib ile aynı (divergence yok)', () => {
+    const metrics = require('../agent/metrics');
+    const fc = require('../agent/financeCategory');
+    const dcm = require('../agent/documentCommit');
+    assert.deepStrictEqual(metrics.JOB_STATUSES, enums.JOB_STATUSES);
+    assert.deepStrictEqual(metrics.URETIM_STATUSES, enums.URETIM_STATUSES);
+    assert.deepStrictEqual(metrics.PIPELINE_STATUSES, enums.PIPELINE_STATUSES);
+    assert.deepStrictEqual(fc.INCOME_CATS, enums.INCOME_CATS);
+    assert.deepStrictEqual(fc.EXPENSE_CATS, enums.EXPENSE_CATS);
+    assert.deepStrictEqual(actions.INCOME_CATS, enums.INCOME_CATS);
+    assert.deepStrictEqual(dcm.JOB_STATUSES, enums.JOB_STATUSES);
+  });
+
   console.log('\n# 0. metrics.js — deterministik hesaplar (S1..S11)');
   const M = computeMetrics(data, TODAY);
   ok('gorev sayisi carried_forward haric', () => {

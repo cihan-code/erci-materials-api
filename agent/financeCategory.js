@@ -1,9 +1,8 @@
 // Dekont aciklamasindan gelir/gider kategorisi ONERISI (kesin degil - kullanici onizlemede secer).
 // Backend hesaplamasi degil, sadece metin ipucu. Kullanici degeri her zaman oncelikli.
 
-const INCOME_CATS = ['Kapora', 'Kalan Tahsilat', 'Peşin Ödeme', 'Tahsilat', 'İş Geliri', 'Diğer Gelir'];
-// Panelin gider kategorileriyle ayni (index.html #formGider).
-const EXPENSE_CATS = ['Kumaş', 'Kesim', 'Baskı/Nakış', 'Dikim', 'Ütü-Paket', 'Nakliye', 'Kargo/Kurye', 'İşçilik', 'Vergi', 'Kira', 'Maaş', 'Borç Ödemesi', 'Diğer'];
+// Kategori listeleri tek kaynakta: agent/lib/enums.js (panel #formGelir / #formGider ile ayni).
+const { INCOME_CATS, EXPENSE_CATS } = require('./lib/enums');
 
 function normTr(s) {
   return String(s || '').toLocaleLowerCase('tr').replace(/[İıI]/g, 'i');

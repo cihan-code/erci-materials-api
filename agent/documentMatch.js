@@ -5,7 +5,7 @@ const store = require('./store');
 const inv = require('./invoices');
 const cp = require('./company-profile');
 
-function r2(v) { return Math.round((v || 0) * 100) / 100; }
+const { round2: r2 } = require('./lib/util');
 function nn(s) { return cp.normName(s); }
 function dnum(s) { try { return new Date(String(s).slice(0, 10) + 'T00:00:00Z').getTime(); } catch (e) { return NaN; } }
 

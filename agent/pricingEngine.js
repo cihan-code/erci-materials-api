@@ -2,7 +2,7 @@
 // YENI motor DEGIL - ayni fonksiyonlar: getTemplate, calcTemplateCostItems, suggestedPrice.
 // Kaynak: costTemplates (panel-data icinde).
 
-function round2(v) { return Math.round((v || 0) * 100) / 100; }
+const { round2 } = require('./lib/util');
 function norm(s) {
   return String(s || '').toLocaleLowerCase('tr').replace(/[İıI]/g, 'i').replace(/[^a-z0-9ğüşöç]+/g, ' ').trim();
 }

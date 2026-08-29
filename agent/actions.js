@@ -6,29 +6,18 @@
 // Her aksiyon panel-data.json'da YALNIZ hedef kaydi degistirir; store.writePanelData yedek alir.
 
 const store = require('./store');
-const { URETIM_STATUSES, PIPELINE_STATUSES, JOB_STATUSES } = require('./metrics');
+const { URETIM_STATUSES, PIPELINE_STATUSES, JOB_STATUSES, INCOME_CATS, MANAGERS } = require('./lib/enums');
+const { round2, todayISO, isISODate, nextId } = require('./lib/util');
 
 const RISK = { SAFE: 'safe', CONFIRM: 'confirm' };
 
-const MANAGERS = ['Cihan Berber', 'Erdem Küçükarslan', 'Mert Kıvanç Tekin'];
-// Panelin (index.html) gercek enum'lari - metrics.js'ten tek kaynak.
 const PROD_STATUSES = URETIM_STATUSES; // uretimTakip.status
-// PIPELINE_STATUSES ve JOB_STATUSES da metrics.js'ten geliyor.
 
 function statusMatch(list, v) {
   return list.find((s) => s.toLowerCase() === String(v || '').trim().toLowerCase()) || null;
 }
 
-const INCOME_CATS = ['Kapora', 'Kalan Tahsilat', 'Peşin Ödeme', 'Tahsilat', 'İş Geliri', 'Diğer Gelir'];
-
-function todayISO() { return new Date().toISOString().slice(0, 10); }
-function nextId(arr) {
-  let mx = 0;
-  (arr || []).forEach((x) => { const n = Number(x && x.id); if (Number.isFinite(n) && n > mx) mx = n; });
-  return mx + 1;
-}
 function str(v, max) { return v == null ? '' : String(v).slice(0, max || 300); }
-function isISODate(s) { return /^\d{4}-\d{2}-\d{2}$/.test(String(s || '')); }
 // Yonetici adini tam forma cevir; eslesme yoksa hata (yanlis kisiye atama engeli).
 function resolveManager(v) {
   const q = String(v || '').trim().toLowerCase();
@@ -44,7 +33,6 @@ function saneDate(s, label) {
   if (diff > 400) throw new Error((label || 'Tarih') + ' bugünden çok uzak (' + s + ') - yıl hatası olabilir');
   return s;
 }
-function round2(v) { return Math.round((v || 0) * 100) / 100; }
 // Bir odemenin DELTA tutari. Model bazen farkli isim kullaniyor - hepsini "bu seferki odeme" say.
 function paymentDelta(p) {
   return p.odeme_tutari != null ? p.odeme_tutari

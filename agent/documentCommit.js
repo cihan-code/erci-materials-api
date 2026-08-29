@@ -16,18 +16,14 @@
 const store = require('./store');
 const docs = require('./documents');
 const inv = require('./invoices');
-const { INCOME_CATS, EXPENSE_CATS } = require('./financeCategory');
-
-const r2 = inv.round2;
+const { INCOME_CATS, EXPENSE_CATS, JOB_STATUSES } = require('./lib/enums');
+const { round2: r2, isISODate: isDate, todayISO, nextId } = require('./lib/util');
 
 function num(v, label) {
   const n = Number(v);
   if (!Number.isFinite(n)) throw new Error((label || 'Tutar') + ' geçerli bir sayı olmalı.');
   return n;
 }
-function isDate(s) { return /^\d{4}-\d{2}-\d{2}$/.test(String(s || '')); }
-function todayISO() { return new Date().toISOString().slice(0, 10); }
-function nextId(arr) { let m = 0; (arr || []).forEach((x) => { const n = Number(x && x.id); if (n > m) m = n; }); return m + 1; }
 
 function commitDocument(id, input) {
   input = input || {};
@@ -185,7 +181,6 @@ function commitDocument(id, input) {
 }
 
 // ---------- URETIM FORMU -> jobs (Is Takip) ----------
-const JOB_STATUSES = ['Teklif', 'Onaylandı', 'Üretimde', 'Teslim Edildi', 'İptal'];
 const SIZE_KEYS = ['XS', 'S', 'M', 'L', 'XL', 'XXL', '3XL'];
 
 function sizeSum(sb) {

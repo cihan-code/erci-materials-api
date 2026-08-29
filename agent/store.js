@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { istanbulDay } = require('./lib/util');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const AGENT_DIR = path.join(DATA_DIR, 'agent');
@@ -116,13 +117,6 @@ function logUsage(entry) {
   } catch (e) { console.error('[store.logUsage] yazilamadi:', e && e.message); }
 }
 
-// Turkiye kalici UTC+3 (2016'dan beri yaz saati yok). Bir ts'in ISTANBUL takvim gununu ver.
-const IST_OFFSET_MS = 3 * 60 * 60 * 1000;
-function istanbulDay(ts) {
-  const ms = (ts instanceof Date ? ts.getTime() : new Date(ts).getTime());
-  if (!Number.isFinite(ms)) return '';
-  return new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
-}
 
 function readUsage({ limit = 100 } = {}) {
   let lines = [];
