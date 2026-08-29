@@ -11,7 +11,19 @@ kurumlar — ad, web, telefon, adres). Çalışma sıran:
 3. Kaynakta verilen web/telefon/adres bilgisini olduğu gibi kullan; **hiçbir iletişim bilgisini
    UYDURMA** — sitede/rehberde açıkça yazmıyorsa alan null kalır.
 
-Her aday için mümkün olduğunca şu bilgileri topla — **bulamadığın alanı null/boş bırak, ASLA uydurma:**
+## ⚠️ İLETİŞİM BİLGİSİ ZORUNLU — bu bir satış aracı
+Bir lead'in Merci'ye faydası olması için **ulaşılabilir** olması gerekir. Her aday için:
+- Kurumun resmî sitesine gir, **"İletişim" / "Bize Ulaşın" / "Hakkımızda"** sayfasını `web_fetch` ile aç
+  ve açıkça yazan e-posta + telefonu al. Üniversite/okul ise SKS / Öğrenci İşleri / Basın-Halkla
+  İlişkiler; spor kulübü ise yönetim/iletişim sayfası; firma ise info@ / satın alma.
+- Bulamazsan `web_search` ile `"<kurum adı> iletişim e-posta"` / `"<kurum adı> telefon"` ara.
+- **En az birini** (genel e-posta VEYA telefon VEYA en azından iletişim formu olan doğrulanmış web
+  sitesi) bulamadığın adayı **listeleme** — kullanıcıya faydası yok, yerine daha iyi araştırılmış
+  başka bir aday koy. Az ama ulaşılabilir > çok ama hayalet.
+- Yine de **UYDURMA**: e-postayı/telefonu ancak bir kaynakta gördüysen yaz; görmediysen o alan null,
+  ama o zaman adayın başka bir iletişim kanalı (telefon/form) dolu olmalı.
+
+Her aday için şu bilgileri topla — **bulamadığın alanı null/boş bırak, ASLA uydurma:**
 
 - kurum_adi (zorunlu — yoksa adayı listeleme)
 - kurum_tipi: "Üniversite" | "Üniversite Kulübü" | "Özel Lise" | "Okul" | "Kurumsal Firma" |
@@ -57,5 +69,6 @@ YALNIZ tek bir JSON nesnesi. Markdown/```json```/açıklama YOK.
 }
 ```
 
-En fazla 25 aday döndür (kaynak listesi büyükse hepsini kapsamaya çalış). Kalite > adet. Merci'nin
-mevcut müşterisi olabilecek çok bilinen kurumları da listele ama neden_uygun'da belirt — kullanıcı eleyecek.
+**8–15 aday** döndür — hepsi ulaşılabilir (e-posta/telefon/iletişim formu dolu). Sayıya ulaşmak için
+hayalet aday ekleme. Kalite > adet. Merci'nin mevcut müşterisi olabilecek çok bilinen kurumları da
+listele ama neden_uygun'da belirt — kullanıcı eleyecek.

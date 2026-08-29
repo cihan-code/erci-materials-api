@@ -14,11 +14,12 @@ const { gatherSources } = require('./sources');
 const MOCK = process.env.AGENT_MOCK === '1';
 const IDENTITY = fs.readFileSync(path.join(__dirname, 'prompts', 'identity.md'), 'utf8');
 const RESEARCH_PROMPT = fs.readFileSync(path.join(__dirname, 'prompts', 'research.md'), 'utf8');
-// Maliyet: web_search/web_fetch sonuclari her tur context'e birikir -> input token'lar sisiyor
-// (bir arastirma ~180k input token gorduk). Cap'ler dusuk tutuluyor; kaynak katmani (sources.js)
-// + Google Places anahtari devredeyse model zaten daha az aramaya ihtiyac duyar.
-const MAX_WEB_SEARCHES = parseInt(process.env.SDR_MAX_WEB_SEARCHES, 10) || 5;
-const MAX_WEB_FETCHES = parseInt(process.env.SDR_MAX_WEB_FETCHES, 10) || 2;
+// Maliyet vs kalite: web_fetch her kurumun "Iletisim" sayfasini acip e-posta/telefon cikarmak
+// icin ZORUNLU - cok dusuk tutunca lead'lerin iletisimi bos kaliyor (ise yaramaz). Asil maliyet
+// kaldiraci `max_content_tokens` (cekilen sayfayi kirp), max_uses degil. Kaynak katmani
+// (sources.js) + Google Places anahtari devredeyken model zaten daha az aramaya ihtiyac duyar.
+const MAX_WEB_SEARCHES = parseInt(process.env.SDR_MAX_WEB_SEARCHES, 10) || 6;
+const MAX_WEB_FETCHES = parseInt(process.env.SDR_MAX_WEB_FETCHES, 10) || 6;
 const WEB_FETCH_MAX_CONTENT = parseInt(process.env.SDR_WEB_FETCH_MAX_CONTENT, 10) || 4000;
 
 function fixture(name) {
@@ -84,7 +85,7 @@ async function runResearch({ query, city, type } = {}) {
       system: IDENTITY + '\n\n---\n\n' + RESEARCH_PROMPT,
       cacheSystem: true, // statik sistem promptu -> tekrar arastirmalarda cache
       user,
-      maxTokens: 6000,
+      maxTokens: 7000,
       // Haiku 4.5 (Opus/Sonnet 4.6 oncesi) -> TEMEL arac varyantlari. _20260209
       // (dynamic filtering) yalniz Opus 4.6+ / Sonnet 4.6+ modellerde; Haiku'da 400 doner.
       // max_content_tokens: web_fetch'in cektigi sayfayi kirp (input token patlamasini onle).
