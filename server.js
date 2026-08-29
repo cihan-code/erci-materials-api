@@ -438,6 +438,30 @@ app.get('/api/agent/outputs/:id', checkApiKey, (req, res) => {
   res.json(rec);
 });
 
+// Tek ajan ciktisini sil (panelde "Sil" butonu - test ciktilarini temizlemek icin).
+app.delete('/api/agent/outputs/:id', checkApiKey, (req, res) => {
+  try {
+    const out = agentStore.deleteOutput(req.params.id);
+    if (!out.deleted) return res.status(404).json({ error: 'Cikti bulunamadi.' });
+    res.json({ ok: true, ...out });
+  } catch (e) {
+    res.status(400).json({ error: String(e && e.message || e) });
+  }
+});
+
+// Toplu sil: ?type= veya ?before=YYYY-MM-DD veya body.ids[]. En az bir olcut sart.
+app.post('/api/agent/outputs/delete', checkApiKey, (req, res) => {
+  const { type, before, ids } = Object.assign({}, req.query, req.body || {});
+  if (!type && !before && !(Array.isArray(ids) && ids.length)) {
+    return res.status(400).json({ error: 'type, before veya ids gerekli.' });
+  }
+  try {
+    res.json({ ok: true, ...agentStore.deleteOutputs({ type, before, ids }) });
+  } catch (e) {
+    res.status(400).json({ error: String(e && e.message || e) });
+  }
+});
+
 // Disaridan hazir bir markdown ciktisini kaydet (elle calistirilan Claude Code dongusunun
 // publish_output.sh'i buraya POST eder). generate.js kendi kaydini dogrudan store ile yapar.
 app.post('/api/agent/outputs', checkApiKey, (req, res) => {

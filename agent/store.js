@@ -116,20 +116,32 @@ function logUsage(entry) {
   } catch (e) { console.error('[store.logUsage] yazilamadi:', e && e.message); }
 }
 
+// Turkiye kalici UTC+3 (2016'dan beri yaz saati yok). Bir ts'in ISTANBUL takvim gununu ver.
+const IST_OFFSET_MS = 3 * 60 * 60 * 1000;
+function istanbulDay(ts) {
+  const ms = (ts instanceof Date ? ts.getTime() : new Date(ts).getTime());
+  if (!Number.isFinite(ms)) return '';
+  return new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
+}
+
 function readUsage({ limit = 100 } = {}) {
   let lines = [];
   try { lines = fs.readFileSync(USAGE_LOG, 'utf8').split('\n').filter(Boolean); }
-  catch (e) { return { entries: [], summary: emptyUsageSummary() }; }
+  catch (e) { return { entries: [], summary: emptyUsageSummary(), totalCalls: 0, byDay: [] }; }
   const all = lines.map((l) => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
 
   const now = Date.now();
-  const windows = { today: 0, d7: 7 * 864e5, d30: 30 * 864e5 };
+  const windows = { d7: 7 * 864e5, d30: 30 * 864e5 };
   const summary = emptyUsageSummary();
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = istanbulDay(new Date());     // ISTANBUL gunu (UTC degil - onceki bug)
+  const yesterdayStr = istanbulDay(new Date(now - 864e5));
+  const byDay = {};
   all.forEach((e) => {
     const age = now - new Date(e.ts).getTime();
+    const day = istanbulDay(e.ts);
     const buckets = [];
-    if (String(e.ts).slice(0, 10) === todayStr) buckets.push('today');
+    if (day === todayStr) buckets.push('today');
+    if (day === yesterdayStr) buckets.push('yesterday');
     if (age <= windows.d7) buckets.push('d7');
     if (age <= windows.d30) buckets.push('d30');
     buckets.forEach((b) => {
@@ -142,17 +154,25 @@ function readUsage({ limit = 100 } = {}) {
       const bo = summary[b].byOp[e.opType] = summary[b].byOp[e.opType] || { calls: 0, costUsd: 0 };
       bo.calls += 1; bo.costUsd += e.costUsd || 0;
     });
+    // son 14 gunun gunluk toplami (Istanbul gunu bazinda)
+    if (age <= 14 * 864e5 && day) {
+      const d = byDay[day] = byDay[day] || { day, calls: 0, costUsd: 0 };
+      d.calls += 1; d.costUsd += e.costUsd || 0;
+    }
   });
-  ['today', 'd7', 'd30'].forEach((b) => {
-    summary[b].costUsd = Math.round(summary[b].costUsd * 10000) / 10000;
-    Object.values(summary[b].byModel).forEach((x) => { x.costUsd = Math.round(x.costUsd * 10000) / 10000; });
-    Object.values(summary[b].byOp).forEach((x) => { x.costUsd = Math.round(x.costUsd * 10000) / 10000; });
+  ['today', 'yesterday', 'd7', 'd30'].forEach((b) => {
+    summary[b].costUsd = Math.round(summary[b].costUsd * 1e6) / 1e6;
+    Object.values(summary[b].byModel).forEach((x) => { x.costUsd = Math.round(x.costUsd * 1e6) / 1e6; });
+    Object.values(summary[b].byOp).forEach((x) => { x.costUsd = Math.round(x.costUsd * 1e6) / 1e6; });
   });
-  return { entries: all.slice(-limit).reverse(), summary, totalCalls: all.length };
+  const byDayArr = Object.values(byDay)
+    .map((d) => ({ day: d.day, calls: d.calls, costUsd: Math.round(d.costUsd * 1e6) / 1e6 }))
+    .sort((a, b) => (a.day < b.day ? 1 : -1));
+  return { entries: all.slice(-limit).reverse(), summary, totalCalls: all.length, byDay: byDayArr, today: todayStr, tz: 'Europe/Istanbul (UTC+3)' };
 }
 function emptyUsageSummary() {
   const z = () => ({ calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, byModel: {}, byOp: {} });
-  return { today: z(), d7: z(), d30: z() };
+  return { today: z(), yesterday: z(), d7: z(), d30: z() };
 }
 
 // Bir ajan ciktisini kaydet. meta = { dataConfidence, panelUpdatedAt, model, tokensIn, ... }
@@ -208,6 +228,34 @@ function getLatest(type) {
   return getOutput(hit.id);
 }
 
+// Bir ajan ciktisini sil (dosya + indeks). Panelde "test icin urettiklerimizi temizle".
+function deleteOutput(id) {
+  if (!id || /[^A-Za-z0-9_\-]/.test(id)) throw new Error('Gecersiz id.');
+  const index = loadIndex();
+  const before = index.length;
+  const kept = index.filter((r) => r.id !== id);
+  saveIndex(kept);
+  try { fs.unlinkSync(path.join(OUTPUTS_DIR, id + '.json')); } catch (e) { /* dosya zaten yok */ }
+  return { deleted: before - kept.length, id };
+}
+
+// Toplu sil: tip veya tarih araligi. { type?, before? (YYYY-MM-DD), ids? }
+function deleteOutputs({ type, before, ids } = {}) {
+  const index = loadIndex();
+  const idSet = Array.isArray(ids) ? new Set(ids) : null;
+  const doomed = index.filter((r) => {
+    if (idSet) return idSet.has(r.id);
+    if (type && r.type !== type) return false;
+    if (before && String(r.date || r.createdAt || '').slice(0, 10) >= before) return false;
+    return !!(type || before);
+  });
+  const doomedIds = new Set(doomed.map((r) => r.id));
+  if (!doomedIds.size) return { deleted: 0, ids: [] };
+  saveIndex(index.filter((r) => !doomedIds.has(r.id)));
+  doomedIds.forEach((id) => { try { fs.unlinkSync(path.join(OUTPUTS_DIR, id + '.json')); } catch (e) {} });
+  return { deleted: doomedIds.size, ids: [...doomedIds] };
+}
+
 function readStatus() {
   return readJson(STATUS_FILE, { running: false, type: null, startedAt: null, finishedAt: null, lastError: null });
 }
@@ -222,7 +270,7 @@ module.exports = {
   DATA_DIR, AGENT_DIR, OUTPUTS_DIR, PANEL_DATA_FILE,
   OUTPUT_TYPES, TYPE_LABELS,
   ensureAgentDirs, loadPanelData, readPanelRaw, writePanelData,
-  saveAgentOutput, listOutputs, getOutput, getLatest,
+  saveAgentOutput, listOutputs, getOutput, getLatest, deleteOutput, deleteOutputs,
   readStatus, writeStatus,
-  logUsage, readUsage,
+  logUsage, readUsage, istanbulDay,
 };

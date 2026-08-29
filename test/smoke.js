@@ -173,6 +173,37 @@ async function main() {
     assert(mockCalls.length >= Object.keys(OP).length, 'mock cagri kaydedilmemis');
     assert(u.summary.d30.costUsd < 0.01, 'mock testleri para gostermis: $' + u.summary.d30.costUsd);
   });
+  ok('usage: bugun (Istanbul) bucket + byDay + yesterday alanlari var', () => {
+    const u = store.readUsage({ limit: 5 });
+    assert(u.summary.today && u.summary.yesterday, 'today/yesterday bucket yok');
+    assert(Array.isArray(u.byDay), 'byDay dizisi yok');
+    assert.strictEqual(u.today, store.istanbulDay(new Date()));
+    // bugun test sirasinda mock cagrilari yapildi -> today.calls > 0
+    assert(u.summary.today.calls > 0, 'bugun mock cagrilari today bucket\'a girmedi (timezone bug?)');
+  });
+  ok('istanbulDay: UTC gece yarisi sinirinda +3 kayar', () => {
+    assert.strictEqual(store.istanbulDay('2026-08-28T22:30:00.000Z'), '2026-08-29'); // 01:30 Istanbul
+    assert.strictEqual(store.istanbulDay('2026-08-29T05:00:00.000Z'), '2026-08-29'); // 08:00 Istanbul
+  });
+
+  console.log('\n# 4b. Ajan ciktisi silme');
+  const o1 = store.saveAgentOutput({ type: 'finans', title: 'test-sil-1', date: TODAY, markdown: '# test 1' });
+  const o2 = store.saveAgentOutput({ type: 'finans', title: 'test-sil-2', date: TODAY, markdown: '# test 2' });
+  ok('deleteOutput tek kaydi siler (dosya + indeks)', () => {
+    const r = store.deleteOutput(o1.id);
+    assert.strictEqual(r.deleted, 1);
+    assert.strictEqual(store.getOutput(o1.id), null);
+    assert(!store.listOutputs({ type: 'finans' }).some((x) => x.id === o1.id));
+    assert(store.listOutputs({ type: 'finans' }).some((x) => x.id === o2.id), 'yanlis kayit silindi');
+  });
+  ok('deleteOutput yok olan id -> deleted:0', () => assert.strictEqual(store.deleteOutput('yok-boyle-id').deleted, 0));
+  ok('deleteOutputs olcut yoksa hicbir sey silmez', () => assert.strictEqual(store.deleteOutputs({}).deleted, 0));
+  ok('deleteOutputs type ile toplu siler', () => {
+    store.saveAgentOutput({ type: 'finans', title: 'test-sil-3', date: TODAY, markdown: '# t3' });
+    const r = store.deleteOutputs({ type: 'finans' });
+    assert(r.deleted >= 2);
+    assert.strictEqual(store.listOutputs({ type: 'finans' }).length, 0);
+  });
 
   console.log('\n# 5. act.js akisi (MOCK)');
   const { interpretAndAct } = require('../agent/act');
