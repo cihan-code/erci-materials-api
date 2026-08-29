@@ -25,7 +25,7 @@ process.env.MERCI_COMPANY_PROFILE = JSON.stringify({
 });
 process.env.AGENT_MOCK = '1';
 
-const { normalizeExtraction, classify } = require('../agent/document');
+const { normalizeExtraction, classify, tryRepairJson, parseJsonLoose } = require('../agent/document');
 require('../agent/company-profile')._reset();
 
 let pass = 0; let fail = 0;
@@ -189,6 +189,63 @@ console.log('\n# 7. Model yön çelişkisi (GİDEN FAST başlığına aldanma)')
     assert.strictEqual(cl.finalDirection, 'incoming');
     assert.strictEqual(cl.needsUserDecision, true);
   });
+}
+
+// ---------------------------------------------------------------------------
+// 8) İş Bankası "Giden Fast İşlemi" — sahibi MERT KIVANÇ TEKİN, alıcı BURAK ŞEN NAKIŞ&BASKI
+//    (kullanicinin JSON parse hatasi verdigi dekont)
+console.log('\n# 8. İş Bankası Giden FAST (Mert -> baskı/nakış firması)');
+{
+  const { ext, cl } = run({
+    document_type: 'payment_receipt', direction: 'outgoing', date: '2026-08-28',
+    amount: 15000, currency: 'TRY',
+    sender_name: 'MERT KIVANÇ TEKİN', receiver_name: 'BURAK ŞEN NAKIŞ&BASKI',
+    sender_iban: 'TR600006400000191000722899', receiver_iban: 'TR940004601308888000202611',
+    sender_tax_number: null, receiver_tax_number: null,
+    reference_number: '3696914103', description: null,
+    confidence: { document_type: 0.96, direction: 0.8 },
+  });
+  ok('outgoing, karşı taraf = BURAK ŞEN NAKIŞ&BASKI', () => {
+    assert.strictEqual(cl.finalDirection, 'outgoing');
+    assert.strictEqual(cl.counterparty.name, 'BURAK ŞEN NAKIŞ&BASKI');
+  });
+  ok('tutar 15000 (Toplam 15016.76 değil)', () => assert.strictEqual(ext.amount, 15000));
+  ok('referans = Sorgu No 3696914103', () => assert.strictEqual(ext.reference_number, '3696914103'));
+  ok('kategori önerisi = Baskı/Nakış (alıcı adından)', () => assert.strictEqual(cl.categoryHint, 'Baskı/Nakış'));
+  ok('Mert şahsi hesabı -> teyit iste', () => assert.strictEqual(cl.needsUserDecision, true));
+}
+
+// ---------------------------------------------------------------------------
+// 9) KESİK / BOZUK model yanıtı onarımı (kullanicinin aldigi "JSON ayrıştırılamadı" hatası)
+console.log('\n# 9. Kesik model yanıtı onarımı (tryRepairJson)');
+{
+  ok('```json + kesik (kapanmamış) -> onarılır', () => {
+    const truncated = '```json\n{"document_type":"payment_receipt","direction":"unknown","date":"2026-08-28","amount":15000.00,"currency":"TRY","sender_name":"MERT KIVAN';
+    assert.throws(() => parseJsonLoose(truncated));
+    const o = tryRepairJson(truncated);
+    assert(o && o.document_type === 'payment_receipt');
+    assert.strictEqual(o.currency, 'TRY');
+    assert.strictEqual(o.amount, 15000);
+  });
+  ok('kesik: sayıdan sonra virgülle kesilmiş -> onarılır', () => {
+    const o = tryRepairJson('{"a":1,"total":15016.76,');
+    assert(o && o.total === 15016.76 && o.a === 1);
+  });
+  ok('kesik: dizi ortasında -> onarılır', () => {
+    const o = tryRepairJson('{"print_areas":["göğüs","kol"');
+    assert(o && Array.isArray(o.print_areas) && o.print_areas.length === 2);
+  });
+  ok('kesik: iç obje ortasında -> son geçerli sınıra döner', () => {
+    const o = tryRepairJson('{"amount":100,"confidence":{"document_type":0.9,"dir');
+    assert(o && o.amount === 100);
+  });
+  ok('normalizeExtraction onarılmış çıktıyı işler', () => {
+    const o = tryRepairJson('```json\n{"document_type":"payment_receipt","direction":"outgoing","amount":15000,"currency":"TRY","reference_number":"369","sender_name":"MER');
+    const ext = normalizeExtraction(o);
+    assert.strictEqual(ext.document_type, 'payment_receipt');
+    assert.strictEqual(ext.amount, 15000);
+  });
+  ok('tamamen bozuk -> null', () => assert.strictEqual(tryRepairJson('şşşş yok'), null));
 }
 
 // ---------------------------------------------------------------------------

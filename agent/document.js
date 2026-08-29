@@ -61,11 +61,65 @@ function parseJsonLoose(text) {
   let t = String(text || '').trim();
   const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence) t = fence[1].trim();
+  else t = t.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim(); // tek tarafli cit
   if (t[0] !== '{') {
     const i = t.indexOf('{'); const j = t.lastIndexOf('}');
     if (i >= 0 && j > i) t = t.slice(i, j + 1);
   }
   return JSON.parse(t);
+}
+
+// Acik string/parantezleri kapat (kesik JSON icin).
+function closeJson(s) {
+  let inStr = false; let esc = false; const st = [];
+  for (const c of s) {
+    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') inStr = true;
+    else if (c === '{') st.push('}');
+    else if (c === '[') st.push(']');
+    else if (c === '}' || c === ']') st.pop();
+  }
+  let out = s;
+  if (inStr) out += '"';
+  while (st.length) out += st.pop();
+  return out;
+}
+
+// Kesik/bozuk model yanitini onar: ilk {'den basla, en uzun gecerli deger sinirina kadar
+// kes, kapanmamis parantezleri kapat. Basarisizsa null.
+function tryRepairJson(raw) {
+  let t = String(raw || '').replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+  const start = t.indexOf('{');
+  if (start < 0) return null;
+  t = t.slice(start);
+  if (t.length > 20000) t = t.slice(0, 20000);
+
+  const bounds = [];
+  let inStr = false; let esc = false;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') { inStr = false; bounds.push(i + 1); }
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '{' || c === '[') continue;
+    if (c === '}' || c === ']') { bounds.push(i + 1); continue; }
+    if (/[0-9tfn-]/.test(c) && !/[a-z0-9_]/i.test(t[i - 1] || '')) {
+      const m = t.slice(i).match(/^(-?\d[\d.eE+-]*|true|false|null)/);
+      if (m) { bounds.push(i + m[0].length); i += m[0].length - 1; }
+    }
+  }
+  for (let b = bounds.length - 1; b >= 0; b--) {
+    const s = closeJson(t.slice(0, bounds[b]).replace(/\s*,\s*$/, ''));
+    try {
+      const o = JSON.parse(s);
+      if (o && typeof o === 'object' && !Array.isArray(o)) return o;
+    } catch (e) { /* sonraki sinir */ }
+  }
+  return null;
 }
 
 // tuzel kisi eki (sirket / kurum / kargo vb.) - taraf adinda bunlardan biri varsa o parca taraftir.
@@ -255,13 +309,27 @@ async function runVision(rec) {
     model: SONNET,
     opType: 'document_extract',
     system: buildSystem(),
-    user: [block, { type: 'text', text: 'Bu belgeyi çıkar. YALNIZ JSON döndür, başka metin yok.' }],
-    maxTokens: 2000,
+    user: [block, { type: 'text', text: 'Bu belgeyi çıkar. YALNIZ JSON döndür, başka metin/markdown/```json``` yok.' }],
+    maxTokens: 4000,
   });
-  let raw;
-  try { raw = parseJsonLoose(resp.text); }
-  catch (e) { throw new Error('Model yanıtı JSON olarak ayrıştırılamadı: ' + String(resp.text).slice(0, 200)); }
-  return { extraction: normalizeExtraction(raw), model: resp.model, costUsd: resp.costUsd, inputTokens: resp.inputTokens, outputTokens: resp.outputTokens };
+  let raw = null;
+  let repaired = false;
+  try {
+    raw = parseJsonLoose(resp.text);
+  } catch (e) {
+    raw = tryRepairJson(resp.text);
+    repaired = !!raw;
+  }
+  if (!raw) {
+    const hint = resp.stopReason === 'max_tokens' ? ' (yanıt token sınırında kesildi)' : '';
+    throw new Error('Model yanıtı JSON olarak ayrıştırılamadı' + hint + ': ' + String(resp.text).slice(0, 300));
+  }
+  if (repaired) console.warn('[document] Vision yanıtı kesikti, onarıldı (stop=%s).', resp.stopReason);
+  return {
+    extraction: normalizeExtraction(raw),
+    model: resp.model, costUsd: resp.costUsd, inputTokens: resp.inputTokens, outputTokens: resp.outputTokens,
+    stopReason: resp.stopReason, repaired,
+  };
 }
 
 // ---- DETERMINISTIK SINIFLANDIRMA ----
@@ -440,7 +508,10 @@ async function extractDocument(id) {
     classification,
     suggestions,
     prodComputation,
-    extractMeta: { model: v.model, costUsd: v.costUsd, at: new Date().toISOString(), mock: !!MOCK },
+    extractMeta: {
+      model: v.model, costUsd: v.costUsd, at: new Date().toISOString(), mock: !!MOCK,
+      repaired: !!v.repaired, stopReason: v.stopReason || null,
+    },
   });
   return updated;
 }
@@ -479,4 +550,4 @@ function recomputeProdForm(id, patch) {
   return docs.updateDocument(id, { prodComputation, prodEdits: p });
 }
 
-module.exports = { extractDocument, recomputeProdForm, classify, humanClass, buildSystem, parseJsonLoose, normalizeExtraction, EXTRACTION_FIELDS, runVision };
+module.exports = { extractDocument, recomputeProdForm, classify, humanClass, buildSystem, parseJsonLoose, tryRepairJson, normalizeExtraction, EXTRACTION_FIELDS, runVision };
