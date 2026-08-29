@@ -133,6 +133,16 @@ app.get('/api/paneldata', checkApiKey, (req, res) => {
 app.post('/api/paneldata', checkApiKey, (req, res) => {
   const body = req.body || {};
   if (!body.data) return res.status(400).json({ error: 'data alani gerekli.' });
+  // Hafif dogrulama: "bu kesinlikle bozuk" durumlari (dizi olmasi gereken alan obje olmus,
+  // para alaninda "abc"/"1.234,56" gibi cop). Sema katiligi YOK.
+  const { validatePanelData } = require('./agent/panelSchema');
+  const v = validatePanelData(body.data);
+  if (!v.ok) {
+    return res.status(422).json({
+      error: 'Panel verisi doğrulanamadı (bozuk alan). Kaydetme iptal edildi.',
+      details: v.errors,
+    });
+  }
   // Atomik yazma + iyimser eszamanlilik + yedekleme: agentStore.writePanelDataFull.
   // requireExpected: dosya VARSA ve expectedUpdatedAt yoksa REDDET (409). Bu, panelin ilk
   // pull'u basarisiz olup (Render soguk baslangic) bayat yerel veriyle buluttaki guncel

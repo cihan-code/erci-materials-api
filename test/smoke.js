@@ -196,6 +196,25 @@ async function main() {
     assert.strictEqual(raw3.data.incomes[0].category, 'Tahsilat');
   });
 
+  console.log('\n# 3b2. panelSchema — hafif doğrulama');
+  {
+    const { validatePanelData } = require('../agent/panelSchema');
+    ok('gerçek panel verisi doğrulamayı geçer', () => {
+      assert.strictEqual(validatePanelData(store.readPanelRaw().data).ok, true);
+    });
+    ok('dizi olması gereken alan obje olmuş -> hata', () => {
+      const r = validatePanelData({ incomes: {} });
+      assert.strictEqual(r.ok, false);
+      assert(/dizi olmalı/.test(r.errors[0].problem));
+    });
+    ok('para alanında Türkçe-formatlı string -> hata', () => {
+      assert.strictEqual(validatePanelData({ expenses: [{ id: 1, amount: '1.234,56' }] }).ok, false);
+    });
+    ok('null / eksik alan / sayı / sayısal-string sorun değil', () => {
+      assert.strictEqual(validatePanelData({ incomes: null, jobs: [{ id: 1, amount: 100, unit_price: '350' }] }).ok, true);
+    });
+  }
+
   console.log('\n# 3c. writePanelDataFull — tek atomik yazma yolu');
   {
     const raw0 = store.readPanelRaw();
