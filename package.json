@@ -9,7 +9,8 @@
     "agent": "node agent/generate.js",
     "mock": "AGENT_MOCK=1 node server.js",
     "smoke": "node test/smoke.js",
-    "dekont": "node test/dekont-real.js"
+    "dekont": "node test/dekont-real.js",
+    "sdr": "node test/sdr.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

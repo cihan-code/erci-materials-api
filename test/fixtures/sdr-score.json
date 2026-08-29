@@ -1,0 +1,10 @@
+{
+  "scores": [
+    { "potansiyel_puan": 9, "oncelik": "Yüksek", "tahmini_siparis_adet": 120,
+      "ilk_iletisim_onerisi": "Kulüp Instagram DM + iletisim@ mailine kısa kurumsal tanıtım; Teknofest dönemi öncesi zamanla." },
+    { "potansiyel_puan": 7, "oncelik": "Orta", "tahmini_siparis_adet": 400,
+      "ilk_iletisim_onerisi": "Satın alma birimine kurumsal mail, 1 hafta sonra telefon takibi; mezuniyet sezonu öncesi." },
+    { "potansiyel_puan": 4, "oncelik": "Düşük", "tahmini_siparis_adet": null,
+      "ilk_iletisim_onerisi": "İK/etkinlik sorumlusuna LinkedIn üzerinden ulaş; iletişim maili doğrulanmadan mail atma." }
+  ]
+}

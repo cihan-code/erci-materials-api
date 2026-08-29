@@ -6,7 +6,7 @@
 const RECORD_ARRAYS = [
   'customers', 'jobs', 'incomes', 'expenses', 'fixedExpenses', 'debts', 'pipeline',
   'suppliers', 'hedefler', 'hedeflerAylik', 'uretimTakip', 'okulMail', 'okulTakip',
-  'tasks', 'invoices', 'supplierCategories',
+  'tasks', 'invoices', 'supplierCategories', 'leads',
 ];
 
 // Sayisal olmasi gereken alanlar (bir kayitta varsa: sayi | null | sayiya cevrilebilir string).
@@ -14,6 +14,7 @@ const NUMERIC_FIELDS = [
   'amount', 'total_amount', 'unit_price', 'quantity', 'paid_amount', 'deposit',
   'deposit_received', 'subtotal', 'vat_amount', 'manual_total_cost',
   'est_quantity', 'est_unit_price', 'probability', 'yillik_hedef', 'aylik_hedef',
+  'potansiyel_puan', 'tahmini_siparis_adet',
 ];
 
 function isBadNumericValue(v) {

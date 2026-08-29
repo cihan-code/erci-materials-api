@@ -26,7 +26,19 @@ const INVOICE_OUTGOING_STATUSES = ['Tahsil Edilmedi', 'Kısmi Tahsil Edildi', 'T
 // Merci yoneticileri (aksiyon atamalari icin). E=Finans, C=İşler&Üretim, M=Satış.
 const MANAGERS = ['Cihan Berber', 'Erdem Küçükarslan', 'Mert Kıvanç Tekin'];
 
+// ---- Satis Ajani (SDR) ----
+const LEAD_STATUSES = [
+  'Yeni', 'Araştırıldı', 'Mail Hazır', 'Mail Gönderildi', 'Yanıt Var',
+  'Görüşülüyor', 'Teklif Aşaması', 'Kazanıldı', 'Kaybedildi', 'Uygun Değil',
+];
+const LEAD_TYPES = [
+  'Üniversite', 'Üniversite Kulübü', 'Özel Lise', 'Okul', 'Kurumsal Firma',
+  'Etkinlik/Organizasyon', 'Spor Kulübü', 'Diğer',
+];
+const LEAD_PRIORITY = ['Yüksek', 'Orta', 'Düşük'];
+
 module.exports = {
   JOB_STATUSES, JOB_ACTIVE, URETIM_STATUSES, PIPELINE_STATUSES, PIPELINE_CLOSED,
   INCOME_CATS, EXPENSE_CATS, INVOICE_INCOMING_STATUSES, INVOICE_OUTGOING_STATUSES, MANAGERS,
+  LEAD_STATUSES, LEAD_TYPES, LEAD_PRIORITY,
 };

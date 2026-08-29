@@ -131,8 +131,11 @@ async function streamOnce(body, key) {
   return { text: text.trim(), usage, stopReason, truncated: stopReason === 'max_tokens' };
 }
 
-// opts: { model, opType, system, user, maxTokens, thinking, effort, schema }
+// opts: { model, opType, system, user, maxTokens, thinking, effort, schema, tools }
 //   user: string  VEYA  content-block dizisi (image/document + text) - Vision icin.
+//   tools: Anthropic server-tool dizisi ( or. web_search_20260209) - SDR arastirmasi icin.
+//          Server tool'lar Anthropic sunucusunda calisir, ayni stream'de sonuc doner;
+//          stream parser sadece text_delta biriktirir - arac bloklari gormezden gelinir.
 async function callClaude(opts) {
   const userIsBlocks = Array.isArray(opts.user);
   const userTextForLog = userIsBlocks
@@ -166,6 +169,7 @@ async function callClaude(opts) {
       format: { type: 'json_schema', schema: opts.schema },
     });
   }
+  if (Array.isArray(opts.tools) && opts.tools.length) body.tools = opts.tools;
 
   let out = null, lastErr = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -183,12 +187,15 @@ async function callClaude(opts) {
 
   const inTok = (out && out.usage && out.usage.input_tokens) || 0;
   const outTok = (out && out.usage && out.usage.output_tokens) || 0;
-  const costUsd = estCostUsd(opts.model, inTok, outTok);
+  // web_search server tool ayri ucretlendirilir (~$10 / 1000 arama)
+  const webSearches = (out && out.usage && out.usage.server_tool_use && out.usage.server_tool_use.web_search_requests) || 0;
+  const costUsd = Math.round((estCostUsd(opts.model, inTok, outTok) + webSearches * 0.01) * 1e6) / 1e6;
   store.logUsage({
     opType: opts.opType || 'unknown',
     model: opts.model,
     inputTokens: inTok,
     outputTokens: outTok,
+    webSearches: webSearches || undefined,
     costUsd,
     stopReason: out ? out.stopReason : null,
     ok: !!out,
@@ -205,6 +212,7 @@ async function callClaude(opts) {
     model: opts.model,
     inputTokens: inTok,
     outputTokens: outTok,
+    webSearches,
     costUsd,
   };
 }

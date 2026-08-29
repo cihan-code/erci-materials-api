@@ -622,5 +622,103 @@ app.post('/api/agent/documents/delete', checkApiKey, (req, res) => {
   } catch (e) { res.status(400).json({ error: String(e && e.message || e) }); }
 });
 
+// ========================= SATIŞ AJANI (SDR) =========================
+// Yönetim Ajanından BAĞIMSIZ. Kendi namespace'i (/api/sdr/*), kendi kodu (agent/sdr/),
+// kendi kovası (DATA_DIR/sdr/). leads[] panel-data.json içinde (agent/sdr/leads.js yazar).
+const sdrStore = require('./agent/sdr/store');
+const sdrLeads = require('./agent/sdr/leads');
+
+// Araştırma başlat (async) - panel /api/sdr/status poll eder.
+app.post('/api/sdr/research', checkApiKey, (req, res) => {
+  if (!process.env.ANTHROPIC_API_KEY && process.env.AGENT_MOCK !== '1') {
+    return res.status(503).json({ error: 'ANTHROPIC_API_KEY tanımlı değil.' });
+  }
+  const { query, city, type } = req.body || {};
+  if (!query || !String(query).trim()) return res.status(400).json({ error: 'query (araştırma hedefi) gerekli.' });
+  if (sdrStore.readStatus().running) return res.status(409).json({ error: 'Bir araştırma zaten çalışıyor.' });
+  try {
+    const { researchAndScore } = require('./agent/sdr/flow');
+    researchAndScore({ query, city, type }).catch((e) => console.error('[sdr/research] hata:', e && e.message || e));
+    res.json({ started: true });
+  } catch (e) {
+    res.status(500).json({ error: String(e && e.message || e) });
+  }
+});
+app.get('/api/sdr/status', checkApiKey, (req, res) => {
+  res.json(Object.assign(sdrStore.readStatus(), {
+    dailyCap: sdrStore.DAILY_CAP, researchToday: sdrStore.researchCountToday(),
+  }));
+});
+app.get('/api/sdr/research', checkApiKey, (req, res) => {
+  res.json(sdrStore.research.list({ limit: req.query.limit }));
+});
+app.get('/api/sdr/research/:id', checkApiKey, (req, res) => {
+  const rec = sdrStore.research.get(req.params.id);
+  if (!rec) return res.status(404).json({ error: 'Araştırma bulunamadı.' });
+  res.json(rec);
+});
+app.delete('/api/sdr/research/:id', checkApiKey, (req, res) => {
+  const r = sdrStore.research.delete(req.params.id);
+  res.status(r.deleted ? 200 : 404).json(r.deleted ? { ok: true } : { error: 'Bulunamadı.' });
+});
+
+// Aday(lar)ı Lead Havuzuna aktar (data.leads).
+app.post('/api/sdr/leads/commit', checkApiKey, (req, res) => {
+  const { researchId, candidateIndexes, candidates, source_query } = req.body || {};
+  let list = Array.isArray(candidates) ? candidates : null;
+  if (!list && researchId) {
+    const rec = sdrStore.research.get(researchId);
+    if (!rec) return res.status(404).json({ error: 'Araştırma bulunamadı.' });
+    const all = rec.candidates || [];
+    list = Array.isArray(candidateIndexes) && candidateIndexes.length
+      ? candidateIndexes.map((i) => all[i]).filter(Boolean)
+      : all;
+  }
+  if (!list || !list.length) return res.status(400).json({ error: 'candidates veya researchId gerekli.' });
+  try {
+    res.json(sdrLeads.commitLeads(list, { confirm: true, source_query }));
+  } catch (e) { res.status(400).json({ error: String(e && e.message || e) }); }
+});
+
+app.get('/api/sdr/leads', checkApiKey, (req, res) => {
+  const { data } = agentStore.loadPanelData();
+  res.json(sdrLeads.listLeads(data || {}, { status: req.query.status, city: req.query.city, priority: req.query.priority }));
+});
+
+// Mail taslağı üret (KAYDETMEZ - panele döner, kullanıcı düzenleyip /leads/:id ile kaydeder).
+app.post('/api/sdr/leads/:id/email', checkApiKey, async (req, res) => {
+  if (!process.env.ANTHROPIC_API_KEY && process.env.AGENT_MOCK !== '1') {
+    return res.status(503).json({ error: 'ANTHROPIC_API_KEY tanımlı değil.' });
+  }
+  const { data } = agentStore.loadPanelData();
+  const lead = sdrLeads.getLead(data || {}, req.params.id);
+  if (!lead) return res.status(404).json({ error: 'Lead bulunamadı.' });
+  try {
+    const { draftEmail } = require('./agent/sdr/email');
+    res.json(await draftEmail(lead));
+  } catch (e) { res.status(400).json({ error: String(e && e.message || e) }); }
+});
+
+// Lead güncelle: { durum? | mail_taslagi? | mark_sent? | followup_tarihi? | note? }
+app.post('/api/sdr/leads/:id', checkApiKey, (req, res) => {
+  try {
+    res.json(sdrLeads.updateLead(req.params.id, req.body || {}, { confirm: true }));
+  } catch (e) { res.status(400).json({ error: String(e && e.message || e) }); }
+});
+
+// Lead -> pipeline (Potansiyel İşler).
+app.post('/api/sdr/leads/:id/convert', checkApiKey, (req, res) => {
+  try {
+    res.json(sdrLeads.convertToPipeline(req.params.id, Object.assign({ confirm: true }, req.body || {})));
+  } catch (e) { res.status(400).json({ error: String(e && e.message || e) }); }
+});
+
+app.delete('/api/sdr/leads/:id', checkApiKey, (req, res) => {
+  try {
+    const r = sdrLeads.deleteLead(req.params.id);
+    res.status(r.deleted ? 200 : 404).json(r.deleted ? r : { error: 'Bulunamadı.' });
+  } catch (e) { res.status(400).json({ error: String(e && e.message || e) }); }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('Merci Tekstil Materyaller API port ' + PORT + ' uzerinde calisiyor. DATA_DIR=' + DATA_DIR));

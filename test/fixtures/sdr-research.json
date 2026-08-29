@@ -1,0 +1,60 @@
+{
+  "candidates": [
+    {
+      "kurum_adi": "Örnek Üniversitesi Robotik Kulübü",
+      "kurum_tipi": "Üniversite Kulübü",
+      "sektor": null,
+      "sehir": "İstanbul",
+      "website": "https://ornekrobotik.example",
+      "instagram": "https://instagram.com/ornekrobotik",
+      "linkedin": null,
+      "sosyal_ozet": "Yaklaşık 40 aktif üye, her yıl Teknofest ve tanıtım günü için özel tişört bastırıyor",
+      "emails": ["iletisim@ornekrobotik.example"],
+      "phones": [],
+      "ilgili_kisiler": [
+        { "ad": null, "unvan": "Kulüp Başkanı", "email": null, "kaynak": "https://ornekrobotik.example/ekip" }
+      ],
+      "neden_uygun": "Aktif 40+ üyeli teknik kulüp, her yıl etkinlik için düşük-orta adetli özel tişört ihtiyacı — Merci'nin tam hedefi.",
+      "tahmini_urun": "Tişört / Sweatshirt",
+      "tahmini_siparis_adet": 120,
+      "kaynaklar": ["https://ornekrobotik.example", "https://instagram.com/ornekrobotik"]
+    },
+    {
+      "kurum_adi": "Örnek Koleji",
+      "kurum_tipi": "Özel Lise",
+      "sektor": null,
+      "sehir": "İstanbul",
+      "website": "https://ornekkoleji.example",
+      "instagram": null,
+      "linkedin": null,
+      "sosyal_ozet": null,
+      "emails": ["info@ornekkoleji.example"],
+      "phones": ["+90 212 000 00 00"],
+      "ilgili_kisiler": [
+        { "ad": null, "unvan": "Satın Alma Birimi", "email": "satinalma@ornekkoleji.example", "kaynak": "https://ornekkoleji.example/iletisim" }
+      ],
+      "neden_uygun": "1200+ öğrencili özel lise; mezuniyet, spor günü ve okul forması için yıllık toplu tekstil alımı yapıyor.",
+      "tahmini_urun": "Forma / Sweatshirt",
+      "tahmini_siparis_adet": 400,
+      "kaynaklar": ["https://ornekkoleji.example/iletisim"]
+    },
+    {
+      "kurum_adi": "Bilinmeyen İletişimli Aday",
+      "kurum_tipi": "Kurumsal Firma",
+      "sektor": "Yazılım",
+      "sehir": "Ankara",
+      "website": "https://bilinmeyen.example",
+      "instagram": null,
+      "linkedin": "https://linkedin.com/company/bilinmeyen",
+      "sosyal_ozet": null,
+      "emails": [],
+      "phones": [],
+      "ilgili_kisiler": [],
+      "neden_uygun": "200+ çalışanlı yazılım firması; kurumsal etkinlik/lansmanlarda tişört ihtiyacı olabilir.",
+      "tahmini_urun": null,
+      "tahmini_siparis_adet": null,
+      "kaynaklar": ["https://linkedin.com/company/bilinmeyen"]
+    }
+  ],
+  "arastirma_notu": "3 aday bulundu. 3. adayın iletişim maili herkese açık kaynakta yok — kullanıcı doğrulamalı."
+}
