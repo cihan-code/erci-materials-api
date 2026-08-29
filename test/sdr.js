@@ -130,6 +130,18 @@ async function main() {
     assert(c2.alreadyLinked);
   });
 
+  console.log('\n# 4b. Günlük özet (deterministik)');
+  ok('digest: takibi geçmiş lead + istatistik', () => {
+    const d = store.readPanelRaw().data;
+    // leadId gönderildi ve pipeline'a dönüştü, followup dün olsun
+    const l = d.leads.find((x) => x.id === commit.created[1]);
+    l.followup_tarihi = '2020-01-01'; l.durum = 'Mail Gönderildi';
+    store.writePanelData(d, store.readPanelRaw().updatedAt);
+    const dg = leads.digest(store.readPanelRaw().data, '2026-08-29');
+    assert(dg.overdueFollowups.some((x) => x.id === l.id));
+    assert(dg.stats.total >= 1 && typeof dg.stats.byStatus === 'object');
+  });
+
   console.log('\n# 5. Şema + temizlik');
   ok('leads[] panelSchema doğrulamasını geçer', () => {
     assert.strictEqual(validatePanelData(store.readPanelRaw().data).ok, true);

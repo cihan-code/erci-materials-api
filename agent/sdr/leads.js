@@ -209,7 +209,34 @@ function deleteLead(id) {
   return { deleted: 1, updatedAt };
 }
 
+// Gunluk ozet (deterministik, model cagrisi YOK): takibi gecikmis + taslak bekleyen lead'ler.
+function digest(data, today) {
+  today = today || todayISO();
+  const all = Array.isArray(data && data.leads) ? data.leads : [];
+  const overdueFollowups = all.filter((l) =>
+    l.followup_tarihi && l.followup_tarihi <= today
+    && !['Kazanıldı', 'Kaybedildi', 'Uygun Değil'].includes(l.durum))
+    .map((l) => ({ id: l.id, kurum_adi: l.kurum_adi, durum: l.durum, followup_tarihi: l.followup_tarihi, oncelik: l.oncelik }));
+  const needDraft = all.filter((l) =>
+    !l.mail_taslagi && (l.emails || []).length
+    && ['Yeni', 'Araştırıldı', 'Mail Hazır'].includes(l.durum) && (l.potansiyel_puan || 0) >= 6)
+    .map((l) => ({ id: l.id, kurum_adi: l.kurum_adi, potansiyel_puan: l.potansiyel_puan }));
+  const byStatus = {};
+  all.forEach((l) => { byStatus[l.durum] = (byStatus[l.durum] || 0) + 1; });
+  return {
+    today,
+    overdueFollowups, needDraft,
+    stats: {
+      total: all.length,
+      yuksekOncelik: all.filter((l) => l.oncelik === 'Yüksek').length,
+      mailGonderildi: byStatus['Mail Gönderildi'] || 0,
+      pipelineDonusen: all.filter((l) => l.pipeline_id).length,
+      byStatus,
+    },
+  };
+}
+
 module.exports = {
   SALES_OWNER, normalizeCandidate, normKey,
-  listLeads, getLead, commitLeads, updateLead, convertToPipeline, deleteLead,
+  listLeads, getLead, commitLeads, updateLead, convertToPipeline, deleteLead, digest,
 };

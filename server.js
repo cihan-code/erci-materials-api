@@ -685,6 +685,12 @@ app.get('/api/sdr/leads', checkApiKey, (req, res) => {
   res.json(sdrLeads.listLeads(data || {}, { status: req.query.status, city: req.query.city, priority: req.query.priority }));
 });
 
+// Günlük özet - deterministik, model çağrısı YOK (takibi geciken + taslak bekleyen lead'ler).
+app.get('/api/sdr/digest', checkApiKey, (req, res) => {
+  const { data } = agentStore.loadPanelData();
+  res.json(sdrLeads.digest(data || {}));
+});
+
 // Mail taslağı üret (KAYDETMEZ - panele döner, kullanıcı düzenleyip /leads/:id ile kaydeder).
 app.post('/api/sdr/leads/:id/email', checkApiKey, async (req, res) => {
   if (!process.env.ANTHROPIC_API_KEY && process.env.AGENT_MOCK !== '1') {
