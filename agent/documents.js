@@ -124,8 +124,46 @@ function discardDocument(id) {
   return { ok: true };
 }
 
+// HARD sil: belge kaydini + dosyasini + indeks satirini tamamen kaldirir.
+// PANEL VERISINE DOKUNMAZ - islenmis belgenin olusturdugu gelir/gider/fatura/is kaydi
+// yerinde kalir (kullanici onu Gelir/Gider/Faturalar sekmesinden ayrica siler).
+function deleteDocument(id) {
+  const rec = getDocument(id);
+  if (!rec) throw new Error('Belge bulunamadı: ' + id);
+  try { fs.unlinkSync(path.join(FILES_DIR, rec.storedName)); } catch (e) { /* dosya zaten yok */ }
+  try { fs.unlinkSync(path.join(DOCS_DIR, id + '.json')); } catch (e) { /* json zaten yok */ }
+  saveIndex(loadIndex().filter((m) => m.id !== id));
+  return {
+    ok: true, id,
+    wasCommitted: rec.status === 'committed',
+    committedRecord: rec.committedRecord || null,
+  };
+}
+
+// Toplu HARD sil: { ids? } veya { status? } veya { before? (YYYY-MM-DD, uploadedAt) }.
+// En az bir olcut sart - bos {} hicbir sey silmez.
+function deleteDocuments({ ids, status, before } = {}) {
+  const index = loadIndex();
+  const idSet = Array.isArray(ids) && ids.length ? new Set(ids) : null;
+  if (!idSet && !status && !before) return { deleted: 0, ids: [] };
+  const doomed = index.filter((m) => {
+    if (idSet) return idSet.has(m.id);
+    if (status && m.status !== status) return false;
+    if (before && String(m.uploadedAt || '').slice(0, 10) >= before) return false;
+    return true;
+  });
+  doomed.forEach((m) => {
+    const rec = getDocument(m.id);
+    if (rec) { try { fs.unlinkSync(path.join(FILES_DIR, rec.storedName)); } catch (e) {} }
+    try { fs.unlinkSync(path.join(DOCS_DIR, m.id + '.json')); } catch (e) {}
+  });
+  const doomedIds = new Set(doomed.map((m) => m.id));
+  saveIndex(index.filter((m) => !doomedIds.has(m.id)));
+  return { deleted: doomedIds.size, ids: [...doomedIds] };
+}
+
 module.exports = {
   DOCS_DIR, MAX_SIZE, EXT_MIME,
   ensureDirs, saveDocument, getDocument, updateDocument, listDocuments,
-  fileBuffer, fileBase64, discardDocument, loadIndex,
+  fileBuffer, fileBase64, discardDocument, deleteDocument, deleteDocuments, loadIndex,
 };

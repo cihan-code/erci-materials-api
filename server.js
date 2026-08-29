@@ -629,10 +629,26 @@ app.post('/api/agent/documents/:id/commit', checkApiKey, (req, res) => {
   }
 });
 
+// Belge kaydini TAMAMEN sil (dosya + kayit + indeks). Panel verisine dokunmaz -
+// islenmis belgenin olusturdugu gelir/gider/is kaydi yerinde kalir (yanit committedRecord ile bildirir).
 app.delete('/api/agent/documents/:id', checkApiKey, (req, res) => {
   try {
     const docs = require('./agent/documents');
-    res.json(docs.discardDocument(req.params.id));
+    res.json(docs.deleteDocument(req.params.id));
+  } catch (e) {
+    res.status(e && /bulunamad/i.test(String(e.message)) ? 404 : 400).json({ error: String(e && e.message || e) });
+  }
+});
+
+// Toplu sil: body/query { status? | before? (YYYY-MM-DD) | ids[] }. En az bir olcut sart.
+app.post('/api/agent/documents/delete', checkApiKey, (req, res) => {
+  const { status, before, ids } = Object.assign({}, req.query, req.body || {});
+  if (!status && !before && !(Array.isArray(ids) && ids.length)) {
+    return res.status(400).json({ error: 'status, before veya ids gerekli.' });
+  }
+  try {
+    const docs = require('./agent/documents');
+    res.json({ ok: true, ...docs.deleteDocuments({ status, before, ids }) });
   } catch (e) { res.status(400).json({ error: String(e && e.message || e) }); }
 });
 

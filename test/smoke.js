@@ -469,6 +469,46 @@ async function main() {
     assert.strictEqual(pd.data.jobs.find((x) => x.id === rr.jobId).quantity, 45);
   });
 
+  // 6h belge kaydi HARD silme (Belge Isleme listesindeki test ciktilarini temizleme)
+  console.log('\n# 6h Belge kaydı silme');
+  {
+    const upDel = docs.saveDocument(fakeBuf('del'), 'silinecek-dekont.png', 'image/png');
+    await extractDocument(upDel.id);
+    ok('deleteDocument: kayıt + dosya + indeks tamamen silinir', () => {
+      const r = docs.deleteDocument(upDel.id);
+      assert.strictEqual(r.ok, true);
+      assert.strictEqual(docs.getDocument(upDel.id), null);
+      assert(!docs.listDocuments({}).some((m) => m.id === upDel.id));
+    });
+    ok('deleteDocument: olmayan id -> hata', () => assert.throws(() => docs.deleteDocument('yok-id'), /bulunamad/i));
+    ok('deleteDocument: İŞLENMİŞ belge silinir ama oluşan kayıt PANELDE KALIR', () => {
+      const jobId = cUF.jobId;
+      const jobsBeforeDel = store.readPanelRaw().data.jobs.length;
+      const r = docs.deleteDocument(upUF.id);
+      assert.strictEqual(r.wasCommitted, true);
+      assert(r.committedRecord && r.committedRecord.kind === 'job');
+      assert.strictEqual(docs.getDocument(upUF.id), null);
+      const pd = store.readPanelRaw();
+      assert.strictEqual(pd.data.jobs.length, jobsBeforeDel, 'belge silme panel verisine dokundu!');
+      assert(pd.data.jobs.some((j) => j.id === jobId), 'oluşan iş kaydı yanlışlıkla silindi');
+    });
+    const a = docs.saveDocument(fakeBuf('da'), 'da.png', 'image/png');
+    const b = docs.saveDocument(fakeBuf('db'), 'db.png', 'image/png');
+    ok('deleteDocuments: ids ile toplu siler', () => {
+      const r = docs.deleteDocuments({ ids: [a.id, b.id] });
+      assert.strictEqual(r.deleted, 2);
+      assert.strictEqual(docs.getDocument(a.id), null);
+      assert.strictEqual(docs.getDocument(b.id), null);
+    });
+    ok('deleteDocuments: status ile toplu siler', () => {
+      docs.saveDocument(fakeBuf('dc'), 'dc.png', 'image/png'); // pending
+      const r = docs.deleteDocuments({ status: 'pending' });
+      assert(r.deleted >= 1);
+      assert.strictEqual(docs.listDocuments({ status: 'pending' }).length, 0);
+    });
+    ok('deleteDocuments: ölçüt yoksa hiçbir şey silmez', () => assert.strictEqual(docs.deleteDocuments({}).deleted, 0));
+  }
+
   seed(); // belge testi mutasyonlarini geri al
 
   console.log('\n=== ' + pass + ' gecti, ' + fail + ' basarisiz ===');
