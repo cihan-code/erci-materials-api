@@ -87,7 +87,7 @@ async function streamOnce(body, key) {
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  let buf = '', text = '', usage = null, stopReason = null;
+  let buf = '', text = '', usage = null, stopReason = null, sawStop = false;
 
   for (;;) {
     const { done, value } = await reader.read();
@@ -111,14 +111,24 @@ async function streamOnce(body, key) {
       } else if (evt.type === 'message_delta') {
         if (evt.delta && evt.delta.stop_reason) stopReason = evt.delta.stop_reason;
         if (evt.usage) usage = Object.assign(usage || {}, evt.usage);
+      } else if (evt.type === 'message_stop') {
+        sawStop = true;
       } else if (evt.type === 'error') {
         const err = new Error('Anthropic stream hatasi: ' + JSON.stringify(evt.error || {}));
-        err.retryable = /overloaded|rate_limit|timeout/i.test(JSON.stringify(evt.error || {}));
+        err.retryable = /overloaded|rate_limit|timeout|api_error/i.test(JSON.stringify(evt.error || {}));
         throw err;
       }
     }
   }
-  return { text: text.trim(), usage, stopReason };
+
+  // Stream tamamlanmadan koptu (network/edge/cold-start): message_stop VE stop_reason yoksa
+  // yaniti eksik/kesik say -> retry edilebilir hata firlat (kismi JSON'u kaydetme).
+  if (!sawStop && !stopReason) {
+    const err = new Error('Anthropic stream tamamlanmadan kesildi (' + text.length + ' karakter alindi).');
+    err.retryable = true;
+    throw err;
+  }
+  return { text: text.trim(), usage, stopReason, truncated: stopReason === 'max_tokens' };
 }
 
 // opts: { model, opType, system, user, maxTokens, thinking, effort, schema }

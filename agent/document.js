@@ -59,9 +59,9 @@ const EXAMPLE_PRODFORM = JSON.stringify({
 // metinden JSON ayikla (```json ... ``` cit veya prose ile gelse bile)
 function parseJsonLoose(text) {
   let t = String(text || '').trim();
-  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const fence = t.match(/```\s*(?:json)?\s*([\s\S]*?)```/i);
   if (fence) t = fence[1].trim();
-  else t = t.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim(); // tek tarafli cit
+  else t = t.replace(/^\s*```\s*(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim(); // tek tarafli cit
   if (t[0] !== '{') {
     const i = t.indexOf('{'); const j = t.lastIndexOf('}');
     if (i >= 0 && j > i) t = t.slice(i, j + 1);
@@ -88,7 +88,7 @@ function closeJson(s) {
 // Kesik/bozuk model yanitini onar: ilk {'den basla, en uzun gecerli deger sinirina kadar
 // kes, kapanmamis parantezleri kapat. Basarisizsa null.
 function tryRepairJson(raw) {
-  let t = String(raw || '').replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+  let t = String(raw || '').replace(/^\s*```\s*(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
   const start = t.indexOf('{');
   if (start < 0) return null;
   t = t.slice(start);
@@ -202,8 +202,9 @@ function buildSystem() {
     'Sen bir belge çıkarım motorusun. Sana bir görsel/PDF verilecek; şu 4 türden biri:',
     '  DEKONT (banka ödeme dekontu) · FATURA (e-fatura/e-arşiv) · ÜRETİM FORMU (Merci iş emri) · belirsiz',
     '',
-    'YALNIZ JSON döndür. Açıklama/yorum/markdown/```json``` YOK.',
+    'YALNIZ tek bir JSON nesnesi döndür. Açıklama/yorum/markdown/```json``` YOK. Kısa tut.',
     'Görselde OLMAYAN alanı UYDURMA — null bırak. HİÇBİR sayıyı/toplamı/adedi HESAPLAMA; sadece yazılanı oku.',
+    'Belge bir HESAP ÖZETİ / EKSTRE (birden çok işlem satırı) ise: document_type="unknown", diğer alanlar null.',
     '',
     'document_type: "payment_receipt" | "invoice" | "production_form" | "unknown".',
     '',
