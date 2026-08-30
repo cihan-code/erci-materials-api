@@ -165,19 +165,19 @@ async function main() {
     assert.strictEqual(sdrStore.research.get(rec.id), null);
   });
 
-  console.log('\n# 6. Kaynak katmanı (Overpass + Places, MOCK)');
+  console.log('\n# 6. Kaynak katmanı (Google Places, MOCK)');
   const { gatherSources } = require('../agent/sdr/sources');
   const { mergeCandidates } = require('../agent/sdr/research');
   const { normalizeCandidate } = require('../agent/sdr/leads');
   const sg = await gatherSources({ query: 'üniversite', city: 'Ankara', type: 'Üniversite' });
-  ok('gatherSources MOCK: iki kaynağı birleştirir, isimle dedup eder', () => {
+  ok('gatherSources MOCK: Places adaylarını döndürür, isimle dedup eder', () => {
     assert(Array.isArray(sg.candidates) && sg.candidates.length >= 2);
     const dup = sg.candidates.filter((c) => /örnek teknik/i.test(c.kurum_adi));
-    assert.strictEqual(dup.length, 1); // aynı üni hem overpass hem places -> tek kayıt
-    assert(dup[0].website && dup[0].phones.length >= 2); // birleşince Places web'i + 2 telefon
+    assert.strictEqual(dup.length, 1); // aynı üni tek kayıt
+    assert(dup[0].website && dup[0].phones.length >= 1); // Places web'i + telefon
   });
-  ok('gatherSources sources[] raporu döner (Places + OpenStreetMap)', () => {
-    assert.deepStrictEqual(sg.sources.map((s) => s.name).sort(), ['Google Places', 'OpenStreetMap']);
+  ok('gatherSources sources[] raporu döner (yalnız Google Places)', () => {
+    assert.deepStrictEqual(sg.sources.map((s) => s.name), ['Google Places']);
   });
   ok('mergeCandidates: kaynakta olup modelde olmayanı ekler, uydurma iletişim yok', () => {
     const model = [normalizeCandidate({ kurum_adi: 'Örnek Teknik Üniversitesi', kurum_tipi: 'Üniversite' })];

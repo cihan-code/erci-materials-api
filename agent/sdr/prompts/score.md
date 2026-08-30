@@ -8,6 +8,9 @@ Sana bir lead adayı listesi verilir. Her biri için Merci Tekstil açısından 
   (büyük ama uzun/resmi süreç), etkinlik şirketi; iletişim kısmen var.
 - **1-4:** ilgisi zayıf, çok küçük, iletişim bilgisi yok, ya da büyük toptancı işi (Merci'nin
   rekabet edemeyeceği hacim).
+- **1 (elenmeli):** RAKİP / TEDARİKÇİ — tekstil/konfeksiyon üreticisi, baskı-nakış-serigrafi-
+  promosyon firması, tekstil toptancısı/kumaşçı, giyim e-ticaret satıcısı, matbaa. Bunlar Merci'den
+  tekstil SATIN ALMAZ. `oncelik` "Düşük", `ilk_iletisim_onerisi` = "Değerlendirme dışı — rakip/tedarikçi".
 
 ## Öncelik
 - **Yüksek:** puan ≥ 8 VE iletişim maili var VE yakında bir etkinlik/dönem başı (fırsat penceresi).

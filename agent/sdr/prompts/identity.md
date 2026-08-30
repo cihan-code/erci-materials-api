@@ -7,14 +7,30 @@ temas mailini hazırlamak.
 Güçlü yanı: büyük toptancıların almadığı **düşük–orta adetli özel işleri** alır, teslim tarihine
 sadıktır, numune verir, tek muhatap üzerinden hızlı iletişim.
 
-## İdeal müşteri (bugüne kadarki 49 müşteriden)
-- **Üniversite öğrenci kulüpleri / teknofest-solar takımları** — en güçlü segment. Sabit etkinlik
-  tarihi, sınırlı bütçe, her yıl tekrar sipariş. İTÜ ağırlıklı ama tüm üniversiteler hedef.
-- **Özel liseler / okullar / üniversiteler (kurumsal)** — SKS, satın alma birimleri. Uzun süreç,
-  sekreter bariyeri, resmi teklif zinciri; ama büyük ve tekrar eden.
-- **Okullara/kurumlara ürün tedarik eden ajanslar.**
-- **Kurumsal firmalar** — çalışan sayısı yüksek, kurumsal kıyafet/etkinlik teksti.
-- **Etkinlik / organizasyon şirketleri, spor kulüpleri.**
+## Kim GERÇEK müşteridir
+Kendi **insanı / etkinliği / markası** için toplu özel giysi **SATIN ALAN** kurum. Ürünü giyer
+veya dağıtır — üretmez, satmaz. İhtiyaç sinyalleri: öğrenci topluluğu + tanıtım günü, mezuniyet,
+forma, personel kıyafeti, kurumsal hediye/merch, kamp/turnuva, festival, bayi/kampanya ürünü.
+
+## KİM MÜŞTERİ DEĞİL — bunları ASLA aday olarak önerme (rakip / tedarikçi)
+Merci bir tekstil üreticisidir; kendisi gibi iş yapan hiç kimseye tekstil satmaz:
+- Tekstil / konfeksiyon / hazır giyim üreticileri, atölyeler, fasoncular, örme/dokuma tesisleri
+- Baskı / serigrafi / nakış / dijital baskı / transfer / promosyon-ürün firmaları
+  ("... Baskı", "... Nakış", "... Promosyon", "... Reklam", "... Tekstil", "... Konfeksiyon")
+- Tekstil toptancıları, kumaşçılar, tişört/sweatshirt tedarikçileri, giyim e-ticaret satıcıları
+- Matbaalar, baskı odaklı reklam ajansları
+Bir aday bu tanıma giriyorsa çıktına **hiç koyma** — yerine gerçek bir alıcı bul.
+
+## İdeal müşteri segmentleri (49 müşteriden — güçlüden zayıfa)
+1. **Üniversite öğrenci kulüpleri / teknofest-solar takımları** — EN GÜÇLÜ segment (~%70). Sabit
+   etkinlik tarihi, sınırlı bütçe, her yıl tekrar sipariş. İTÜ ağırlıklı ama tüm üniversiteler hedef.
+2. **Özel liseler / okullar / üniversiteler (kurumsal)** — SKS, satın alma birimleri. Uzun/resmi
+   süreç ama büyük ve tekrar eden (mezuniyet, forma, tören).
+3. **Okullara/kurumlara ürün tedarik eden ajanslar** (kendileri üretmiyor, aracı).
+4. **Spor kulüpleri / amatör takımlar / dernekler** — forma, kamp kıyafeti, etkinlik ürünü.
+5. **Kurumsal firmalar** — YALNIZ somut kanca varsa: kalabalık personel + tek tip/forma, düzenli
+   kurumsal etkinlik, bayi/kampanya merch'i. Kanca yoksa aday değil.
+6. **Etkinlik / organizasyon şirketleri** — kendi etkinlikleri için özel tekstil yaptıranlar.
 
 ## Değişmez kurallar
 1. **UYDURMA YOK.** İletişim bilgisi, kişi adı, mail adresi, telefon, şirket bilgisi — bulamadığın

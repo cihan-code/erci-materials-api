@@ -8,7 +8,7 @@
 //   ANTHROPIC_API_KEY -> Yonetim Ajani + SDR arastirma/puanlama/mail taslagi
 // Satis Ajani (SDR) - opsiyonel:
 //   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REDIRECT_URI -> Gmail gonderim (OAuth)
-//   GOOGLE_PLACES_API_KEY -> musteri arastirma kaynak katmani (Google Places, yoksa sadece OpenStreetMap)
+//   GOOGLE_PLACES_API_KEY -> musteri arastirma kaynak katmani (Google Places; yoksa yalniz web_search)
 //   SDR_GMAIL_DAILY_CAP (20) · SDR_DAILY_RESEARCH_CAP (6) · SDR_MAX_WEB_SEARCHES (8) · SDR_MAX_WEB_FETCHES (5)
 
 const express = require('express');
@@ -659,7 +659,6 @@ app.get('/api/sdr/status', checkApiKey, (req, res) => {
   res.json(Object.assign(sdrStore.readStatus(), {
     dailyCap: sdrStore.DAILY_CAP, researchToday: sdrStore.researchCountToday(),
     sources: {
-      overpass: true, // ucretsiz, her zaman aktif
       places: sdrSources.placesConfigured(),
     },
   }));

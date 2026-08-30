@@ -1,4 +1,4 @@
-// SDR arastirma: KAYNAK katmani (Overpass + Google Places) ile gercek kurum listesi topla ->
+// SDR arastirma: KAYNAK katmani (Google Places) ile gercek kurum listesi topla ->
 // modele dogrulanmis stub olarak ver -> model web_search/web_fetch ile zenginlestir + ustune ekle
 // -> normalize -> arastirma logu kaydet.
 // Haiku (ucuz) + web_search/web_fetch server tool. MOCK'ta fixture doner, $0.
@@ -67,9 +67,11 @@ async function runResearch({ query, city, type } = {}) {
     '',
     'Araştırma hedefi: ' + query,
     '',
-    '## DOĞRULANMIŞ KAYNAK LİSTESİ (OpenStreetMap + Google Places — bu kurumlar GERÇEK)',
-    'Bu kurumları çıktına dahil et ve web_search/web_fetch ile zenginleştir (iletişim, kişi, sosyal, neden uygun).',
+    '## DOĞRULANMIŞ KAYNAK LİSTESİ (Google Places — bu kurumlar GERÇEK)',
+    'Liste boş olabilir; o zaman tümüyle web_search/web_fetch ile çalış.',
+    'Kaynak kurumlarını (varsa) çıktına dahil et ve web ile zenginleştir (iletişim, kişi, sosyal, neden uygun).',
     'Listede olmayan uygun kurumları da EKLE. Kaynakta olmayan iletişim bilgisini UYDURMA.',
+    'RAKİP/TEDARİKÇİ tipini (tekstil üreticisi, baskı-nakış-promosyon firması, toptancı, matbaa) ASLA listeleme.',
     '',
     renderSourceList(sourceResult.candidates),
   ].filter((x) => x !== '').join('\n');
