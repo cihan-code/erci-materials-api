@@ -22,6 +22,7 @@ const crypto = require('crypto');
 const agentStore = require('./agent/store');
 const agentDocs = require('./agent/documents');
 const { validatePanelData } = require('./agent/panelSchema');
+const { CODES, panelWriteError } = require('./agent/errorCodes');
 // Eager yukle: AGENT_MOCK guvenlik kilidi burada; production'da AGENT_MOCK=1 ise uygulama
 // app.listen'e gelmeden process.exit(1) yapar.
 require('./agent/claude');
@@ -112,7 +113,7 @@ app.use(express.json({ limit: '20mb' }));
 function checkApiKey(req, res, next) {
   if (!API_KEY) return next(); // API_KEY ayarlanmadiysa kontrol atlanir (kurulum kolaylastirma - onerilmez)
   const key = req.header('x-api-key');
-  if (key !== API_KEY) return res.status(401).json({ error: 'Yetkisiz istek (x-api-key hatali veya eksik).' });
+  if (key !== API_KEY) return res.status(401).json({ error: 'Yetkisiz istek (x-api-key hatali veya eksik).', code: CODES.AUTH_401 });
   next();
 }
 
@@ -133,19 +134,22 @@ app.get('/api/paneldata', checkApiKey, (req, res) => {
     const raw = fs.readFileSync(PANEL_DATA_FILE, 'utf8');
     res.type('application/json').send(raw);
   } catch (e) {
-    res.status(500).json({ error: 'Panel verisi okunamadi.' });
+    console.error('[PD-500-READ] panel verisi okunamadi:', e && e.message);
+    res.status(500).json({ error: 'Panel verisi okunamadi.', code: CODES.PD_500_READ });
   }
 });
 
 app.post('/api/paneldata', checkApiKey, (req, res) => {
   const body = req.body || {};
-  if (!body.data) return res.status(400).json({ error: 'data alani gerekli.' });
+  if (!body.data) return res.status(400).json({ error: 'data alani gerekli.', code: CODES.PD_400_NODATA });
   // Hafif dogrulama: "bu kesinlikle bozuk" durumlari (dizi olmasi gereken alan obje olmus,
   // para alaninda "abc"/"1.234,56" gibi cop). Sema katiligi YOK.
   const v = validatePanelData(body.data);
   if (!v.ok) {
+    console.warn('[PD-422-SCHEMA] panel yazmasi reddedildi:', JSON.stringify(v.errors.slice(0, 3)));
     return res.status(422).json({
       error: 'Panel verisi doğrulanamadı (bozuk alan). Kaydetme iptal edildi.',
+      code: CODES.PD_422_SCHEMA,
       details: v.errors,
     });
   }
@@ -163,11 +167,16 @@ app.post('/api/paneldata', checkApiKey, (req, res) => {
     });
     res.json({ ok: true, updatedAt });
   } catch (e) {
-    if (e && (e.code === 'CONFLICT' || e.code === 'STALE_WRITE')) {
-      return res.status(409).json({ error: String(e.message), currentUpdatedAt: e.currentUpdatedAt || null });
+    // Hata -> HTTP durumu + panel kodu esleme: agent/errorCodes.js (tek kaynak).
+    const mapped = panelWriteError(e);
+    if (mapped.status === 409) {
+      console.warn('[' + mapped.code + '] panel yazmasi reddedildi. gonderilen=' +
+        String(body.expectedUpdatedAt) + ' diskteki=' + String(mapped.currentUpdatedAt));
+    } else if (mapped.status === 500) {
+      console.error('[' + mapped.code + '] panel verisi yazilamadi:', e && e.message);
     }
-    if (e && e.code === 'BAD_INPUT') return res.status(400).json({ error: String(e.message) });
-    res.status(500).json({ error: 'Panel verisi kaydedilemedi.' });
+    const { status, ...payload } = mapped;
+    res.status(status).json(payload);
   }
 });
 
@@ -230,13 +239,14 @@ app.get('/api/stokdata', checkApiKey, (req, res) => {
     const raw = fs.readFileSync(STOK_DATA_FILE, 'utf8');
     res.type('application/json').send(raw);
   } catch (e) {
-    res.status(500).json({ error: 'Stok verisi okunamadi.' });
+    console.error('[SD-500-READ] stok verisi okunamadi:', e && e.message);
+    res.status(500).json({ error: 'Stok verisi okunamadi.', code: CODES.SD_500_READ });
   }
 });
 
 app.post('/api/stokdata', checkApiKey, (req, res) => {
   const body = req.body || {};
-  if (!body.data) return res.status(400).json({ error: 'data alani gerekli.' });
+  if (!body.data) return res.status(400).json({ error: 'data alani gerekli.', code: CODES.SD_400_NODATA });
   const payload = {
     data: body.data,
     updatedAt: new Date().toISOString(),
@@ -245,7 +255,8 @@ app.post('/api/stokdata', checkApiKey, (req, res) => {
     agentStore.writeJsonCompactAtomic(STOK_DATA_FILE, payload); // atomik (temp + rename)
     res.json({ ok: true, updatedAt: payload.updatedAt });
   } catch (e) {
-    res.status(500).json({ error: 'Stok verisi kaydedilemedi.' });
+    console.error('[SD-500-WRITE] stok verisi yazilamadi:', e && e.message);
+    res.status(500).json({ error: 'Stok verisi kaydedilemedi.', code: CODES.SD_500_WRITE });
   }
 });
 

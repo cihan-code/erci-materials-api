@@ -11,7 +11,8 @@
     "smoke": "node test/smoke.js",
     "dekont": "node test/dekont-real.js",
     "sdr": "node test/sdr.js",
-    "sdr:gmail": "node test/sdr-gmail.js"
+    "sdr:gmail": "node test/sdr-gmail.js",
+    "codes": "node test/paneldata-codes.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
