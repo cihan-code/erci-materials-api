@@ -617,18 +617,6 @@ app.post('/api/agent/documents/:id/commit', checkApiKey, (req, res) => {
   }
 });
 
-// Gizle/goster: kayit + dosya SILINMEZ, sadece listeden dusurur/geri getirir (Sil'den farkli - geri alinabilir).
-app.post('/api/agent/documents/:id/hide', checkApiKey, (req, res) => {
-  try {
-    const hidden = req.body && req.body.hidden !== undefined ? !!req.body.hidden : true;
-    const rec = agentDocs.setDocumentHidden(req.params.id, hidden);
-    const { storedName, ...safe } = rec;
-    res.json(safe);
-  } catch (e) {
-    res.status(e && /bulunamad/i.test(String(e.message)) ? 404 : 400).json({ error: String(e && e.message || e) });
-  }
-});
-
 // Belge kaydini TAMAMEN sil (dosya + kayit + indeks). Panel verisine dokunmaz -
 // islenmis belgenin olusturdugu gelir/gider/is kaydi yerinde kalir (yanit committedRecord ile bildirir).
 app.delete('/api/agent/documents/:id', checkApiKey, (req, res) => {
