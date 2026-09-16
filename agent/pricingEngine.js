@@ -42,6 +42,26 @@ function matchTemplate(ct, productTypeText) {
   return best ? { name: best.name, score: 0.5 } : null;
 }
 
+// Risk payı dahil maliyet: baz maliyet (risk payı hariç, ürüne sabit) + adet aralığına göre değişen
+// risk payı yüzdesi. Panel maliyetTierInfo/maliyetForQty birebir portu. Genel Gider artık ayrı bir
+// kalem değil - yerini bu risk payı aldı (bkz. costTemplates.maliyet_risk_pct).
+function maliyetTierInfo(ct, tpl, tierIdx) {
+  const base = tpl.baski_nakis_haric_maliyet || 0;
+  const pctList = (ct.maliyet_risk_pct || {})[tpl.name];
+  const pct = pctList ? (pctList[tierIdx] || 0) : 0;
+  const riskAmount = round2(base * pct / 100);
+  return { base, pct, riskAmount, total: round2(base + riskAmount) };
+}
+function maliyetForQty(ct, templateName, qty) {
+  const tpl = getTemplate(ct, templateName);
+  if (!tpl) return null;
+  const tiers = ct.price_tiers || [];
+  const idx = tiers.findIndex((t) => qty >= t.min && qty <= t.max);
+  if (idx === -1) return null;
+  return maliyetTierInfo(ct, tpl, idx);
+}
+function fmtRiskPct(v) { return '%' + Number(v || 0).toLocaleString('tr-TR', { maximumFractionDigits: 1 }); }
+
 // panel calcTemplateCostItems birebir. baskiNakisItems: [{type:'baski'|'nakis', size:'Orta Boyut', qty?}]
 // qty verilmezse tumTutar (toplam adet). qty verilirse o kalem icin o adet.
 function calcTemplateCostItems(ct, templateName, totalQty, extraNames, baskiNakisItems) {
@@ -52,6 +72,10 @@ function calcTemplateCostItems(ct, templateName, totalQty, extraNames, baskiNaki
     (tpl.extras || []).forEach((ex) => {
       if ((extraNames || []).includes(ex.name) && ex.amount) items.push({ category: ex.name, amount: round2(ex.amount * totalQty) });
     });
+    const risk = maliyetForQty(ct, templateName, totalQty);
+    if (risk && risk.riskAmount) {
+      items.push({ category: 'Risk Payı (' + fmtRiskPct(risk.pct) + ')', amount: round2(risk.riskAmount * totalQty) });
+    }
   }
   (baskiNakisItems || []).forEach((it) => {
     const dict = it.type === 'baski' ? (ct.baski || {}) : (ct.nakis || {});
@@ -75,4 +99,4 @@ function suggestedPrice(ct, templateName, qty) {
 
 function totalOf(items) { return round2((items || []).reduce((s, x) => s + (x.amount || 0), 0)); }
 
-module.exports = { getTemplate, matchTemplate, calcTemplateCostItems, suggestedPrice, totalOf, round2, norm };
+module.exports = { getTemplate, matchTemplate, calcTemplateCostItems, suggestedPrice, maliyetTierInfo, maliyetForQty, totalOf, round2, norm };
