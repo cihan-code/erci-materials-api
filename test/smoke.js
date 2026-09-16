@@ -319,6 +319,27 @@ async function main() {
   ok('ayni dosya -> duplicate uyarisi', () => { assert(up1b.duplicateOf, 'duplicate yakalanmadi'); });
   ok('desteklenmeyen tur reddedilir', () => { assert.throws(() => docs.saveDocument(fakeBuf('h'), 'a.heic', 'image/heic'), /Desteklenmeyen/); });
 
+  // 6a2 gizle/goster (Sil'den farkli - kayit/dosya duruyor, sadece listeden dusuyor)
+  ok('yeni belge varsayilan olarak gizli degil', () => {
+    assert.strictEqual(docs.listDocuments({ limit: 200 }).find((m) => m.id === up1.id).hidden, false);
+  });
+  docs.setDocumentHidden(up1.id, true);
+  ok('gizlenince hidden:true + status/dosya degismez', () => {
+    const meta = docs.listDocuments({ limit: 200 }).find((m) => m.id === up1.id);
+    assert.strictEqual(meta.hidden, true);
+    assert.strictEqual(meta.status, 'pending');
+  });
+  ok('hidden=false filtresi gizli belgeyi eler', () => {
+    assert(!docs.listDocuments({ hidden: 'false', limit: 200 }).some((m) => m.id === up1.id));
+  });
+  ok('hidden=true filtresi sadece gizli belgeleri getirir', () => {
+    assert(docs.listDocuments({ hidden: 'true', limit: 200 }).every((m) => m.hidden === true));
+  });
+  docs.setDocumentHidden(up1.id, false);
+  ok('geri gosterilince hidden:false olur', () => {
+    assert.strictEqual(docs.listDocuments({ limit: 200 }).find((m) => m.id === up1.id).hidden, false);
+  });
+
   // 6b extract (mock fixture) + siniflandirma
   const r1 = await extractDocument(up1.id);
   ok('gelen dekont -> Gelen Ödeme Dekontu, mutasyon YOK', () => {

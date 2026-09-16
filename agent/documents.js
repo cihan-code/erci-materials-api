@@ -85,7 +85,13 @@ function metaOf(rec) {
       : (rec.extraction && rec.extraction.amount) || null,
     orderNo: rec.extraction && rec.extraction.order_no || null,
     committedKind: rec.committedRecord && rec.committedRecord.kind || null,
+    hidden: !!rec.hidden, // kullanıcı listeden gizlemiş (silme değil - kayıt/dosya duruyor)
   };
+}
+
+// Gizle/göster: kayıt + dosya SİLİNMEZ, sadece listeleme filtresinden düşer (bkz. server.js ?hidden=).
+function setDocumentHidden(id, hidden) {
+  return updateDocument(id, { hidden: !!hidden });
 }
 
 function getDocument(id) {
@@ -103,9 +109,12 @@ function updateDocument(id, patch) {
   saveIndex(index);
   return rec;
 }
-function listDocuments({ status, limit } = {}) {
+function listDocuments({ status, limit, hidden } = {}) {
   let idx = loadIndex();
   if (status) idx = idx.filter((m) => m.status === status);
+  if (hidden === 'true' || hidden === true) idx = idx.filter((m) => m.hidden);
+  else if (hidden === 'false' || hidden === false) idx = idx.filter((m) => !m.hidden);
+  // hidden verilmezse (undefined) hem gizli hem görünür dönülür - panel kendi filtreler.
   return idx.slice(0, Math.max(1, Math.min(200, parseInt(limit, 10) || 50)));
 }
 function fileBuffer(rec) {
@@ -164,6 +173,6 @@ function deleteDocuments({ ids, status, before } = {}) {
 
 module.exports = {
   DOCS_DIR, MAX_SIZE, EXT_MIME,
-  ensureDirs, saveDocument, getDocument, updateDocument, listDocuments,
+  ensureDirs, saveDocument, getDocument, updateDocument, listDocuments, setDocumentHidden,
   fileBuffer, fileBase64, discardDocument, deleteDocument, deleteDocuments, loadIndex,
 };
