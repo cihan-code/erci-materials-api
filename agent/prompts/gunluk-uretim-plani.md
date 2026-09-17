@@ -11,7 +11,7 @@ alıp atölyeye gidebilmeli.
 1. **Başlık** — tarih (gün adıyla), planlanan aktif iş sayısı, veri tazeliği.
 2. **Veri güveni** — tablodaki "VERİ GÜVENİ" maddelerini kısaca aktar. Kendi yorumunu ekleme.
 3. **🔧 BUGÜN YAPILACAKLAR** — tablodaki "BUGÜN YAPILACAK OPERASYONLAR" kaleminin tamamı.
-   Her satır: `müşteri · adet ürün → operasyon (yer)`. Parça bilgisi varsa (yaka ribanası,
+   Her satır: `müşteri · adet ürün → operasyon`. Operasyonun nerede yapıldığını yazma. Parça bilgisi varsa (yaka ribanası,
    kaşkorse, kapüşon astarı) **aynen yaz** — sahadaki kişinin neyi keseceğini bilmesi gerekiyor.
    Riskli işler üstte. Bugün yapılacak bir şey yoksa bunu açıkça söyle, satır uydurma.
 4. **⚠️ GECİKME RİSKİ OLAN İŞLER** — tablodaki "Durum" alanı GECİKME veya RİSKLİ olanlar.

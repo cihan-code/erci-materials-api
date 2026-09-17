@@ -21,18 +21,8 @@ const DAY_TR = {
   friday: 'Cuma', saturday: 'Cumartesi', sunday: 'Pazar',
 };
 
-const PLACE_TR = {
-  internal: 'iç',
-  subcontractor: 'fason',
-  supplier: 'tedarikçi',
-};
-
 function loadRota() {
   return JSON.parse(fs.readFileSync(ROTA_FILE, 'utf8'));
-}
-
-function place(loc) {
-  return loc ? (PLACE_TR[loc] || loc) : '—';
 }
 
 function jobTag(j) {
@@ -88,7 +78,7 @@ function renderPlanText(built, today, panelUpdatedAt) {
     const parts = partsText && !it.label.includes(partsText) ? ' — parçalar: ' + partsText : '';
     L.push('- ' + (it.job_no ? '[' + it.job_no + '] ' : '') + it.customer_name +
       ' · ' + it.quantity + ' ' + it.product_label +
-      ' → ' + it.label + ' (' + place(it.location) + ')' + parts +
+      ' → ' + it.label + parts +
       (it.at_risk ? ' · RİSKLİ' : ''));
   }
   L.push('');
@@ -112,7 +102,7 @@ function renderPlanText(built, today, panelUpdatedAt) {
       L.push('- Sıradaki adımlar:');
       for (const o of upcoming) {
         const span = o.start === o.end ? o.start : o.start + '→' + o.end;
-        L.push('    ' + span + '  ' + o.label + ' (' + place(o.location) + ')');
+        L.push('    ' + span + '  ' + o.label);
       }
     }
     if (j.blockers.length) {
