@@ -23,6 +23,7 @@ const PANEL_BACKUPS_DIR = path.join(DATA_DIR, 'paneldata-backups');
 
 const OUTPUT_TYPES = [
   'gunluk-brifing',
+  'gunluk-uretim-plani',
   'uretim-risk',
   'satis-takip',
   'finans',
@@ -32,6 +33,7 @@ const OUTPUT_TYPES = [
 
 const TYPE_LABELS = {
   'gunluk-brifing': 'Gunluk Brifing',
+  'gunluk-uretim-plani': 'Gunluk Uretim Plani',
   'uretim-risk': 'Uretim Risk',
   'satis-takip': 'Satis Takip',
   'finans': 'Finans / Nakit',

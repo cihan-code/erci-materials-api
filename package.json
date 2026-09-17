@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "description": "Merci Tekstil Paneli - Sirket Materyalleri dosya depolama API'si (Render + kalici disk)",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server.js",
     "agent": "node agent/generate.js",
@@ -12,7 +14,9 @@
     "dekont": "node test/dekont-real.js",
     "sdr": "node test/sdr.js",
     "sdr:gmail": "node test/sdr-gmail.js",
-    "codes": "node test/paneldata-codes.js"
+    "codes": "node test/paneldata-codes.js",
+    "uretim": "node test/uretim-scheduler.js && node test/uretim-adapter.js && node test/uretim-signals.js",
+    "uretim:plan": "node agent/uretim/preview.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
