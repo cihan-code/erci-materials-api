@@ -50,7 +50,7 @@
       "id": "cut_main",
       "label": "Kumaşın kesimi",
       "kind": "work",
-      "location": "subcontractor",
+      "location": "internal",
       "depends_on": [
         "fabric_arrival"
       ],
@@ -58,13 +58,13 @@
       "starts_next_day_after_arrival": true,
       "duration_note": "Kumaş akşam geldiği için kesim ertesi gün başlar (acele işlerde aynı gün olabilir).",
       "panel_status": "Kesimde",
-      "location_note": "Kesim fasonda yapılıyor (teyit bekliyor)."
+      "location_note": "Kesim kendi atölyemizde yapılıyor, fason değil."
     },
     {
       "id": "cut_extra_parts",
       "label": "Ek parça kesimi",
       "kind": "work",
-      "location": "subcontractor",
+      "location": "internal",
       "depends_on": [
         "fabric_arrival"
       ],
@@ -75,7 +75,7 @@
       "parts_from_product": true,
       "duration_note": "Ürüne göre değişen ek parçalar (ribana / kaşkorse / tela / astar). Ana kesimle paralel.",
       "panel_status": "Kesimde",
-      "location_note": "Kesim fasonda yapılıyor (teyit bekliyor)."
+      "location_note": "Kesim kendi atölyemizde yapılıyor, fason değil."
     },
     {
       "id": "print_dropoff",

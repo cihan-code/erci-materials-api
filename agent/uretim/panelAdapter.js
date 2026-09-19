@@ -7,10 +7,9 @@
 //   where the job currently is in production     <- data.uretimTakip (needs matching)
 //
 // The panel does not link the two lists: a uretimTakip record carries no job_id
-// and no product. So the stage is adopted ONLY when the match is unambiguous -
-// exactly one open job and one open production record for that customer, with
-// agreeing quantities. Anything less certain is reported as a question instead
-// of being guessed, because a wrong stage produces a confidently wrong plan.
+// and no product, and its customer_name field is really a free-text description.
+// See linkProductionRecords below for how the two are paired, and why a doubtful
+// pairing is reported as a question rather than guessed.
 
 const { optionsFromPanelJob } = require('./scheduler');
 
@@ -67,33 +66,61 @@ function customerNameOf(job, customers) {
   return job.customer_name_free || '';
 }
 
-// Adopt a production stage only when the pairing is beyond doubt.
-function matchProductionRecord(job, jobName, activeJobs, openProduction, customers) {
-  const key = normalize(jobName);
-  if (!key) return { record: null, reason: 'müşteri adı boş' };
+// Link production records to jobs.
+//
+// Real panel data showed uretimTakip.customer_name is NOT a customer name - it is a
+// free-text job description that usually embeds the customer ("SAU TECH Tişört") and
+// sometimes a project name instead ("İTÜ İlk 1000 Tişört"). Exact equality therefore
+// never matches. We look for the customer name INSIDE the description, and demand an
+// exact quantity match plus mutual uniqueness before adopting a stage - a wrong stage
+// yields a confidently wrong plan, which is worse than admitting we do not know.
+function linkProductionRecords(rota, activeJobs, openProduction, customers) {
+  const pairs = [];
 
-  const candidates = openProduction.filter((u) => normalize(u.customer_name) === key);
-  if (!candidates.length) return { record: null, reason: 'üretim kaydı yok' };
+  for (const job of activeJobs) {
+    const name = normalize(customerNameOf(job, customers));
+    if (!name) continue;
+    const productKey = matchProduct(rota, job.product_type);
+    const aliases = productKey
+      ? [rota.products[productKey].label, ...(rota.products[productKey].aliases || [])].map(normalize)
+      : [];
 
-  const siblings = activeJobs.filter((j) => normalize(customerNameOf(j, customers)) === key);
-  if (siblings.length > 1 || candidates.length > 1) {
-    return {
-      record: null,
-      reason: 'bu müşteride ' + siblings.length + ' aktif iş / ' + candidates.length +
-        ' üretim kaydı var - hangisinin hangisi olduğu belirsiz',
-    };
+    for (const rec of openProduction) {
+      const text = normalize(rec.customer_name);
+      if (!text.includes(name)) continue;
+      const jq = Number(job.quantity);
+      const rq = Number(rec.quantity);
+      const quantityMatches = Number.isFinite(jq) && Number.isFinite(rq) && jq > 0 && jq === rq;
+      const productMentioned = aliases.some((a) => a && text.includes(a));
+      pairs.push({ job, rec, quantityMatches, productMentioned });
+    }
   }
 
-  const rec = candidates[0];
-  const jq = Number(job.quantity);
-  const uq = Number(rec.quantity);
-  if (Number.isFinite(jq) && Number.isFinite(uq) && jq > 0 && uq > 0 && jq !== uq) {
-    return {
-      record: null,
-      reason: 'adetler uyuşmuyor (iş ' + jq + ', üretim kaydı ' + uq + ')',
-    };
+  const links = new Map();
+  const solid = pairs.filter((p) => p.quantityMatches);
+
+  for (const p of solid) {
+    const otherJobs = solid.filter((x) => x.job === p.job);
+    const otherRecs = solid.filter((x) => x.rec === p.rec);
+    if (otherJobs.length === 1 && otherRecs.length === 1) {
+      links.set(p.job, { record: p.rec, reason: null });
+    }
   }
-  return { record: rec, reason: null };
+
+  for (const job of activeJobs) {
+    if (links.has(job)) continue;
+    const mine = pairs.filter((p) => p.job === job);
+    let reason;
+    if (!mine.length) {
+      reason = 'adı geçen açık üretim kaydı yok';
+    } else if (!mine.some((p) => p.quantityMatches)) {
+      reason = 'aday üretim kaydı var ama adetler tutmuyor (' + job.quantity + ' adet)';
+    } else {
+      reason = 'birden fazla aday eşleşiyor - hangisi olduğu belirsiz';
+    }
+    links.set(job, { record: null, reason });
+  }
+  return links;
 }
 
 // panelData is the `data` object inside panel-data.json.
@@ -105,6 +132,8 @@ function buildJobsFromPanel(rota, panelData, opts) {
 
   const activeJobs = (data.jobs || []).filter((j) => ACTIVE_JOB_STATUSES.includes(j.status));
   const openProduction = (data.uretimTakip || []).filter((u) => u.status !== 'Teslim Edildi');
+
+  const links = linkProductionRecords(rota, activeJobs, openProduction, customers);
 
   const jobs = [];
   const needsAttention = [];
@@ -124,7 +153,7 @@ function buildJobsFromPanel(rota, panelData, opts) {
       continue;
     }
 
-    const match = matchProductionRecord(job, name, activeJobs, openProduction, customers);
+    const match = links.get(job) || { record: null, reason: 'eşleştirme yapılmadı' };
     const stage = match.record ? match.record.status : null;
     const completed = stage ? (STAGE_COMPLETED[stage] || []) : [];
 
@@ -160,6 +189,7 @@ function buildJobsFromPanel(rota, panelData, opts) {
 
 module.exports = {
   buildJobsFromPanel,
+  linkProductionRecords,
   matchProduct,
   normalize,
   customerNameOf,

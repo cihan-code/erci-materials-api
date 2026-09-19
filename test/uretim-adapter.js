@@ -75,28 +75,39 @@ test('baskı bilgisi panelden okunuyor, sorulmuyor', () => {
   assert.strictEqual(jobs[0].options.embroidery, false);
 });
 
-test('aynı müşterinin iki işi varsa aşama TAHMİN EDİLMİYOR', () => {
+test('aynı müşterinin iki işi varsa adet ayırt ediyor', () => {
   const panel = basePanel();
   panel.jobs.push({
     id: 102, job_no: 'IS-102', status: 'Üretimde', customer_id: 1,
     product_type: 'Sweatshirt', quantity: 80, delivery_date: '2026-10-05',
     baski_nakis_secim: { items: [{ type: 'nakis', size: 'Küçük' }] },
   });
+  const { jobs } = buildJobsFromPanel(rota, panel);
+  const tisort = jobs.find((j) => j.job_no === 'IS-101');
+  const sweat = jobs.find((j) => j.job_no === 'IS-102');
+  assert.strictEqual(tisort.panel_stage, 'Dikimde', '250 adet üretim kaydıyla eşleşmeli');
+  assert.strictEqual(sweat.panel_stage, null, '80 adetlik işin eşleşecek kaydı yok');
+});
+
+test('adetler de aynıysa GERÇEKTEN belirsiz - eşleştirme yapılmıyor', () => {
+  const panel = basePanel();
+  panel.jobs.push({
+    id: 102, job_no: 'IS-102', status: 'Üretimde', customer_id: 1,
+    product_type: 'Sweatshirt', quantity: 250, delivery_date: '2026-10-05',
+    baski_nakis_secim: { items: [{ type: 'nakis', size: 'Küçük' }] },
+  });
   const { jobs, needs_attention } = buildJobsFromPanel(rota, panel);
-  assert.strictEqual(jobs.length, 2);
   for (const j of jobs) {
-    assert.strictEqual(j.panel_stage, null, j.customer_name + ': belirsizken aşama atanmamalı');
+    assert.strictEqual(j.panel_stage, null, j.job_no + ': belirsizken aşama atanmamalı');
   }
   assert.strictEqual(needs_attention.filter((n) => n.kind === 'stage_unknown').length, 2);
 });
 
-test('adetler uyuşmuyorsa eşleştirme yapılmıyor', () => {
+test('üretim kaydı müşteri adını İÇEREN serbest metin olsa da eşleşiyor', () => {
   const panel = basePanel();
-  panel.uretimTakip[0].quantity = 400; // iş 250 diyor
-  const { jobs, needs_attention } = buildJobsFromPanel(rota, panel);
-  assert.strictEqual(jobs[0].panel_stage, null);
-  const note = needs_attention.find((n) => n.kind === 'stage_unknown');
-  assert.ok(/adetler uyuşmuyor/.test(note.message), note.message);
+  panel.uretimTakip[0].customer_name = 'Lady Crow Yaz Koleksiyonu Tişört';
+  const { jobs } = buildJobsFromPanel(rota, panel);
+  assert.strictEqual(jobs[0].panel_stage, 'Dikimde', 'gerçek panelde alan böyle doluyor');
 });
 
 test('tanınmayan ürün plana girmiyor, soru olarak çıkıyor', () => {
