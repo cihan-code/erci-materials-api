@@ -479,5 +479,12 @@
     }
   },
   "decoration_note": "Her işte baskı veya nakıştan en az biri vardır - düz (süslemesiz) ürün üretilmiyor.",
-  "product_match_note": "jobs.product_type serbest metin - aliases ile eşleştirilir. Eşleşme bulunamazsa ürün SORULUR, tahmin edilmez."
+  "product_match_note": "jobs.product_type serbest metin - aliases ile eşleştirilir. Eşleşme bulunamazsa ürün SORULUR, tahmin edilmez.",
+  "excluded_products": {
+    "note": "Bu ürünler üretim planlamasına DAHİL DEĞİL. Panelde işleri olabilir; planlayıcı onları atlar ve bunu bir veri hatası olarak raporlamaz.",
+    "list": [
+      "Şapka",
+      "Rozet"
+    ]
+  }
 }

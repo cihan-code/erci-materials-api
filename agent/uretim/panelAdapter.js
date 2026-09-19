@@ -58,6 +58,18 @@ function matchProduct(rota, productType) {
   return best ? best.key : null;
 }
 
+// Products Mercitex makes but does not plan here (caps, badges). Skipping them is a
+// decision, not a data error - they must not show up as "unrecognised product".
+function isExcludedProduct(rota, productType) {
+  const q = normalize(productType);
+  if (!q) return false;
+  const list = (rota.excluded_products && rota.excluded_products.list) || [];
+  return list.some((name) => {
+    const n = normalize(name);
+    return n && (q === n || q.includes(n));
+  });
+}
+
 function customerNameOf(job, customers) {
   if (job.customer_id != null) {
     const c = (customers || []).find((x) => x.id === job.customer_id);
@@ -76,8 +88,23 @@ function customerNameOf(job, customers) {
 // yields a confidently wrong plan, which is worse than admitting we do not know.
 function linkProductionRecords(rota, activeJobs, openProduction, customers) {
   const pairs = [];
+  const links = new Map();
+  const claimed = new Set();
+
+  // Explicit job_id wins over any guesswork. The panel's Üretim Takip form now
+  // carries a "Bağlı İş" selector, so records created or edited after that change
+  // state the link outright and no name matching is needed.
+  for (const rec of openProduction) {
+    if (rec.job_id == null) continue;
+    const job = activeJobs.find((j) => String(j.id) === String(rec.job_id));
+    if (job && !links.has(job)) {
+      links.set(job, { record: rec, reason: null, source: 'job_id' });
+      claimed.add(rec);
+    }
+  }
 
   for (const job of activeJobs) {
+    if (links.has(job)) continue;
     const name = normalize(customerNameOf(job, customers));
     if (!name) continue;
     const productKey = matchProduct(rota, job.product_type);
@@ -86,6 +113,7 @@ function linkProductionRecords(rota, activeJobs, openProduction, customers) {
       : [];
 
     for (const rec of openProduction) {
+      if (claimed.has(rec)) continue;
       const text = normalize(rec.customer_name);
       if (!text.includes(name)) continue;
       const jq = Number(job.quantity);
@@ -96,7 +124,6 @@ function linkProductionRecords(rota, activeJobs, openProduction, customers) {
     }
   }
 
-  const links = new Map();
   const solid = pairs.filter((p) => p.quantityMatches);
 
   for (const p of solid) {
@@ -142,6 +169,10 @@ function buildJobsFromPanel(rota, panelData, opts) {
     const name = customerNameOf(job, customers);
     const productKey = matchProduct(rota, job.product_type);
 
+    if (!productKey && isExcludedProduct(rota, job.product_type)) {
+      continue; // planlama dışı - hata değil
+    }
+
     if (!productKey) {
       needsAttention.push({
         job_id: job.id,
@@ -178,7 +209,7 @@ function buildJobsFromPanel(rota, panelData, opts) {
       options: optionsFromPanelJob(job, confirmations[job.id] || {}),
       completed_operations: completed,
       panel_stage: stage,
-      stage_source: stage ? 'uretimTakip' : 'bilinmiyor',
+      stage_source: stage ? (match.source === 'job_id' ? 'panel bağlantısı' : 'ad eşleşmesi') : 'bilinmiyor',
       production_record_id: match.record ? match.record.id : null,
       problem_note: (match.record && match.record.problem_note) || null,
     });
@@ -189,6 +220,7 @@ function buildJobsFromPanel(rota, panelData, opts) {
 
 module.exports = {
   buildJobsFromPanel,
+  isExcludedProduct,
   linkProductionRecords,
   matchProduct,
   normalize,

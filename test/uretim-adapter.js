@@ -64,7 +64,7 @@ test('tek eşleşme varsa aşama uretimTakip\'ten alınıyor', () => {
   assert.strictEqual(jobs.length, 1);
   assert.strictEqual(jobs[0].product, 'tisort');
   assert.strictEqual(jobs[0].panel_stage, 'Dikimde');
-  assert.strictEqual(jobs[0].stage_source, 'uretimTakip');
+  assert.strictEqual(jobs[0].stage_source, 'ad eşleşmesi');
   assert.ok(jobs[0].completed_operations.includes('sewing_dropoff'), 'dikim öncesi adımlar bitmiş sayılmalı');
   assert.strictEqual(needs_attention.length, 0);
 });
@@ -103,6 +103,22 @@ test('adetler de aynıysa GERÇEKTEN belirsiz - eşleştirme yapılmıyor', () =
   assert.strictEqual(needs_attention.filter((n) => n.kind === 'stage_unknown').length, 2);
 });
 
+test('job_id varsa ad eşleşmesine hiç bakılmıyor', () => {
+  const panel = basePanel();
+  panel.uretimTakip[0].customer_name = 'Alakasız Bir Açıklama';
+  panel.uretimTakip[0].job_id = 101;
+  const { jobs } = buildJobsFromPanel(rota, panel);
+  assert.strictEqual(jobs[0].panel_stage, 'Dikimde');
+  assert.strictEqual(jobs[0].stage_source, 'panel bağlantısı');
+});
+
+test('job_id ile bağlanan kayıt başka işe ad eşleşmesiyle verilmiyor', () => {
+  const panel = basePanel();
+  panel.uretimTakip[0].job_id = 999; // var olmayan is
+  const { jobs } = buildJobsFromPanel(rota, panel);
+  assert.strictEqual(jobs[0].panel_stage, 'Dikimde', 'gecersiz job_id ad eslesmesine dusmeli');
+});
+
 test('üretim kaydı müşteri adını İÇEREN serbest metin olsa da eşleşiyor', () => {
   const panel = basePanel();
   panel.uretimTakip[0].customer_name = 'Lady Crow Yaz Koleksiyonu Tişört';
@@ -115,6 +131,21 @@ test('tanınmayan ürün plana girmiyor, soru olarak çıkıyor', () => {
   panel.jobs[0].product_type = 'Bere';
   const { jobs, needs_attention } = buildJobsFromPanel(rota, panel);
   assert.strictEqual(jobs.length, 0, 'ürünü bilinmeyen iş planlanmamalı');
+  assert.strictEqual(needs_attention[0].kind, 'product_unknown');
+});
+
+test('planlama dışı ürün (Şapka) hata olarak raporlanmıyor', () => {
+  const panel = basePanel();
+  panel.jobs[0].product_type = 'Şapka';
+  const { jobs, needs_attention } = buildJobsFromPanel(rota, panel);
+  assert.strictEqual(jobs.length, 0, 'plana girmemeli');
+  assert.strictEqual(needs_attention.length, 0, 'hata olarak da raporlanmamalı');
+});
+
+test('gerçekten tanınmayan ürün yine hata olarak çıkıyor', () => {
+  const panel = basePanel();
+  panel.jobs[0].product_type = 'Bilinmeyen Kıyafet';
+  const { needs_attention } = buildJobsFromPanel(rota, panel);
   assert.strictEqual(needs_attention[0].kind, 'product_unknown');
 });
 
