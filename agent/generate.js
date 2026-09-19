@@ -31,6 +31,13 @@ function readPrompt(name) { return fs.readFileSync(path.join(PROMPTS_DIR, name),
 // model hesap yapmiyor -> effort:medium yeterli.
 const OP = {
   'gunluk-brifing':  { tier: 'sonnet', domains: ['production', 'tasks', 'sales', 'finance'],        maxTokens: 14000, effort: 'medium', recent: 1 },
+  // Uretim plani sinyalleri metrics.js'ten degil, rota tabanli deterministik
+  // planlayicidan gelir (agent/uretim/). Domain listesi kullanilmaz.
+  'gunluk-uretim-plani': {
+    tier: 'sonnet', domains: [], maxTokens: 12000, effort: 'medium', recent: 1,
+    signals: (data, today, updatedAt) =>
+      require('./uretim/planSignals').buildPlanSignals(data, today, { panelUpdatedAt: updatedAt }),
+  },
   'uretim-risk':     { tier: 'sonnet', domains: ['production'],                                      maxTokens: 10000, effort: 'medium', recent: 0 },
   'satis-takip':     { tier: 'sonnet', domains: ['sales', 'crm'],                                    maxTokens: 10000, effort: 'medium', recent: 0 },
   'finans':          { tier: 'sonnet', domains: ['finance'],                                         maxTokens: 10000, effort: 'medium', recent: 0 },
@@ -65,7 +72,9 @@ async function generate(type) {
     if (!data) throw new Error('panel-data.json bos veya yok - once panelden veri kaydedilmeli.');
 
     const today = process.env.PANEL_TODAY || new Date().toISOString().slice(0, 10);
-    const signals = buildSignals(data, today, cfg.domains);
+    const signals = cfg.signals
+      ? cfg.signals(data, today, updatedAt)
+      : buildSignals(data, today, cfg.domains);
 
     const staleHours = updatedAt ? Math.round((Date.now() - new Date(updatedAt).getTime()) / 3600000) : null;
     const staleNote = staleHours != null && staleHours > 24
