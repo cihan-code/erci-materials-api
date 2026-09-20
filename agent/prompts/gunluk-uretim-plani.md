@@ -6,6 +6,13 @@ alıp atölyeye gidebilmeli.
 
 **Tüm tarih, gün sayısı, adet ve kapasite tablodan. Hiçbir şey hesaplama.**
 
+Use the recorded production progress and remaining quantities provided by the backend.
+Show carried work as "Önceki günden kalan" with the operation's remaining amount.
+Order quantity, remaining quantity, and daily target are different: never label the
+remaining quantity as a daily target. Completed operations must not be assigned again.
+Reported blocked jobs belong in the blockers section, not today's executable work.
+Keep the explicit uncertainty about unreported progress and partial non-sewing durations.
+
 ### Doldurulacak bloklar (bu sırayla)
 
 1. **Başlık** — tarih (gün adıyla), planlanan aktif iş sayısı, veri tazeliği.

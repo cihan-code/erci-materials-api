@@ -58,6 +58,11 @@ function findOne(list, p, textFields, label) {
 
 const ACTIONS = {
   // ---------------- SAFE ----------------
+  record_production_progress: {
+    risk: RISK.SAFE, domain: 'production',
+    describe: () => 'Akşam üretim ilerlemesini ajanın kaydına işle',
+    apply: (data, p) => require('./uretim/progressService').recordProgress(data, p),
+  },
   create_task: {
     risk: RISK.SAFE, domain: 'tasks',
     describe: (p) => 'Görev ekle: "' + str(p.title, 80) + '" → ' + (p.assigned_to || 'atanmamış') + ' (' + (p.date || todayISO()) + ')',
@@ -305,6 +310,10 @@ function applyAction(type, params, expectedUpdatedAt) {
   if (!raw || !raw.data) throw new Error('panel-data.json yok.');
   const data = raw.data;
   const summary = def.apply(data, params || {});
+  // Progress lives in the agent ledger, never in operational panel records.
+  if (type === 'record_production_progress') {
+    return { ok: true, type, summary, updatedAt: raw.updatedAt };
+  }
   const updatedAt = store.writePanelData(data, expectedUpdatedAt != null ? expectedUpdatedAt : raw.updatedAt);
   return { ok: true, type, summary, updatedAt };
 }
@@ -317,6 +326,9 @@ function dryRun(type, params) {
   const raw = store.readPanelRaw();
   if (!raw || !raw.data) throw new Error('panel-data.json yok.');
   const clone = JSON.parse(JSON.stringify(raw.data));
+  if (type === 'record_production_progress') {
+    return require('./uretim/progressService').recordProgress(clone, params || {}, true);
+  }
   return def.apply(clone, params || {}); // clone mutate olur, kaydedilmez
 }
 

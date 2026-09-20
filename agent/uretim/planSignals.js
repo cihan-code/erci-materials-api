@@ -10,7 +10,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const { buildPlan } = require('./scheduler');
+const { buildProgressPlan } = require('./progress');
+const { readReports } = require('./progressStore');
 const { buildJobsFromPanel } = require('./panelAdapter');
 const cal = require('./lib/calendar');
 
@@ -48,8 +49,13 @@ function buildProductionPlan(data, today, opts) {
   const { jobs, needs_attention } = buildJobsFromPanel(rota, data, {
     confirmations: options.confirmations || {},
   });
-  const plan = buildPlan(rota, jobs, today);
-  return { rota, plan, needs_attention, sourceJobs: jobs };
+  const reports = options.progressReports || readReports(path.join(
+    process.env.DATA_DIR || path.join(__dirname, '..', '..', 'data'), 'uretim'));
+  const plan = buildProgressPlan(rota, jobs, reports, today);
+  return { rota, plan, needs_attention: [...needs_attention, ...plan.needs_attention.map((n) => {
+    const job = jobs.find((j) => String(j.id) === String(n.job_id));
+    return { ...n, job_no: job?.job_no, customer_name: job?.customer_name };
+  })], sourceJobs: jobs };
 }
 
 function renderPlanText(built, today, panelUpdatedAt) {
@@ -77,10 +83,23 @@ function renderPlanText(built, today, panelUpdatedAt) {
     const partsText = (it.parts || []).join(', ');
     const parts = partsText && !it.label.includes(partsText) ? ' — parçalar: ' + partsText : '';
     L.push('- ' + (it.job_no ? '[' + it.job_no + '] ' : '') + it.customer_name +
-      ' · ' + it.quantity + ' ' + it.product_label +
+      ' · sipariş ' + it.quantity + ' ' + it.product_label +
+      ' · bu işlemde kalan ' + it.remaining_quantity + ' adet' +
       ' → ' + it.label + parts +
+      (it.carried_over ? ' · ÖNCEKİ GÜNDEN KALAN (bildirim: ' + it.progress_date + ')' : '') +
+      (it.progress_note ? ' · Not: ' + it.progress_note : '') +
       (it.at_risk ? ' · RİSKLİ' : ''));
   }
+  L.push('');
+
+  L.push('## KAYITLI ÜRETİM İLERLEMESİ');
+  for (const row of plan.progress_rows) {
+    L.push('- ' + (row.job_no || '#' + row.job_id) + ' · ' + row.op_label + ': ' +
+      row.completed_quantity + ' tamamlandı, ' + row.remaining_quantity + ' kaldı' +
+      ' · son bildirim ' + row.date + (row.note ? ' · ' + row.note : ''));
+  }
+  L.push('Bildirilmeyen çalışma tamamlanmış sayılmaz. Kalan adet günlük hedef değildir.');
+  L.push('Dikim dışındaki kısmi işlemlerde kalan süre bilinmediğinden tam işlem süresi kullanılır.');
   L.push('');
 
   // ---------------- per job ----------------

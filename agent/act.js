@@ -14,6 +14,8 @@ const { buildSignals } = require('./signals');
 const { callClaude } = require('./claude');
 const actions = require('./actions');
 const { HAIKU } = require('./pricing');
+const crypto = require('crypto');
+const { istanbulDay } = require('./lib/util');
 
 const SYSTEM = fs.readFileSync(path.join(__dirname, 'prompts', 'act.md'), 'utf8');
 
@@ -49,7 +51,7 @@ async function interpretAndAct(instruction) {
   const { data, updatedAt } = store.loadPanelData();
   if (!data) throw new Error('panel-data.json yok - once panelden veri kaydedilmeli.');
 
-  const today = process.env.PANEL_TODAY || new Date().toISOString().slice(0, 10);
+  const today = process.env.PANEL_TODAY || istanbulDay(new Date());
   // Tum domain'ler - haiku'da ~6k token, ~$0.006. Domain tahmini kaybetmek riski daha buyuk:
   // model bir kaydi goremezse id ile eslesemez.
   const signals = buildSignals(data, today, undefined);
@@ -59,6 +61,9 @@ async function interpretAndAct(instruction) {
     '',
     '## Panel metrik tablosu (kayıtları id ile eşleştir)',
     signals,
+    '',
+    '## Üretim ilerlemesi için iş ve işlem kimlikleri (önceki toplamlar dahil)',
+    require('./uretim/progressService').progressContext(data, today),
     '',
     '## Yöneticinin isteği',
     text,
@@ -85,10 +90,20 @@ async function interpretAndAct(instruction) {
   let rawActions = Array.isArray(parsed.actions) ? parsed.actions : [];
   rawActions = dedupeActions(rawActions, errors);
 
-  for (const a of rawActions) {
+  for (const [actionIndex, a] of rawActions.entries()) {
     let params = {};
     try { params = a.params_json ? JSON.parse(a.params_json) : {}; }
     catch (e) { errors.push({ type: a.type, error: 'params_json parse edilemedi' }); continue; }
+
+    if (a.type === 'record_production_progress') {
+      if (!params || typeof params !== 'object' || Array.isArray(params)) {
+        errors.push({ type: a.type, error: 'İlerleme parametreleri nesne olmalı.' });
+        continue;
+      }
+      // Stable across retries of the same instruction on the same local day.
+      params.report_id = crypto.createHash('sha256')
+        .update(today + '\n' + text + '\n' + actionIndex).digest('hex');
+    }
 
     if (!actions.ACTIONS[a.type]) { errors.push({ type: a.type, error: 'bilinmeyen aksiyon' }); continue; }
     const risk = actions.riskOf(a.type);
@@ -115,7 +130,10 @@ async function interpretAndAct(instruction) {
   }
 
   return {
-    reply: String(parsed.reply || '').slice(0, 4000),
+    reply: rawActions.some((a) => a.type === 'record_production_progress')
+      ? (errors.length ? 'Bazı işlemler kaydedilemedi; hata açıklamalarını kontrol edin.'
+        : applied.map((a) => a.summary).join('\n'))
+      : String(parsed.reply || '').slice(0, 4000),
     applied,
     pending,
     errors,

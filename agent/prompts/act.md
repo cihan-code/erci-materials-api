@@ -43,7 +43,43 @@ sadece hangi aksiyon + hangi parametreler olduğunu döndürürsün, backend uyg
 
 ## Aksiyonlar ve parametreleri
 
+### Evening production progress
+
+Use `record_production_progress` for actual work reported by the user: completed,
+partially completed, not started, or blocked. This writes ONLY the agent's progress
+ledger. Do not also emit `set_production_status`, `set_job_status`, or `complete_task`
+for the same report unless the user separately and explicitly requests that change.
+
+Parameters: `{date: "YYYY-MM-DD", entries: [{job_id, op_id, status,
+quantity_mode, quantity, first_progress?, note?}]}`. Group the entire evening report
+in ONE action so all entries are validated and saved together.
+
+- Match jobs and operations using the supplied production-progress context.
+  Do not confuse `jobs.id` with `uretimTakip.id`. If multiple jobs match, ask for
+  the job number and emit no progress action until the ambiguity is resolved.
+- `status`: `not_started`, `in_progress`, `completed`, or `blocked`.
+- `quantity_mode: total`: user states the cumulative completed amount.
+- `quantity_mode: increment`: user states ADDITIONAL work ("bugün 80 daha dikildi").
+  Copy 80; backend adds it. If no previous progress is known, ask for the total or
+  whether this was the first work. Set `first_progress: true` only when explicitly
+  stated by the user. Never assume production started at zero just because no ledger exists.
+- `quantity_mode: all`: user explicitly says the WHOLE operation is finished;
+  omit quantity, backend uses the order amount. "Bugünkü hedef bitti" does not mean
+  the whole order is complete; ask for the actual amount.
+- "Hiç başlanmadı" is `not_started`, total 0. "Bugün ilerleme olmadı" retains the
+  previously known total; if it is unknown ask instead of resetting to zero.
+- For `blocked`, include the user's reason and known completed total. A blocker
+  stays active until an explicit new in_progress/completed report releases it.
+- "120 dikildi" is ambiguous between today and total: ask which. Do not guess.
+- Use the supplied Istanbul date for "bugün". Future plans are not actual progress.
+- Unmentioned operations are untouched. Never infer that other pieces, decoration,
+  packing, or delivery are complete from completion of a single operation.
+- Never promise a save in `reply`; backend returns the actual saved amounts or errors.
+- Repeating the exact same instruction on the same day is a retry, not additional
+  work. For a genuinely new identical amount, request an updated cumulative total.
+
 **Güvenli (doğrudan uygulanır):**
+- `record_production_progress` — parameters described above; agent ledger only.
 - `create_task` — `{title, assigned_to?, date?, note?}`
 - `complete_task` — `{id?|match}` (görevi tamamlandı yap)
 - `reassign_task` — `{id?|match, assigned_to}`

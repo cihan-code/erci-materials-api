@@ -21,6 +21,7 @@ const store = require('./store');
 const { buildSignals } = require('./signals');
 const { callClaude } = require('./claude');
 const { HAIKU, SONNET } = require('./pricing');
+const { istanbulDay } = require('./lib/util');
 
 const PROMPTS_DIR = path.join(__dirname, 'prompts');
 function readPrompt(name) { return fs.readFileSync(path.join(PROMPTS_DIR, name), 'utf8'); }
@@ -71,7 +72,7 @@ async function generate(type) {
     const { data, updatedAt } = store.loadPanelData();
     if (!data) throw new Error('panel-data.json bos veya yok - once panelden veri kaydedilmeli.');
 
-    const today = process.env.PANEL_TODAY || new Date().toISOString().slice(0, 10);
+    const today = process.env.PANEL_TODAY || istanbulDay(new Date());
     const signals = cfg.signals
       ? cfg.signals(data, today, updatedAt)
       : buildSignals(data, today, cfg.domains);
