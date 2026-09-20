@@ -62,7 +62,7 @@ async function interpretAndAct(instruction) {
     '## Panel metrik tablosu (kayıtları id ile eşleştir)',
     signals,
     '',
-    '## Üretim ilerlemesi için iş ve işlem kimlikleri (önceki toplamlar dahil)',
+    '## Üretim aşamaları ve hazırlık teyitleri için iş ve işlem kimlikleri',
     require('./uretim/progressService').progressContext(data, today),
     '',
     '## Yöneticinin isteği',

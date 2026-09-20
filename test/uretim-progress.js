@@ -39,97 +39,112 @@ function reset() {
   process.env.PANEL_TODAY = '2026-09-21';
   calls = 0;
 }
-function params(quantity = 120, extras = {}) {
-  return { date: '2026-09-21', entries: [{ job_id: 101, op_id: 'sewing',
-    status: 'in_progress', quantity_mode: 'total', quantity, ...extras }] };
+function params(status = 'not_started', extras = {}) {
+  return { date: '2026-09-21', entries: [{ job_id: 101, kind: 'operation', op_id: 'sewing',
+    status, ...extras }] };
 }
 function respond(p) {
   response = { reply: 'Model must not claim success itself', actions: [{
-    type: 'record_production_progress', params_json: JSON.stringify(p), reason: 'Reported production' }] };
+    type: 'record_production_progress', params_json: JSON.stringify(p), reason: 'Reported stage' }] };
+}
+function printingPanel() {
+  const copy = JSON.parse(JSON.stringify(data));
+  copy.uretimTakip[0].status = 'Baskı/Nakışta';
+  fs.writeFileSync(file, JSON.stringify({ data: copy, updatedAt: '2026-09-21T12:00:00Z' }));
+  return copy;
 }
 
-test('Ajana söyle -> agent ledger -> next morning generator, panel untouched', async () => {
+test('Ajana söyle -> unfinished stage -> next morning plan without quantity input', async () => {
   reset();
   const original = fs.readFileSync(file, 'utf8');
-  respond(params());
-  const result = await interpretAndAct('TEST-101 dikiminde toplam 120 adet tamamlandı.');
+  respond(params('not_started', { note: 'Vakit kalmadı' }));
+  const result = await interpretAndAct('TEST-101 dikilemedi, vakit kalmadı.');
   assert.equal(calls, 1);
   assert.equal(result.errors.length, 0);
   assert.equal(result.applied.length, 1);
-  assert.match(result.reply, /180 adet kaldı/);
+  assert.match(result.reply, /Başlanmadı/);
+  assert.ok(!result.reply.includes('adet'));
   assert.ok(request.user.includes('TEST-101'));
-  assert.ok(request.user.includes('sewing'));
   assert.equal(fs.readFileSync(file, 'utf8'), original);
   assert.ok(!fs.existsSync(path.join(directory, 'paneldata-backups')));
   const plan = buildProductionPlan(data, '2026-09-22').plan;
-  assert.equal(plan.today_plan[0].remaining_quantity, 180);
   assert.equal(plan.today_plan[0].carried_over, true);
   const signals = OP['gunluk-uretim-plani'].signals(data, '2026-09-22', null);
-  assert.match(signals, /bu işlemde kalan 180 adet/);
   assert.match(signals, /ÖNCEKİ GÜNDEN KALAN/);
+  assert.ok(!signals.includes('bu işlemde kalan'));
 });
 
-test('same instruction retry does not add another report or double count increments', async () => {
+test('completed whole-order stage disappears without asking how many pieces', async () => {
   reset();
-  respond(params(80, { quantity_mode: 'increment', first_progress: true }));
-  const text = 'TEST-101 dikimine ilk kez başladık, bugün 80 adet yaptık.';
-  await interpretAndAct(text);
-  const result = await interpretAndAct(text);
-  assert.equal(readReports(path.join(directory, 'uretim')).length, 1);
-  assert.match(result.reply, /zaten kaydedilmiş/);
-  assert.equal(buildProductionPlan(data, '2026-09-22').plan.today_plan[0].remaining_quantity, 220);
-});
-
-test('a subsequent daily increment adds to the saved cumulative total', async () => {
-  reset();
-  respond(params());
-  await interpretAndAct('TEST-101 toplam 120 dikildi.');
-  process.env.PANEL_TODAY = '2026-09-22';
-  respond({ ...params(50, { quantity_mode: 'increment' }), date: '2026-09-22' });
-  const result = await interpretAndAct('TEST-101 bugün 50 daha dikildi.');
-  assert.match(result.reply, /toplam 170 adet tamamlandı, 130 adet kaldı/);
-});
-
-test('invalid progress returns an error, never a false saved reply', async () => {
-  reset();
-  respond(params(999));
-  const result = await interpretAndAct('TEST-101 toplam 999 dikildi.');
-  assert.equal(result.applied.length, 0);
-  assert.equal(result.errors.length, 1);
-  assert.match(result.reply, /kaydedilemedi/);
-  assert.equal(readReports(path.join(directory, 'uretim')).length, 0);
-});
-
-test('unknown prior total asks for clarification rather than assuming zero', async () => {
-  reset();
-  respond(params(80, { quantity_mode: 'increment' }));
-  const result = await interpretAndAct('TEST-101 bugün 80 dikildi.');
-  assert.match(result.errors[0].error, /Önceki tamamlanan toplam bilinmiyor/);
-  assert.equal(readReports(path.join(directory, 'uretim')).length, 0);
-});
-
-test('the whole operation can be completed without model arithmetic', async () => {
-  reset();
-  respond(params(undefined, { quantity_mode: 'all', status: 'completed' }));
-  await interpretAndAct('TEST-101 dikiminin tamamı bitti.');
+  respond(params('completed'));
+  const result = await interpretAndAct('TEST-101 dikildi.');
+  assert.match(result.reply, /Tamamlandı/);
   const plan = buildProductionPlan(data, '2026-09-22').plan;
   assert.ok(!plan.today_plan.some((r) => r.op_id === 'sewing'));
   assert.ok(plan.today_plan.some((r) => r.op_id === 'iron_pack'));
 });
 
-test('a blocked job is visible in next morning attention, not executable work', async () => {
+test('printing file reminder is answered through existing chat and persists', async () => {
   reset();
-  respond(params(0, { status: 'blocked', note: 'Atölye kapalı' }));
-  await interpretAndAct('TEST-101 hiç dikilmedi, atölye kapalı, beklet.');
+  const panel = printingPanel();
+  const original = fs.readFileSync(file, 'utf8');
+  let plan = buildProductionPlan(panel, '2026-09-22').plan;
+  assert.equal(plan.reminders[0].check_id, 'print_files_sent');
+  respond({ date: '2026-09-21', entries: [{ job_id: 101, kind: 'check',
+    check_id: 'print_files_sent', status: 'confirmed' }] });
+  const result = await interpretAndAct('TEST-101 baskı dosyaları baskıcıya gönderildi.');
+  assert.match(result.reply, /Teyit edildi/);
+  assert.ok(request.user.includes('print_files_sent'));
+  plan = buildProductionPlan(panel, '2026-09-22').plan;
+  assert.equal(plan.reminders.length, 0);
+  assert.ok(plan.today_plan.some((r) => r.op_id === 'print_work'));
+  assert.equal(fs.readFileSync(file, 'utf8'), original);
+});
+
+test('missing files produce preparation action, not a fictitious ready-to-print job', async () => {
+  reset();
+  const panel = printingPanel();
+  respond({ date: '2026-09-21', entries: [{ job_id: 101, kind: 'check',
+    check_id: 'print_files_sent', status: 'missing' }] });
+  await interpretAndAct('TEST-101 baskı dosyaları henüz gönderilmedi.');
+  const plan = buildProductionPlan(panel, '2026-09-22').plan;
+  assert.equal(plan.today_plan.find((r) => r.op_id === 'print_work').actionable, false);
+  const signals = OP['gunluk-uretim-plani'].signals(panel, '2026-09-22', null);
+  assert.match(signals, /HAZIRLIK EKSİK/);
+  assert.match(signals, /dosyaları baskıcıya gönderilmeli/);
+});
+
+test('same instruction retries do not create duplicate stage reports', async () => {
+  reset();
+  respond(params());
+  const text = 'TEST-101 dikilemedi.';
+  await interpretAndAct(text);
+  const result = await interpretAndAct(text);
+  assert.equal(readReports(path.join(directory, 'uretim')).length, 1);
+  assert.match(result.reply, /zaten kaydedilmiş/);
+});
+
+test('piece-count payloads fail explicitly rather than returning fake success', async () => {
+  reset();
+  respond(params('in_progress', { completed_quantity: 120 }));
+  const result = await interpretAndAct('TEST-101 dikimde.');
+  assert.equal(result.applied.length, 0);
+  assert.match(result.errors[0].error, /adetle/);
+  assert.match(result.reply, /kaydedilemedi/);
+});
+
+test('blocked stage stays visible to the morning planner', async () => {
+  reset();
+  respond(params('blocked', { note: 'Atölye kapalı' }));
+  await interpretAndAct('TEST-101 dikimi atölye kapalı olduğu için bekliyor.');
   const built = buildProductionPlan(data, '2026-09-22');
   assert.equal(built.plan.today_plan.length, 0);
   assert.equal(built.needs_attention[0].job_no, 'TEST-101');
-  assert.match(OP['gunluk-uretim-plani'].signals(data, '2026-09-22', null), /Atölye kapalı/);
 });
 
-test('dry-run creates no ledger and a mixed valid/invalid batch is atomic', () => {
+test('dry-run does not save, invalid multi-entry batches are atomic', () => {
   reset();
-  assert.match(actions.dryRun('record_production_progress', params()), /180 adet kaldı/);
+  assert.match(actions.dryRun('record_production_progress', params()), /Başlanmadı/);
   assert.equal(readReports(path.join(directory, 'uretim')).length, 0);
   const mixed = params();
   mixed.entries.push({ ...mixed.entries[0], job_id: 999 });
@@ -137,17 +152,25 @@ test('dry-run creates no ledger and a mixed valid/invalid batch is atomic', () =
   assert.equal(readReports(path.join(directory, 'uretim')).length, 0);
 });
 
-test('future-dated actual production is rejected', () => {
+test('future actual-stage reports are rejected', () => {
   reset();
   assert.throws(() => actions.applyAction('record_production_progress', {
     ...params(), date: '2026-09-22' }), /Gelecekteki/);
 });
 
-test('malformed model parameters produce an action error without saving', async () => {
+test('clarification-only model response does not mutate the ledger', async () => {
+  reset();
+  response = { reply: 'Hangi siparişin baskı dosyasını kastediyorsunuz?', actions: [] };
+  const result = await interpretAndAct('Evet gönderdik.');
+  assert.match(result.reply, /Hangi sipariş/);
+  assert.equal(result.applied.length, 0);
+  assert.equal(readReports(path.join(directory, 'uretim')).length, 0);
+});
+
+test('malformed model parameters return a normal action error', async () => {
   reset();
   respond(null);
   const result = await interpretAndAct('TEST-101 ilerleme bildirimi');
   assert.equal(result.applied.length, 0);
   assert.match(result.errors[0].error, /nesne/);
-  assert.equal(readReports(path.join(directory, 'uretim')).length, 0);
 });

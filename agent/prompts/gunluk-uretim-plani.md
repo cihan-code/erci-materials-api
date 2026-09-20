@@ -6,12 +6,22 @@ alıp atölyeye gidebilmeli.
 
 **Tüm tarih, gün sayısı, adet ve kapasite tablodan. Hiçbir şey hesaplama.**
 
-Use the recorded production progress and remaining quantities provided by the backend.
-Show carried work as "Önceki günden kalan" with the operation's remaining amount.
-Order quantity, remaining quantity, and daily target are different: never label the
-remaining quantity as a daily target. Completed operations must not be assigned again.
-Reported blocked jobs belong in the blockers section, not today's executable work.
-Keep the explicit uncertainty about unreported progress and partial non-sewing durations.
+Use whole-order stage states from the backend. Focus on which orders are cut,
+sewn, sent to printing/embroidery, or carried from the previous day. Do not ask for
+or create partial piece counts. Order quantities are descriptive only.
+Show carried tasks as "Önceki günden kalan". Do not assign completed operations again.
+
+Include the "BUGÜN TEYİT EDİLECEK HAZIRLIKLAR" questions next to the relevant job
+or in a short confirmation table. An unknown file handoff is a question, not proof
+of a missing file. If explicitly missing, show the required action. Do not repeat
+confirmed checks. File handoff, physical bundle handoff, and completed printing
+are three different facts; never substitute one for another.
+
+Rows marked "BAŞLAMADAN ÖNCE TEYİT GEREKLİ" are conditional. Rows marked
+"HAZIRLIK EKSİK — BAŞLATMA" must not be presented as ready to execute.
+Reported operational blockers belong in the blockers section. Dates dependent on
+unresolved preparation checks are provisional. Preserve uncertainty about the
+remaining duration of an in-progress stage without asking for piece counts.
 
 ### Doldurulacak bloklar (bu sırayla)
 

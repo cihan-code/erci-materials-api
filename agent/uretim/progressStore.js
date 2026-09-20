@@ -12,7 +12,7 @@ function readReports(directory) {
   try { text = fs.readFileSync(file, 'utf8'); }
   catch (error) { if (error.code === 'ENOENT') return []; throw error; }
   const ledger = JSON.parse(text);
-  if (ledger.version !== 1 || !Array.isArray(ledger.reports)) {
+  if (ledger.version !== 2 || !Array.isArray(ledger.reports)) {
     throw new Error('İlerleme kaydı okunamadı; boş kayıt varsayılmadı.');
   }
   return ledger.reports;
@@ -31,7 +31,7 @@ function saveReport(directory, report, jobs, rota) {
     const before = readReports(directory);
     const reports = addReport(before, report, jobs, rota);
     if (reports === before) return { saved: false, id: report.id };
-    fs.writeFileSync(temp, JSON.stringify({ version: 1, reports }, null, 2) + '\n',
+    fs.writeFileSync(temp, JSON.stringify({ version: 2, reports }, null, 2) + '\n',
       { flag: 'wx', mode: 0o600 });
     fs.renameSync(temp, path.join(directory, 'progress.json'));
     return { saved: true, id: report.id };

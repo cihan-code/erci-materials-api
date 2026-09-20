@@ -84,8 +84,10 @@ function renderPlanText(built, today, panelUpdatedAt) {
     const parts = partsText && !it.label.includes(partsText) ? ' — parçalar: ' + partsText : '';
     L.push('- ' + (it.job_no ? '[' + it.job_no + '] ' : '') + it.customer_name +
       ' · sipariş ' + it.quantity + ' ' + it.product_label +
-      ' · bu işlemde kalan ' + it.remaining_quantity + ' adet' +
       ' → ' + it.label + parts +
+      (it.progress_status === 'in_progress' ? ' · DEVAM EDİYOR' : '') +
+      (it.readiness === 'confirmation_required' ? ' · BAŞLAMADAN ÖNCE TEYİT GEREKLİ' : '') +
+      (it.readiness === 'blocked' ? ' · HAZIRLIK EKSİK — BAŞLATMA' : '') +
       (it.carried_over ? ' · ÖNCEKİ GÜNDEN KALAN (bildirim: ' + it.progress_date + ')' : '') +
       (it.progress_note ? ' · Not: ' + it.progress_note : '') +
       (it.at_risk ? ' · RİSKLİ' : ''));
@@ -95,11 +97,17 @@ function renderPlanText(built, today, panelUpdatedAt) {
   L.push('## KAYITLI ÜRETİM İLERLEMESİ');
   for (const row of plan.progress_rows) {
     L.push('- ' + (row.job_no || '#' + row.job_id) + ' · ' + row.op_label + ': ' +
-      row.completed_quantity + ' tamamlandı, ' + row.remaining_quantity + ' kaldı' +
+      row.status_label +
       ' · son bildirim ' + row.date + (row.note ? ' · ' + row.note : ''));
   }
-  L.push('Bildirilmeyen çalışma tamamlanmış sayılmaz. Kalan adet günlük hedef değildir.');
-  L.push('Dikim dışındaki kısmi işlemlerde kalan süre bilinmediğinden tam işlem süresi kullanılır.');
+  L.push('Bildirilmeyen işlem tamamlanmış sayılmaz. Aşamalar siparişin bütünü için takip edilir.');
+  L.push('Devam eden işlemlerin kalan süresi bilinmiyorsa tarihler ön tahmindir.');
+  L.push('');
+  L.push('## BUGÜN TEYİT EDİLECEK HAZIRLIKLAR');
+  if (!plan.reminders.length) L.push('(bugün için açık hazırlık teyidi yok)');
+  for (const row of plan.reminders) {
+    L.push('- ' + (row.job_no || '#' + row.job_id) + ' · ' + row.customer_name + ': ' + row.message);
+  }
   L.push('');
 
   // ---------------- per job ----------------
@@ -112,7 +120,7 @@ function renderPlanText(built, today, panelUpdatedAt) {
       ' (kaynak: ' + (src.stage_source || 'bilinmiyor') + ')');
     L.push('- Teslim sözü: ' + (j.est_delivery || '—'));
     L.push('- Tahmini bitiş: ' + j.finish_earliest + ' … ' + j.finish_latest +
-      (j.provisional ? '  [ÖN TAHMİN — cevaplanmamış soru var]' : ''));
+      (j.provisional ? '  [ÖN TAHMİN — açık teyit veya süre belirsizliği var]' : ''));
     L.push('- Durum: ' + riskLabel(j));
     if (src.problem_note) L.push('- Panelde kayıtlı problem: "' + src.problem_note + '"');
 

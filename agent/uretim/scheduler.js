@@ -352,8 +352,7 @@ function runSewingQueue(calendar, entries) {
   for (const item of queue) {
     const capacity = item.phases.sewing.capacity_per_day;
     if (!capacity) throw new Error('Dikim kapasitesi tanımsız: ' + item.job.product);
-    const quantity = item.job.operation_remaining?.sewing ?? item.job.quantity;
-    remaining.set(item, quantity / capacity);
+    remaining.set(item, item.job.quantity / capacity);
     item.sewingStart = null;
   }
 
@@ -486,8 +485,6 @@ function buildPlan(rota, jobs, today) {
           customer_name: j.customer_name,
           product_label: j.product_label,
           quantity: j.quantity,
-          remaining_quantity: jobs.find((job) => job.id === j.job_id)
-            .operation_remaining?.[op.op_id] ?? j.quantity,
           op_id: op.op_id,
           label: op.label,
           kind: op.kind,

@@ -6,7 +6,7 @@ const store = require('../store');
 const { istanbulDay } = require('../lib/util');
 const { buildJobsFromPanel } = require('./panelAdapter');
 const { expandRoute } = require('./scheduler');
-const { prepareReport, latestEntries } = require('./progress');
+const { prepareReport, latestEntries, applicableChecks, CHECKS, STATUS_LABELS } = require('./progress');
 const { readReports, saveReport } = require('./progressStore');
 const rota = require('./rota.json');
 
@@ -16,12 +16,10 @@ const today = () => process.env.PANEL_TODAY || istanbulDay(new Date());
 function summary(report, jobs) {
   return report.entries.map((entry) => {
     const job = jobs.find((j) => String(j.id) === String(entry.job_id));
-    const label = rota.base_route.find((op) => op.id === entry.op_id)?.label || entry.op_id;
-    return (job?.job_no || '#' + entry.job_id) + ' · ' + label + ': toplam ' +
-      entry.completed_quantity + ' adet tamamlandı, ' +
-      (job ? job.quantity - entry.completed_quantity : 'bilinmeyen') + ' adet kaldı' +
-      (entry.status === 'blocked' ? ' · BEKLİYOR: ' + entry.note : '') +
-      (entry.note && entry.status !== 'blocked' ? ' · ' + entry.note : '');
+    const label = entry.kind === 'check' ? CHECKS.find((c) => c.id === entry.check_id)?.label
+      : rota.base_route.find((op) => op.id === entry.op_id)?.label;
+    return (job?.job_no || '#' + entry.job_id) + ' · ' + label + ': ' + STATUS_LABELS[entry.status] +
+      (entry.note ? ' · ' + entry.note : '');
   }).join('\n');
 }
 
@@ -35,13 +33,7 @@ function recordProgress(data, params, dryRun = false) {
   const existing = reports.find((r) => r.id === id);
   if (existing) return 'Bu bildirim zaten kaydedilmiş.\n' + summary(existing, jobs);
   if (!Array.isArray(params.entries)) throw new Error('İlerleme işlemleri gerekli.');
-  const entries = params.entries.map((entry) => {
-    if (entry.quantity_mode !== 'all') return entry;
-    const job = jobs.find((j) => String(j.id) === String(entry.job_id));
-    if (!job) throw new Error('Aktif iş bulunamadı.');
-    return { ...entry, quantity_mode: 'total', quantity: job.quantity, status: 'completed' };
-  });
-  const report = prepareReport({ id, date, entries }, reports, jobs, rota);
+  const report = prepareReport({ id, date, entries: params.entries }, reports, jobs, rota);
   if (!dryRun) saveReport(directory(), report, jobs, rota);
   return (dryRun ? 'Kaydedilecek ilerleme:\n' : 'İlerleme kaydedildi; sonraki üretim planında kullanılacak.\n') +
     summary(report, jobs);
@@ -58,6 +50,10 @@ function progressContext(data, date) {
       op_id: op.id, label: op.label,
       panel_completed: (job.completed_operations || []).includes(op.id),
       progress: latest.find((e) => String(e.job_id) === String(job.id) && e.op_id === op.id) || null,
+    })),
+    checks: applicableChecks(rota, job).map((check) => ({
+      check_id: check.id, question: check.question,
+      status: latest.find((e) => String(e.job_id) === String(job.id) && e.check_id === check.id)?.status || 'unknown',
     })),
   })));
 }
