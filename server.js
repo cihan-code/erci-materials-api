@@ -404,6 +404,18 @@ app.delete('/api/materials/:folder/:id', checkApiKey, (req, res) => {
 // Ajan SADECE bu kovaya yazar. Panel is verisi (/api/paneldata) ajan icin salt-okunur.
 agentStore.ensureAgentDirs();
 
+// Read-only ledger shared by the browser plan and the morning agent.
+app.get('/api/agent/production-progress', checkApiKey, (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const { directory } = require('./agent/uretim/progressService');
+    const { readReports } = require('./agent/uretim/progressStore');
+    res.json({ version: 2, reports: readReports(directory()) });
+  } catch (e) {
+    res.status(500).json({ error: 'Üretim aşama kayıtları okunamadı; plan yenilenemedi.' });
+  }
+});
+
 // Meta listesi (markdown haric). ?type= ve ?limit= ile filtre.
 app.get('/api/agent/outputs', checkApiKey, (req, res) => {
   try {
