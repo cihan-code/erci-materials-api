@@ -118,6 +118,8 @@ function checkApiKey(req, res, next) {
 }
 
 app.get('/', (req, res) => {
+  // Public release marker: verify a deployment without accessing production data.
+  res.set('X-Merci-Revision', process.env.RENDER_GIT_COMMIT || 'stage-progress-v2');
   res.type('text/plain').send('Merci Tekstil Materyaller API calisiyor.');
 });
 
