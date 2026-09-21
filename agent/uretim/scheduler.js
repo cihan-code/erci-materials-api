@@ -240,6 +240,9 @@ function entry(op, span, unknownDuration) {
     end: span.end,
     unknown_duration: !!unknownDuration,
     parts: op.parts ? op.parts.map((p) => p.label) : undefined,
+    // Parts that are only in this cut because a human confirmed them - worth
+    // calling out on the shop floor, the standard parts are not.
+    confirmed_parts: op.parts ? op.parts.filter((p) => p.optional).map((p) => p.label) : undefined,
   };
 }
 
@@ -490,6 +493,11 @@ function buildPlan(rota, jobs, today) {
           kind: op.kind,
           location: op.location,
           parts: op.parts,
+          confirmed_parts: op.confirmed_parts,
+          // A multi-day operation needs its span here, so a reader can tell
+          // "starts today" from "already running" from "finishes today".
+          start: op.start,
+          end: op.end,
           est_delivery: j.est_delivery,
           at_risk: j.at_risk,
         });

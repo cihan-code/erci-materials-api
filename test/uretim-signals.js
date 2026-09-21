@@ -103,5 +103,70 @@ test('boş panel çökmüyor', () => {
   assert.ok(text.includes('Planlanan aktif iş: 0'));
 });
 
+console.log('\n-- bugün yapılacaklar tablosu (model yazmaz, kod üretir) --');
+
+function tableBlock(today, extra) {
+  const text = buildPlanSignals(extra || panel, today || TODAY, {});
+  const i = text.indexOf('## BUGÜN YAPILACAKLAR TABLOSU');
+  const j = text.indexOf('## KAYITLI ÜRETİM İLERLEMESİ');
+  assert.ok(i !== -1, 'tablo bloğu hiç üretilmemiş');
+  return text.slice(i, j);
+}
+
+test('tablo bloğu markdown tablosu olarak üretiliyor', () => {
+  const b = tableBlock();
+  assert.ok(/\| İş No \| Müşteri \| Ürün \| Adet \| Bugün yapılacak \| Dikkat \|/.test(b), b.slice(0, 400));
+  assert.ok(/\|---\|---\|---\|---\|---\|---\|/.test(b));
+});
+
+test('satırlar istasyon başlıkları altında gruplanıyor', () => {
+  const b = tableBlock();
+  assert.ok(/### [^\n]+ — \d+ iş · \d+ adet/.test(b), 'istasyon başlığı yok');
+});
+
+test('hücre rota etiketini değil YAPILACAK İŞİ yazıyor', () => {
+  const b = tableBlock();
+  assert.ok(/kesilecek|geçilecek|bırakılacak|yapılacak|gelecek|Dikilecek/.test(b), b.slice(0, 600));
+  assert.ok(!/\| Kumaşın kesimi \|/.test(b), 'hâlâ rota etiketi hücrede');
+});
+
+test('model bu bloğu değiştirmemesi için açıkça uyarılıyor', () => {
+  const b = tableBlock();
+  assert.ok(/AYNEN KOPYALA/.test(b));
+  assert.ok(/Satır ekleme, çıkarma, birleştirme; kelime veya sayı değiştirme/.test(b));
+});
+
+test('hiçbir hücre boş kalmıyor', () => {
+  const b = tableBlock();
+  b.split('\n').filter((l) => l.startsWith('| ') && !/^\|---/.test(l)).forEach((l) => {
+    assert.ok(!/\|\s*\|/.test(l), 'boş hücre: ' + l);
+  });
+});
+
+test('teslim tarihi geçmiş iş "risk" değil "geçti" diye işaretleniyor', () => {
+  const gecmis = JSON.parse(JSON.stringify(panel));
+  gecmis.jobs[0].delivery_date = '2026-09-10';
+  if (gecmis.uretimTakip && gecmis.uretimTakip[0]) gecmis.uretimTakip[0].est_delivery = '2026-09-10';
+  const b = tableBlock(TODAY, gecmis);
+  assert.ok(/TESLİM \d+ GÜN GEÇTİ/.test(b), b.slice(0, 900));
+});
+
+test('teslim tarihi UZAK olan iş her satırı riskli göstermiyor', () => {
+  const uzak = JSON.parse(JSON.stringify(panel));
+  uzak.jobs.forEach((j) => { j.delivery_date = '2027-06-01'; });
+  (uzak.uretimTakip || []).forEach((u) => { u.est_delivery = '2027-06-01'; });
+  const b = tableBlock(TODAY, uzak);
+  assert.ok(!/RİSKLİ/.test(b), 'uzak tahmin riskli diye işaretlenmiş');
+});
+
+test('boş günde tablo uydurulmuyor', () => {
+  const text = buildPlanSignals({}, TODAY, {});
+  const i = text.indexOf('## BUGÜN YAPILACAKLAR TABLOSU');
+  const j = text.indexOf('## KAYITLI ÜRETİM İLERLEMESİ');
+  const b = text.slice(i, j);
+  assert.ok(/bugün hiçbir istasyonda planlanan operasyon yok/.test(b), b);
+  assert.ok(!/\| İş No \|/.test(b), 'boş güne tablo yazılmış');
+});
+
 console.log('\n' + passed + ' test geçti, ' + failures.length + ' başarısız.\n');
 if (failures.length) { console.error(failures[0].error); process.exit(1); }

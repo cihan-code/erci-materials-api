@@ -27,10 +27,14 @@ remaining duration of an in-progress stage without asking for piece counts.
 
 1. **Başlık** — tarih (gün adıyla), planlanan aktif iş sayısı, veri tazeliği.
 2. **Veri güveni** — tablodaki "VERİ GÜVENİ" maddelerini kısaca aktar. Kendi yorumunu ekleme.
-3. **🔧 BUGÜN YAPILACAKLAR** — tablodaki "BUGÜN YAPILACAK OPERASYONLAR" kaleminin tamamı.
-   Her satır: `müşteri · adet ürün → operasyon`. Operasyonun nerede yapıldığını yazma. Parça bilgisi varsa (yaka ribanası,
-   kaşkorse, kapüşon astarı) **aynen yaz** — sahadaki kişinin neyi keseceğini bilmesi gerekiyor.
-   Riskli işler üstte. Bugün yapılacak bir şey yoksa bunu açıkça söyle, satır uydurma.
+3. **🔧 BUGÜN YAPILACAKLAR** — tablodaki **"BUGÜN YAPILACAKLAR TABLOSU — AYNEN KOPYALA"**
+   bloğunu başlığın altına **olduğu gibi yapıştır.** Bu blok kodda hazırlandı:
+   - Satır ekleme, çıkarma, birleştirme yok. Sıralamayı değiştirme.
+   - Hücrelerdeki hiçbir kelimeyi, adedi, iş numarasını veya işlem adını değiştirme.
+   - Madde işaretli listeye ÇEVİRME — tablo olarak kalacak, sahadaki kişi tabloyu okuyor.
+   - İstasyon başlıklarını (`### Kesim` gibi) koru; usta yalnız kendi tablosuna bakıyor.
+   - Tablo yerine kendi cümleni yazma; bu bölüme açıklama cümlesi ekleme.
+   Bugün yapılacak bir şey yoksa blok bunu zaten söylüyor — satır uydurma.
 4. **⚠️ GECİKME RİSKİ OLAN İŞLER** — tablodaki "Durum" alanı GECİKME veya RİSKLİ olanlar.
    Her biri: iş, kaç gün, darboğazın hangi adımda olduğu. Kurtarma önerisi ver (sorumlu:
    **Cihan Berber**; müşteriyle konuşulması gerekiyorsa **Mert Kıvanç Tekin**).
@@ -47,6 +51,8 @@ remaining duration of an in-progress stage without asking for piece counts.
 - **Kısa ve uygulanabilir.** 600 kelimeyi geçme. Her satır bir eylem.
 - Operasyon adlarını tablodaki **haliyle** yaz. "Yaka ribanası kesimi"ni "kesim" diye kısaltma —
   sahadaki kişinin ihtiyacı olan ayrıntı tam olarak bu.
+- "BUGÜN YAPILACAKLAR" bölümü bir **tablodur**, paragraf veya madde listesi değil. Kopyaladığın
+  blokta `|` ile ayrılmış satırlar aynen kalmalı.
 - Aşaması "BİLİNMİYOR" olan işte planı kesin gerçekmiş gibi sunma; "aşama bildirilmemiş,
   plan baştan kuruldu" de.
 - "ÖN TAHMİN" işaretli işlerde tahmini kesin tarih gibi yazma.

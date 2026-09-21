@@ -14,6 +14,7 @@ const { buildProgressPlan } = require('./progress');
 const { readReports } = require('./progressStore');
 const { buildJobsFromPanel } = require('./panelAdapter');
 const cal = require('./lib/calendar');
+const { gunlukIs, onaylananParcaNotu } = require('./lib/isMetni');
 
 const ROTA_FILE = path.join(__dirname, 'rota.json');
 
@@ -24,6 +25,101 @@ const DAY_TR = {
 
 function loadRota() {
   return JSON.parse(fs.readFileSync(ROTA_FILE, 'utf8'));
+}
+
+// Operations grouped the way the workshop thinks about them, so the sheet reads as
+// stations rather than as a flat timeline. Same order as the panel tab and the PDF.
+// Beyond this many days a finish estimate carries too much shared-queue
+// uncertainty to print as a warning. Same horizon as the panel tab and the PDF.
+const RISK_HORIZON_DAYS = 5;
+
+const STATIONS = [
+  ['Kumaş', ['fabric_order', 'fabric_arrival']],
+  ['Kesim', ['cut_main', 'cut_extra_parts']],
+  ['Baskı / Nakış', ['print_dropoff', 'print_work', 'embroidery_dropoff', 'embroidery_work']],
+  ['Dikim', ['sewing_dropoff', 'sewing']],
+  ['İlik / Düğme', ['buttonhole_button']],
+  ['Ütü - Paket', ['iron_pack']],
+  ['Teslimat', ['delivery']],
+];
+
+function stationOf(opId) {
+  const hit = STATIONS.find(([, ids]) => ids.includes(opId));
+  return hit ? hit[0] : 'Diğer';
+}
+
+// A markdown cell must not be split by a pipe, and an empty cell reads as a
+// skipped line to whoever holds the sheet.
+function cell(v) {
+  if (v === null || v === undefined || v === '') return '—';
+  return String(v).replace(/\|/g, '/').replace(/\n+/g, ' ');
+}
+
+// The finished table the model is told to paste verbatim. One row per
+// (job x station), written as the work to be done - the model writes no part of
+// it, so no quantity, date or operation can drift.
+//
+// An operation waiting on a preparation check is never rendered as an
+// instruction; it becomes an explicit "başlatma" warning in the same row.
+function todayTable(plan, today) {
+  const groups = new Map();
+  for (const it of plan.today_plan) {
+    const key = it.job_id + '::' + stationOf(it.op_id);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(it);
+  }
+
+  const rows = [];
+  for (const ops of groups.values()) {
+    const first = ops[0];
+    const ready = ops.filter((o) => o.actionable !== false);
+    const waiting = ops.filter((o) => o.actionable === false);
+    // gunlukIs returns the sentence itself.
+    const done = ready.length ? gunlukIs(ready, today) : '';
+
+    const notes = [];
+    const confirmed = onaylananParcaNotu(ops);
+    if (confirmed) notes.push(confirmed);
+    if (waiting.length) notes.push('BAŞLATMA — teyit bekliyor: ' + gunlukIs(waiting, today));
+    if (ops.some((o) => o.carried_over)) notes.push('Önceki günden kalan');
+    if (ops.some((o) => o.progress_status === 'in_progress')) notes.push('Devam ediyor');
+    ops.filter((o) => o.progress_note).forEach((o) => notes.push('Not: ' + o.progress_note));
+    // A delivery date already passed is a fact and always shown. A finish estimate
+    // is only worth a warning close to the deadline - further out the shared-queue
+    // uncertainty marks every row and the sheet stops meaning anything.
+    if (first.est_delivery) {
+      const left = cal.diffDays(today, first.est_delivery);
+      if (left < 0) notes.push('TESLİM ' + Math.abs(left) + ' GÜN GEÇTİ');
+      else if (first.at_risk && left <= RISK_HORIZON_DAYS) notes.push('TESLİME ' + left + ' GÜN — RİSKLİ');
+    }
+
+    rows.push({
+      station: stationOf(first.op_id),
+      job_no: first.job_no || '#' + first.job_id,
+      customer_name: first.customer_name,
+      product_label: first.product_label,
+      quantity: first.quantity,
+      action: done || 'Hazırlık teyidi bekleniyor',
+      note: notes.join(' · '),
+    });
+  }
+
+  const L = [];
+  for (const [station] of STATIONS) {
+    const mine = rows.filter((r) => r.station === station);
+    if (!mine.length) continue; // empty station heading is skipped, never left blank
+    const qty = mine.reduce((a, r) => a + (Number(r.quantity) || 0), 0);
+    L.push('### ' + station + ' — ' + mine.length + ' iş · ' + qty + ' adet');
+    L.push('');
+    L.push('| İş No | Müşteri | Ürün | Adet | Bugün yapılacak | Dikkat |');
+    L.push('|---|---|---|---|---|---|');
+    mine.forEach((r) => {
+      L.push('| ' + [cell(r.job_no), cell(r.customer_name), cell(r.product_label),
+        cell(r.quantity), cell(r.action), cell(r.note)].join(' | ') + ' |');
+    });
+    L.push('');
+  }
+  return L;
 }
 
 function jobTag(j) {
@@ -93,6 +189,20 @@ function renderPlanText(built, today, panelUpdatedAt) {
       (it.at_risk ? ' · RİSKLİ' : ''));
   }
   L.push('');
+
+  // The same rows again, already laid out. The prompt tells the model to paste
+  // this block unchanged, so the day's list is a table nobody rewrote.
+  L.push('## BUGÜN YAPILACAKLAR TABLOSU — AYNEN KOPYALA');
+  L.push('Bu blok hazır. Satır ekleme, çıkarma, birleştirme; kelime veya sayı değiştirme.');
+  L.push('Başlıklarıyla birlikte olduğu gibi brifinge koy.');
+  L.push('');
+  const table = todayTable(plan, today);
+  if (table.length) {
+    table.forEach((line) => L.push(line));
+  } else {
+    L.push('(bugün hiçbir istasyonda planlanan operasyon yok)');
+    L.push('');
+  }
 
   L.push('## KAYITLI ÜRETİM İLERLEMESİ');
   for (const row of plan.progress_rows) {
