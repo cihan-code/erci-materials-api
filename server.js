@@ -400,7 +400,7 @@ app.delete('/api/materials/:folder/:id', checkApiKey, (req, res) => {
   res.json({ ok: true });
 });
 
-// ---- Yonetim Ajani ciktilari (gunluk brifing, uretim risk, finans, ...) ----
+// ---- Ajan ciktilari (su an yalniz gunluk-uretim-plani) ----
 // Ajan SADECE bu kovaya yazar. Panel is verisi (/api/paneldata) ajan icin salt-okunur.
 agentStore.ensureAgentDirs();
 
@@ -483,7 +483,7 @@ app.post('/api/agent/outputs', checkApiKey, (req, res) => {
 // Brifing uretimini baslat. Anthropic cagrisi 20-60 sn surebilir; async baslatip hemen doneriz,
 // panel /api/agent/status'u poll eder.
 app.post('/api/agent/run', checkApiKey, (req, res) => {
-  const type = (req.query.type || req.body && req.body.type || 'gunluk-brifing');
+  const type = (req.query.type || req.body && req.body.type || 'gunluk-uretim-plani');
   if (!agentStore.OUTPUT_TYPES.includes(type)) {
     return res.status(400).json({ error: 'Gecersiz tip: ' + type });
   }

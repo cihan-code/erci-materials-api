@@ -1,4 +1,6 @@
-// Yonetim Ajani rapor ureticisi (brifing / risk / takip / finans / haftalik / aylik).
+// Rapor ureticisi (2026-09-22'den beri sadece gunluk-uretim-plani - Yonetim Ajaninin
+// diger 6 rapor tipi kaldirildi). Ayni jenerik OP-tabanli motor kaldi ki yeni bir rapor
+// tipi eklemek gerekirse (Uretim Takip Ajani gibi) tekrar kullanilabilsin.
 //
 // Akis:
 //   1. panel-data.json'u DISKTEN oku (HTTP yok) - SALT-OKUNUR
@@ -11,7 +13,7 @@
 //   basit gunluk operasyonlar -> HAIKU (ucuz, hizli, thinking yok)
 //   haftalik/aylik yonetim analizi -> SONNET + effort:medium + adaptive thinking
 //
-// Kullanim: node agent/generate.js gunluk-brifing
+// Kullanim: node agent/generate.js gunluk-uretim-plani
 // Ortam: ANTHROPIC_API_KEY (zorunlu), HAIKU_MODEL / SONNET_MODEL (ops.), PANEL_TODAY (test)
 
 const fs = require('fs');
@@ -27,11 +29,7 @@ const PROMPTS_DIR = path.join(__dirname, 'prompts');
 function readPrompt(name) { return fs.readFileSync(path.join(PROMPTS_DIR, name), 'utf8'); }
 
 // Her rapor tipi: model, domain, effort, max_tokens, onceki cikti sayisi.
-// Yonetim karari (2026-08-28): TUM yonetim raporlari Sonnet. Haiku yalniz act.js'te
-// (intent belirleme + basit panel aksiyonlari). Sayilar metrics.js'ten hazir geliyor,
-// model hesap yapmiyor -> effort:medium yeterli.
 const OP = {
-  'gunluk-brifing':  { tier: 'sonnet', domains: ['production', 'tasks', 'sales', 'finance'],        maxTokens: 14000, effort: 'medium', recent: 1 },
   // Uretim plani sinyalleri metrics.js'ten degil, rota tabanli deterministik
   // planlayicidan gelir (agent/uretim/). Domain listesi kullanilmaz.
   'gunluk-uretim-plani': {
@@ -39,11 +37,6 @@ const OP = {
     signals: (data, today, updatedAt) =>
       require('./uretim/planSignals').buildPlanSignals(data, today, { panelUpdatedAt: updatedAt }),
   },
-  'uretim-risk':     { tier: 'sonnet', domains: ['production'],                                      maxTokens: 10000, effort: 'medium', recent: 0 },
-  'satis-takip':     { tier: 'sonnet', domains: ['sales', 'crm'],                                    maxTokens: 10000, effort: 'medium', recent: 0 },
-  'finans':          { tier: 'sonnet', domains: ['finance'],                                         maxTokens: 10000, effort: 'medium', recent: 0 },
-  'haftalik-review': { tier: 'sonnet', domains: ['production', 'tasks', 'sales', 'finance', 'crm'],  maxTokens: 20000, effort: 'medium', recent: 1 },
-  'aylik-rapor':     { tier: 'sonnet', domains: ['production', 'tasks', 'sales', 'finance', 'crm'],  maxTokens: 24000, effort: 'medium', recent: 1 },
 };
 
 // Son N raporun "3 Baslik" ozeti ("dune gore degisim" icin). recent=0 -> hic.

@@ -1,7 +1,8 @@
-// Yonetim Ajani cikti deposu.
-// server.js hem de agent/generate.js buradaki fonksiyonlari kullanir ki kayit/okuma
-// mantigi tek yerde dursun. Panel is verisi (panel-data.json) gibi, DATA_DIR altinda
-// duz JSON dosyalari; ajan SADECE kendi kovasina yazar, /api/paneldata'ya dokunmaz.
+// Ajan cikti deposu (su an yalniz gunluk-uretim-plani) + panel-data okuma/atomik yazma +
+// API maliyet gunlugu. server.js, agent/generate.js ve agent/act.js buradaki fonksiyonlari
+// kullanir ki kayit/okuma mantigi tek yerde dursun. Panel is verisi (panel-data.json) gibi,
+// DATA_DIR altinda duz JSON dosyalari; ajan SADECE kendi kovasina yazar, /api/paneldata'ya
+// dokunmaz.
 
 const fs = require('fs');
 const path = require('path');
@@ -22,23 +23,11 @@ const PANEL_DATA_FILE = path.join(DATA_DIR, 'panel-data.json');
 const PANEL_BACKUPS_DIR = path.join(DATA_DIR, 'paneldata-backups');
 
 const OUTPUT_TYPES = [
-  'gunluk-brifing',
   'gunluk-uretim-plani',
-  'uretim-risk',
-  'satis-takip',
-  'finans',
-  'haftalik-review',
-  'aylik-rapor',
 ];
 
 const TYPE_LABELS = {
-  'gunluk-brifing': 'Gunluk Brifing',
   'gunluk-uretim-plani': 'Gunluk Uretim Plani',
-  'uretim-risk': 'Uretim Risk',
-  'satis-takip': 'Satis Takip',
-  'finans': 'Finans / Nakit',
-  'haftalik-review': 'Haftalik Review',
-  'aylik-rapor': 'Aylik Rapor',
 };
 
 function ensureDir(p) { fs.mkdirSync(p, { recursive: true }); }

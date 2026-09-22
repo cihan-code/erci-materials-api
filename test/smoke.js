@@ -276,22 +276,22 @@ async function main() {
   });
 
   console.log('\n# 4b. Ajan ciktisi silme');
-  const o1 = store.saveAgentOutput({ type: 'finans', title: 'test-sil-1', date: TODAY, markdown: '# test 1' });
-  const o2 = store.saveAgentOutput({ type: 'finans', title: 'test-sil-2', date: TODAY, markdown: '# test 2' });
+  const o1 = store.saveAgentOutput({ type: 'gunluk-uretim-plani', title: 'test-sil-1', date: TODAY, markdown: '# test 1' });
+  const o2 = store.saveAgentOutput({ type: 'gunluk-uretim-plani', title: 'test-sil-2', date: TODAY, markdown: '# test 2' });
   ok('deleteOutput tek kaydi siler (dosya + indeks)', () => {
     const r = store.deleteOutput(o1.id);
     assert.strictEqual(r.deleted, 1);
     assert.strictEqual(store.getOutput(o1.id), null);
-    assert(!store.listOutputs({ type: 'finans' }).some((x) => x.id === o1.id));
-    assert(store.listOutputs({ type: 'finans' }).some((x) => x.id === o2.id), 'yanlis kayit silindi');
+    assert(!store.listOutputs({ type: 'gunluk-uretim-plani' }).some((x) => x.id === o1.id));
+    assert(store.listOutputs({ type: 'gunluk-uretim-plani' }).some((x) => x.id === o2.id), 'yanlis kayit silindi');
   });
   ok('deleteOutput yok olan id -> deleted:0', () => assert.strictEqual(store.deleteOutput('yok-boyle-id').deleted, 0));
   ok('deleteOutputs olcut yoksa hicbir sey silmez', () => assert.strictEqual(store.deleteOutputs({}).deleted, 0));
   ok('deleteOutputs type ile toplu siler', () => {
-    store.saveAgentOutput({ type: 'finans', title: 'test-sil-3', date: TODAY, markdown: '# t3' });
-    const r = store.deleteOutputs({ type: 'finans' });
+    store.saveAgentOutput({ type: 'gunluk-uretim-plani', title: 'test-sil-3', date: TODAY, markdown: '# t3' });
+    const r = store.deleteOutputs({ type: 'gunluk-uretim-plani' });
     assert(r.deleted >= 2);
-    assert.strictEqual(store.listOutputs({ type: 'finans' }).length, 0);
+    assert.strictEqual(store.listOutputs({ type: 'gunluk-uretim-plani' }).length, 0);
   });
 
   console.log('\n# 5. act.js akisi (MOCK)');
