@@ -414,6 +414,10 @@ app.post('/api/agent/operations/report', checkApiKey, async (req, res) => {
   try { res.json(await require('./agent/operations/service').submit(req.body || {})); }
   catch (e) { res.status(422).json({ error: e.message }); }
 });
+app.post('/api/agent/operations/check', checkApiKey, async (req, res) => {
+  try { res.json(await require('./agent/operations/service').checkConnection()); }
+  catch (e) { res.status(503).json({ error: e.message }); }
+});
 app.post('/api/agent/operations/undo', checkApiKey, async (req, res) => {
   try { res.json(await require('./agent/operations/service').undo(req.body || {})); }
   catch (e) { res.status(409).json({ error: e.message }); }

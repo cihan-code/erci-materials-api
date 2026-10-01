@@ -23,6 +23,8 @@ All routes use the existing `x-api-key` authentication:
   Optional boolean `dry_run: true` validates extraction without saving an event.
 - `POST /api/agent/operations/undo`: `event_id`, `revision`.
 - `POST /api/agent/operations/rule`: `issue`, `status`, `revision`.
+- `POST /api/agent/operations/check`: one paid model diagnostic with a fixed
+  synthetic record; reads no business data and never saves production progress.
 
 Revision checks and record fingerprints reject stale writes, including panel
 changes during extraction. Stable request IDs make network retries idempotent.
@@ -57,6 +59,6 @@ send business records or incur model charges.
 Deploy the API first, then panel assets, then the daily Python agent. The Python
 agent intentionally stops if the feedback endpoint is unavailable; the explicit
 `--without-feedback` flag restores legacy planning. After deployment verify one
-  partial report with `dry_run: true` against the real configured model and inspect
-`production_feedback` usage. Roll back application code without deleting the
+  fixed synthetic diagnostic via `/check` against the real configured model and
+inspect `production_feedback` usage. Roll back application code without deleting the
 journal. Merge each branch with Claude's concurrent changes; do not replace main.

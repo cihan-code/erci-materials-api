@@ -98,6 +98,16 @@ test('explicit dry-run validates extraction without saving production progress',
   assert.equal(journal.read().revision, 0);
   await assert.rejects(service.submit({ ...params(), dry_run: 'true' }, interpreter), /Önizleme/);
 });
+test('synthetic connection check reads no business records and saves no events', async () => {
+  reset(); fs.unlinkSync(panelPath);
+  const result = await service.checkConnection(async (text, selected, previous) => {
+    assert.equal(selected.customer_name, 'Sentetik bağlantı test ürünü');
+    assert.equal(selected.quantity, 100); assert.deepEqual(previous, []);
+    return { entries: entries.map((e, i) => ({ ...e, evidence: i === 0 ? 'Baskıya götürüldü.' : text.slice('Baskıya götürüldü. '.length) })) };
+  });
+  assert.equal(result.ok, true); assert.equal(result.saved, false);
+  assert.equal(journal.read().revision, 0); assert.equal(journal.read().events.length, 0);
+});
 test('process restart recovers its previous abandoned lock', async () => {
   reset(); const lock = path.join(dir, 'operations', '.lock');
   fs.mkdirSync(lock, { recursive: true });

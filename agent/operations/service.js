@@ -6,6 +6,17 @@ const { istanbulDay } = require('../lib/util');
 const { interpret } = require('./interpret');
 const memory = require('./memory');
 const today = () => istanbulDay(new Date());
+// Fixed synthetic diagnostic: never reads panel records or saves progress.
+async function checkConnection(interpreter = interpret) {
+  const text = 'Baskıya götürüldü. Beş tanesinin baskı kağıdı eksik olduğu için onlar basılmadı, diğerleri basıldı.';
+  const record = { customer_name: 'Sentetik bağlantı test ürünü', quantity: 100, status: 'Baskı/Nakışta', decoration: 'baski' };
+  const output = await interpreter(text, record, [], today());
+  if (output.clarification) throw new Error('Bağlantı testi kesin sonuç üretmedi.');
+  const entries = core.validateEntries(output.entries, record, text);
+  if (!entries.some(e => e.op === 'print' && e.status === 'partial' && e.remaining === 5) ||
+      !entries.some(e => e.op === 'print_dropoff' && e.status === 'completed')) throw new Error('Bağlantı testi beklenen işlemleri yorumlayamadı.');
+  return { ok: true, synthetic: true, saved: false, remaining: 5, usage: output.usage };
+}
 function getRecord(data, id) {
   const r = data?.uretimTakip?.find(r => String(r.id) === String(id));
   if (!r) throw new Error('Üretim kaydı bulunamadı.');
@@ -84,4 +95,4 @@ async function decideRule(params) {
     return snapshot(undefined, journal);
   });
 }
-module.exports = { snapshot, submit, undo, decideRule };
+module.exports = { snapshot, submit, undo, decideRule, checkConnection };
