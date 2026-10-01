@@ -9,8 +9,8 @@ const SCHEMA = { type: 'object', additionalProperties: false, required: ['clarif
     required: ['op', 'status', 'remaining', 'reason', 'issue', 'evidence'], properties: {
       op: { type: 'string', enum: Object.keys(OPS) },
       status: { type: 'string', enum: ['completed', 'partial', 'in_progress', 'blocked', 'not_started'] },
-      remaining: { type: ['integer', 'null'] }, reason: { type: 'string' },
-      issue: { type: ['string', 'null'], enum: [...Object.keys(ISSUES), null] }, evidence: { type: 'string' },
+      remaining: { anyOf: [{ type: 'integer' }, { type: 'null' }] }, reason: { type: 'string' },
+      issue: { anyOf: [{ type: 'string', enum: Object.keys(ISSUES) }, { type: 'null' }] }, evidence: { type: 'string' },
     } } },
 } };
 async function interpret(text, record, previous, date) {
