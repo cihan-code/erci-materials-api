@@ -40,6 +40,7 @@ function snapshot(data = panel.loadPanelData().data, journal = store.read()) {
       stale, history: events.slice(-20).reverse().map(e => ({ id: e.id, date: e.date, text: e.text, entries: e.entries })) };
   });
   return { version: 1, revision: journal.revision, records, knowledge,
+    build: process.env.RENDER_GIT_COMMIT || null,
     configured: !!process.env.ANTHROPIC_API_KEY, model: require('../pricing').HAIKU };
 }
 async function submit(params, interpreter = interpret) {
