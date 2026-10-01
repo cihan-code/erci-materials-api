@@ -16,7 +16,8 @@
     "sdr:gmail": "node test/sdr-gmail.js",
     "codes": "node test/paneldata-codes.js",
     "uretim": "node test/uretim-scheduler.js && node test/uretim-adapter.js && node test/uretim-signals.js && node --test test/uretim-progress-core.js test/uretim-progress.js",
-    "uretim:plan": "node agent/uretim/preview.js"
+    "uretim:plan": "node agent/uretim/preview.js",
+    "operations": "node --test test/operations-feedback.js test/operations-memory.js test/operations-http.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

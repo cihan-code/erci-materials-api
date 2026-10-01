@@ -60,7 +60,7 @@ function mockText(opts) {
   ].join('\n');
 }
 
-async function streamOnce(body, key) {
+async function streamOnce(body, key, timeoutMs) {
   const res = await fetch(ANTHROPIC_URL, {
     method: 'POST',
     headers: {
@@ -69,6 +69,7 @@ async function streamOnce(body, key) {
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify(body),
+    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
   });
 
   if (res.status === 429 || res.status >= 500) {
@@ -186,16 +187,17 @@ async function callClaude(opts) {
   if (Array.isArray(opts.tools) && opts.tools.length) body.tools = opts.tools;
 
   let out = null, lastErr = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  const maxAttempts = opts.maxAttempts || 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      out = await streamOnce(body, key);
+      out = await streamOnce(body, key, opts.timeoutMs);
       if (!out.text) throw new Error('Anthropic bos yanit dondu.');
       break;
     } catch (e) {
       lastErr = e;
       out = null;
       if (e && e.retryable === false) break;
-      if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 5000));
+      if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, attempt * 5000));
     }
   }
 

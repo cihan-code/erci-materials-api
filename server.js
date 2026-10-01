@@ -404,6 +404,25 @@ app.delete('/api/materials/:folder/:id', checkApiKey, (req, res) => {
 // Ajan SADECE bu kovaya yazar. Panel is verisi (/api/paneldata) ajan icin salt-okunur.
 agentStore.ensureAgentDirs();
 
+// Intraday updates use a separate ledger keyed by production record IDs.
+app.get('/api/agent/operations', checkApiKey, (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try { res.json(require('./agent/operations/service').snapshot()); }
+  catch (_) { res.status(503).json({ error: 'Üretim günlüğü okunamadı; planı yenileyin.' }); }
+});
+app.post('/api/agent/operations/report', checkApiKey, async (req, res) => {
+  try { res.json(await require('./agent/operations/service').submit(req.body || {})); }
+  catch (e) { res.status(422).json({ error: e.message }); }
+});
+app.post('/api/agent/operations/undo', checkApiKey, async (req, res) => {
+  try { res.json(await require('./agent/operations/service').undo(req.body || {})); }
+  catch (e) { res.status(409).json({ error: e.message }); }
+});
+app.post('/api/agent/operations/rule', checkApiKey, async (req, res) => {
+  try { res.json(await require('./agent/operations/service').decideRule(req.body || {})); }
+  catch (e) { res.status(409).json({ error: e.message }); }
+});
+
 // Read-only ledger shared by the browser plan and the morning agent.
 app.get('/api/agent/production-progress', checkApiKey, (req, res) => {
   res.set('Cache-Control', 'no-store');
