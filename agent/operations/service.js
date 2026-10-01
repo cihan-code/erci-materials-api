@@ -12,7 +12,12 @@ async function checkConnection(interpreter = interpret) {
   const record = { customer_name: 'Sentetik bağlantı test ürünü', quantity: 100, status: 'Baskı/Nakışta', decoration: 'baski' };
   const output = await interpreter(text, record, [], today());
   if (output.clarification) throw new Error('Bağlantı testi kesin sonuç üretmedi.');
-  const entries = core.validateEntries(output.entries, record, text);
+  let entries;
+  try { entries = core.validateEntries(output.entries, record, text); }
+  catch (error) {
+    // Diagnostics contain only the fixed synthetic example, never business data.
+    error.diagnostic = { extracted: output.entries }; throw error;
+  }
   if (!entries.some(e => e.op === 'print' && e.status === 'partial' && e.remaining === 5) ||
       !entries.some(e => e.op === 'print_dropoff' && e.status === 'completed')) throw new Error('Bağlantı testi beklenen işlemleri yorumlayamadı.');
   return { ok: true, synthetic: true, saved: false, remaining: 5, usage: output.usage };
