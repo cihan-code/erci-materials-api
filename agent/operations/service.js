@@ -35,6 +35,7 @@ async function submit(params, interpreter = interpret) {
   const text = String(params.text || '').trim();
   if (!text || text.length > 2000) throw new Error('Bildirim 1–2000 karakter olmalı.');
   if (!/^[\w-]{8,100}$/.test(params.request_id || '')) throw new Error('Bildirim kimliği gerekli.');
+  if (params.dry_run !== undefined && typeof params.dry_run !== 'boolean') throw new Error('Önizleme seçeneği doğru / yanlış olmalı.');
   return store.locked(async journal => {
     const existing = journal.events.find(e => e.id === params.request_id);
     if (existing) {
@@ -54,6 +55,8 @@ async function submit(params, interpreter = interpret) {
     const entries = core.validateEntries(output.entries, record, text);
     const fresh = panel.loadPanelData().data;
     if (core.fingerprint(getRecord(fresh, record.id), fresh.jobs) !== params.fingerprint) throw new Error('İş kaydı yorumlama sırasında değişti; yenileyip tekrar deneyin.');
+    if (params.dry_run) return { saved: false, dry_run: true, entries,
+      summary: entries.map(core.describe).join('\n'), usage: output.usage };
     const event = { id: params.request_id, record_id: record.id, fingerprint: params.fingerprint,
       quantity: record.quantity, date, recorded_at: new Date().toISOString(), text, entries, usage: output.usage };
     journal.events.push(event); journal.revision++;

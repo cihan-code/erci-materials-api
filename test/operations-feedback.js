@@ -89,6 +89,15 @@ test('Turkish number phrases are not mistaken for their component digits', () =>
 test('a preparation obstacle cannot be assigned to an unrelated operation', () => {
   assert.throws(() => core.validateEntries([{ ...entries[1], op: 'sewing' }], record, text), /işleme uymuyor/);
 });
+test('explicit dry-run validates extraction without saving production progress', async () => {
+  reset();
+  const result = await service.submit({ ...params(), dry_run: true }, interpreter);
+  assert.equal(result.saved, false); assert.equal(result.dry_run, true);
+  assert.equal(result.entries[1].remaining, 5);
+  assert.equal(journal.read().events.length, 0);
+  assert.equal(journal.read().revision, 0);
+  await assert.rejects(service.submit({ ...params(), dry_run: 'true' }, interpreter), /Önizleme/);
+});
 test('process restart recovers its previous abandoned lock', async () => {
   reset(); const lock = path.join(dir, 'operations', '.lock');
   fs.mkdirSync(lock, { recursive: true });
