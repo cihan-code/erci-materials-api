@@ -48,14 +48,14 @@ test('idempotency avoids repeated inference and rejects changed payload', async 
   assert.equal(calls, 1); assert.equal(journal.read().events.length, 1);
   await assert.rejects(service.submit({ ...p, text: 'Başka' }, infer), /farklı içerik/);
 });
-test('ambiguity and malformed or invented counts do not write', async () => {
+test('ambiguity does not write; quantities never reject a valid operation', async () => {
   reset();
   const result = await service.submit(params(), async () => ({ clarification: 'Hangi işlem?', entries: [] }));
   assert.equal(result.saved, false); assert.equal(journal.read().events.length, 0);
-  for (const remaining of [6, -1, 100, 2.5]) {
-    await assert.rejects(service.submit(params(), async () => ({ entries: [{ ...entries[1], remaining }] })), /Kalan adet/);
+  for (const remaining of [null, undefined, 6, -1, 100, 260, 2.5, 'unknown']) {
+    const validated = core.validateEntries([{ ...entries[1], remaining }], record, text);
+    assert.equal(validated[0].remaining, Number.isInteger(remaining) && remaining > 0 ? remaining : null);
   }
-  assert.equal(journal.read().events.length, 0);
 });
 test('concurrent submissions, stale views and changed panel data are protected', async () => {
   reset(); let release;
@@ -82,10 +82,11 @@ test('dispatch does not complete printing and both decorations require both comp
   assert.equal(one.hold, true); assert.match(one.action, /tamamlandığını teyit/);
   assert.equal(core.revision(record, [{ ...entries[1], status: 'completed' }], 'ikisi').hold, true);
 });
-test('Turkish number phrases are not mistaken for their component digits', () => {
-  const e = { ...entries[1], evidence: 'Yirmi beş adet kaldı, baskı kağıdı eksik' };
-  assert.throws(() => core.validateEntries([e], record, e.evidence), /Kalan adet/);
-  assert.equal(core.validateEntries([{ ...e, remaining: 25 }], record, e.evidence)[0].remaining, 25);
+test('remaining counts are informational, independent of order quantity', () => {
+  const e = { ...entries[1], evidence: 'Yirmi beş adet kaldı, baskı kağıdı eksik', remaining: 25 };
+  for (const quantity of [10, 25, 100, null, '', 'invalid']) {
+    assert.equal(core.validateEntries([e], { ...record, quantity }, e.evidence)[0].remaining, 25);
+  }
 });
 test('a preparation obstacle cannot be assigned to an unrelated operation', () => {
   assert.throws(() => core.validateEntries([{ ...entries[1], op: 'sewing' }], record, text), /işleme uymuyor/);
@@ -115,4 +116,46 @@ test('process restart recovers its previous abandoned lock', async () => {
   fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, instance: 'previous-process' }));
   const result = await service.submit(params(), interpreter);
   assert.equal(result.saved, true);
+});
+
+test('both real hood lining examples save without counts, sync cutting and undo safely', async () => {
+  for (const text of ['260 adet Kesim yapıldı ama kapşon astarı henüz kesilmedi',
+                      'Kesim yapıldı ama kapşon astarı henüz kesilmedi']) {
+    for (const quantity of [250, null, '', 'invalid']) {
+      reset();
+      const changed = { ...record, quantity, status: 'Kumaş Geldi' };
+      fs.writeFileSync(panelPath, JSON.stringify({ data: { uretimTakip: [changed] }, updatedAt: 'test' }));
+      const result = await service.submit(params('hood-report-001', text), async () => ({ clarification: '', entries: [
+        { op: 'cut', status: 'partial', remaining: null, reason: 'kapşon astarı henüz kesilmedi', issue: null, evidence: text },
+      ] }));
+      assert.equal(result.saved, true);
+      const saved = result.snapshot.records[0];
+      assert.equal(saved.entries[0].remaining, null); assert.equal(saved.stale, false);
+      assert.equal(saved.revision.status, 'Kesimde'); assert.equal(saved.basis.quantity, quantity);
+      assert.match(saved.revision.action, /Kesim: kalanı tamamla/);
+      assert.match(saved.revision.note, /kapşon astarı henüz kesilmedi/);
+      assert.match(result.snapshot.plan.decisions[0].action, /kapşon astarı henüz kesilmedi/);
+      assert.doesNotMatch(result.snapshot.plan.decisions[0].action, /null|undefined/);
+      assert.doesNotMatch(JSON.stringify(saved.revision), /null|undefined/);
+      assert.equal(JSON.parse(fs.readFileSync(panelPath)).data.uretimTakip[0].status, 'Kesimde');
+      const undone = await service.undo({ event_id: 'hood-report-001', revision: result.snapshot.revision });
+      assert.equal(undone.records[0].basis.status, 'Kumaş Geldi');
+    }
+  }
+});
+test('foreign clarification is replaced by controlled Turkish, without a second call', async () => {
+  reset(); let calls = 0;
+  const result = await service.submit(params(), async () => { calls++; return { entries: [], clarification: 'Please confirm the remaining quantity.' }; });
+  assert.equal(result.saved, false); assert.equal(calls, 1);
+  assert.match(result.clarification, /Hangi üretim işlemi/);
+  assert.doesNotMatch(result.clarification, /Please|quantity/);
+  assert.equal(journal.read().events.length, 0);
+});
+test('partial and ongoing operations use their stage; blocked-only reports preserve it', () => {
+  for (const status of ['partial', 'in_progress']) {
+    for (const [op, stage] of [['cut', 'Kesimde'], ['print', 'Baskı/Nakışta'], ['sewing', 'Dikimde'], ['pack', 'Ütü-Pakette-Teslimat Bekliyor']]) {
+      assert.equal(core.revision({ ...record, status: 'Kumaş Geldi' }, [{ op, status, remaining: null, reason: '' }], 'baski').status, stage);
+    }
+  }
+  assert.equal(core.revision(record, [{ op: 'sewing', status: 'blocked', reason: 'malzeme yok' }], 'baski').status, record.status);
 });

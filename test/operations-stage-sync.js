@@ -19,11 +19,11 @@ test('forward, backward and delivered transitions are factual and retain unrelat
   assert.equal(current().note,'Keep');assert.equal(panel.readPanelRaw().auth.preserve,'synthetic auth');assert.equal(panel.loadPanelData().data.expenses[0].id,1);
  }
 });
-test('remaining work keeps its original commercial stage and needs no panel write',async()=>{
+test('remaining work stays at the operation stage and synchronizes without staleness',async()=>{
  reset();const before=fs.readFileSync(panel.PANEL_DATA_FILE,'utf8');
  const res=await service.submit(params('Beş adet kaldı.'),infer('print','partial',5));
- assert.equal(current().status,'Kesimde');assert.equal(res.snapshot.records[0].stale,false);
- assert.equal(fs.readFileSync(panel.PANEL_DATA_FILE,'utf8'),before);
+ assert.equal(current().status,'Baskı/Nakışta');assert.equal(res.snapshot.records[0].stale,false);
+ assert.equal(res.stage_sync.status,'applied');
 });
 test('manual changes including a return to original stage remain stale; undo preserves them',async()=>{
  for(const changes of [{status:'Dikimde'},{status:'Kesimde'},{quantity:200},{est_delivery:'2026-10-08'}]){

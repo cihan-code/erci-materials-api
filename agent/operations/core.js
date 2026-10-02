@@ -27,27 +27,6 @@ function decoration(record, jobs = []) {
 function fingerprint(record, jobs) {
   return hash([record.id, record.customer_name, record.quantity, record.status, decoration(record, jobs), record.est_delivery]);
 }
-function normalize(text) { return text.toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ı/g, 'i'); }
-function statedNumber(text, quantity) {
-  const words = { sifir: 0, bir: 1, iki: 2, uc: 3, dort: 4, bes: 5, alti: 6, yedi: 7, sekiz: 8, dokuz: 9,
-    on: 10, yirmi: 20, otuz: 30, kirk: 40, elli: 50, altmis: 60, yetmis: 70, seksen: 80, doksan: 90 };
-  words.yuz = 100; words.bin = 1000;
-  const tokens = normalize(text).match(/[a-z]+|\d+/g) || [];
-  const values = [];
-  for (let i = 0; i < tokens.length; i++) {
-    if (/^\d+$/.test(tokens[i])) { values.push(Number(tokens[i])); continue; }
-    if (!(tokens[i] in words)) continue;
-    let value = 0, total = 0;
-    while (i < tokens.length && tokens[i] in words) {
-      const n = words[tokens[i++]];
-      if (n === 100) value = (value || 1) * 100;
-      else if (n === 1000) { total += (value || 1) * 1000; value = 0; }
-      else value += n;
-    }
-    i--; values.push(total + value);
-  }
-  return values.includes(quantity);
-}
 function validateEntries(entries, record, text) {
   if (!Array.isArray(entries) || !entries.length || entries.length > 9) throw new Error('İşlem anlaşılamadı; yapılan işlemi açıkça yazın.');
   const seen = new Set();
@@ -59,15 +38,11 @@ function validateEntries(entries, record, text) {
     if (typeof e.reason !== 'string' || e.reason.length > 400 || (e.reason && !text.includes(e.reason))) throw new Error('Engel nedeni bildirimden alınmalı.');
     if (e.issue !== null && !ISSUES[e.issue]) throw new Error('Engel sınıfı geçersiz.');
     if (e.status === 'blocked' && !e.reason) throw new Error('Bekleme nedeni belirtilmeli.');
-    if (e.status === 'partial') {
-      if (!Number.isInteger(record.quantity) || record.quantity <= 0) throw new Error('Kalan adedi kaydetmeden önce sipariş adedini teyit edin.');
-      if (!Number.isInteger(e.remaining) || e.remaining <= 0 || e.remaining >= record.quantity || !statedNumber(e.evidence, e.remaining)) {
-        throw new Error('Kalan adet bildirime ve sipariş adedine uymuyor; net kalan adedi yazın.');
-      }
-    } else if (e.remaining !== null) throw new Error('Kalan adet yalnız kısmi tamamlanmada kullanılabilir.');
+    // Counts are optional information, never a reason to reject an operation.
+    const remaining = e.status === 'partial' && Number.isInteger(e.remaining) && e.remaining > 0 ? e.remaining : null;
     if (e.issue && (!e.reason || !['partial', 'blocked', 'not_started'].includes(e.status))) throw new Error('Engel gözlemi için açık neden gerekli.');
     if (e.issue && ISSUES[e.issue].ops.length && !ISSUES[e.issue].ops.includes(e.op)) throw new Error('Engel sınıfı bildirilen işleme uymuyor.');
-    return { op: e.op, status: e.status, remaining: e.remaining, reason: e.reason, issue: e.issue, evidence: e.evidence };
+    return { op: e.op, status: e.status, remaining, reason: e.reason, issue: e.issue, evidence: e.evidence };
   });
 }
 function latest(events, recordId) {
@@ -81,12 +56,24 @@ const STATUS = { completed: 'Tamamlandı', partial: 'Kısmen tamamlandı', in_pr
 function describe(entry) {
   return OPS[entry.op] + ': ' + STATUS[entry.status] + (entry.remaining != null ? ' — ' + entry.remaining + ' adet kaldı' : '') + (entry.reason ? ' · ' + entry.reason : '');
 }
+function partialAction(entry) {
+  return OPS[entry.op] + (Number.isInteger(entry.remaining) && entry.remaining > 0
+    ? ': kalan ' + entry.remaining + ' adedi tamamla' : ': kalanı tamamla');
+}
+const ACTIVE_STAGES = {
+  fabric: 'Kumaş Geldi', cut: 'Kesimde', print_dropoff: 'Baskı/Nakışta',
+  print: 'Baskı/Nakışta', embroidery_dropoff: 'Baskı/Nakışta', embroidery: 'Baskı/Nakışta',
+  sewing: 'Dikimde', pack: 'Ütü-Pakette-Teslimat Bekliyor', delivery: 'Ütü-Pakette-Teslimat Bekliyor',
+};
+const STAGE_ORDER = ['Kumaş Geldi', 'Kesimde', 'Baskı/Nakışta', 'Dikimde', 'Ütü-Pakette-Teslimat Bekliyor'];
 function revision(record, entries, deco) {
   if (!entries.length) return null;
   const incomplete = entries.filter(e => e.status !== 'completed');
+  const active = incomplete.filter(e => ['partial', 'in_progress'].includes(e.status));
+  const stage = active.map(e => ACTIVE_STAGES[e.op]).sort((a, b) => STAGE_ORDER.indexOf(a) - STAGE_ORDER.indexOf(b))[0];
   if (incomplete.length) return {
-    status: record.status, section: 'Gün içi revizyon', hold: true,
-    action: incomplete.map(e => e.status === 'partial' ? OPS[e.op] + ': kalan ' + e.remaining + ' adedi tamamla' : describe(e)).join('; '),
+    status: stage || record.status, section: 'Gün içi revizyon', hold: true,
+    action: incomplete.map(e => e.status === 'partial' ? partialAction(e) : describe(e)).join('; '),
     note: incomplete.map(e => e.reason).filter(Boolean).join('; '),
   };
   const done = new Set(entries.map(e => e.op));
@@ -104,4 +91,4 @@ function revision(record, entries, deco) {
     action: 'Kesim tamamlandı; ' + ({ baski: 'baskıya götür.', nakis: 'nakışa götür.', ikisi: 'ilgili parçaları baskıya ve nakışa götür.', yok: 'dikime götür.' }[deco] || 'baskı/nakış rotasını teyit et.'), note: '' };
   return { status: 'Kumaş Geldi', section: 'Kesim', hold: false, action: 'Kumaş hazır; kesimi planla.', note: '' };
 }
-module.exports = { OPS, ISSUES, STATUS, hash, decoration, fingerprint, validateEntries, latest, describe, revision };
+module.exports = { OPS, ISSUES, STATUS, hash, decoration, fingerprint, validateEntries, latest, describe, partialAction, revision };

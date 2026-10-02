@@ -20,7 +20,7 @@ test('HTTP report -> plan -> learned rule -> undo; auth, retries and call budget
     require.cache[p]={id:p,filename:p,loaded:true,exports:{callClaude:async opts=>{
       if(opts.opType!=='production_feedback'||opts.maxTokens!==1500||opts.maxAttempts!==1) throw Error('budget');
       const state=JSON.parse(opts.user);
-      if(!state.selected_record.name.startsWith('Synthetic ')||state.selected_record.quantity!==100||'panel' in state) throw Error('context');
+      if(!state.selected_record.name.startsWith('Synthetic ')||'quantity' in state.selected_record||'panel' in state) throw Error('context');
       const text=state.report;
       require('fs').writeFileSync(${JSON.stringify(path.join(dir, 'calls'))}, String(++calls));
       return {text:JSON.stringify({clarification:'',entries:[{op:'print',status:'partial',remaining:5,

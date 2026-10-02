@@ -5,6 +5,7 @@ const core = require('./core');
 const { istanbulDay } = require('../lib/util');
 const { interpret } = require('./interpret');
 const memory = require('./memory');
+const { safeClarification } = require('./clarification');
 const jevContext = require('./jev-context');
 const jevClient = require('./jev-client');
 const jevPlan = require('./jev-plan');
@@ -109,7 +110,7 @@ async function submit(params, interpreter = interpret) {
     const last = journal.events.filter(e => String(e.record_id) === String(record.id) && !e.voided).at(-1);
     if (last?.text === text && last.date === date && !stageSync.assessment(record, data.jobs, journal.events).stale) return { saved: true, reused: true, stage_sync: stageSync.publicChange(journal.stage_syncs?.[String(record.id)]), snapshot: snapshot(data, journal) };
     const output = await interpreter(text, { ...record, decoration: core.decoration(record, data.jobs) }, previous, date);
-    if (output.clarification) return { saved: false, clarification: String(output.clarification).slice(0, 600), usage: output.usage };
+    if (output.clarification) return { saved: false, clarification: safeClarification(output.clarification), usage: output.usage };
     const entries = core.validateEntries(output.entries, record, text);
     const fresh = panel.loadPanelData().data;
     if (core.fingerprint(getRecord(fresh, record.id), fresh.jobs) !== params.fingerprint) throw new Error('İş kaydı yorumlama sırasında değişti; yenileyip tekrar deneyin.');

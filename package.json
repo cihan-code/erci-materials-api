@@ -17,7 +17,7 @@
     "codes": "node test/paneldata-codes.js",
     "uretim": "node test/uretim-scheduler.js && node test/uretim-adapter.js && node test/uretim-signals.js && node --test test/uretim-progress-core.js test/uretim-progress.js",
     "uretim:plan": "node agent/uretim/preview.js",
-    "operations": "node --test test/operations-feedback.js test/operations-memory.js test/operations-http.js test/operations-jev-client.js test/operations-jev-plan.js test/operations-final-http.js test/operations-stage-sync.js test/operations-stage-http.js"
+    "operations": "node --test test/operations-feedback.js test/operations-memory.js test/operations-http.js test/operations-jev-client.js test/operations-jev-plan.js test/operations-final-http.js test/operations-stage-sync.js test/operations-stage-http.js test/operations-interpret.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -103,7 +103,7 @@ New events keep the report-time `basis_status` and original fingerprint. The
 revision is computed against that basis; its valid `URETIM_STATUSES` target is
 written through `writePanelData`, which preserves auth and unrelated data, creates
 backups and checks the latest `updatedAt`. Forward and backward moves are allowed,
-including delivery; incomplete work retains the report-time stage. The former
+including delivery; partial/in-progress work uses the reported operation’s stage; blocked/not-started-only work retains the report-time stage. The former
 previous-stage guard was removed for this explicit user decision.
 
 The journal first persists a narrow `stage_syncs[record_id]` intent, then applies
@@ -129,3 +129,33 @@ clean; it does not send a second whole-panel save. Edits made during extraction
 remain local and use the normal conflict decision path. Stale browser writes are
 rejected by the shared CAS route. Version tokens advance even within one millisecond.
 Run `npm run operations` (including real HTTP stage/CAS tests) and `npm run uretim`.
+
+## Optional counts and Turkish clarification (2026-10-02)
+
+Operation stages are authoritative for reports. Counts never block saving or
+trigger clarification: no order-quantity comparison, even for missing/invalid
+quantity or a reported 260 versus ordered 250. `partial.remaining` may be null;
+explicit positive integer counts remain informational and legacy counted events
+are still read. Invalid optional counts normalize to null, never reject an event.
+The interpreter omits order quantity and never calculates a remainder.
+
+Both `260 adet Kesim yapıldı ama kapşon astarı henüz kesilmedi` and the same report
+without `260 adet` mean partial cutting, no remaining count, and the exact source
+reason. Actions say `Kesim: kalanı tamamla` plus that reason instead of a null count.
+Python accepts count-free partial events; panel, shared Jev actions and daily
+notes preserve the reason without inventing quantities.
+
+**Applied default:** partial or in-progress work moves kanban to that operation’s
+stage (partial cutting -> `Kesimde`), including backward moves. With multiple
+active unfinished operations, the earliest active stage is used. Blocked or
+not-started-only reports preserve the current stage. Existing CAS, manual-change
+protection, undo and evidence-based preparation-rule memory remain in place.
+
+Clarification is only for unclear/contradictory actual operations, questions,
+future intent or explicitly another day, never quantities. Only controlled
+Turkish clarification messages reach the UI; unexpected model wording/language
+uses a general Turkish operation question, with no translation call or retry.
+Evidence/reason remain exact source substrings. Dispatch still does not complete
+work. Haiku remains one attempt, 1500 output tokens, 45 seconds per interpretation.
+Ordinary reads, stage synchronization and optional-count handling add no calls.
+Daily warning-and-send behavior and `40 4 * * 1-6` schedule are unchanged.
