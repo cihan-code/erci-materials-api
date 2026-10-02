@@ -25,7 +25,7 @@ function params(id = 'report-0001', value = text) {
 }
 const interpreter = async () => ({ entries, clarification: '', usage: { costUsd: 0 } });
 
-test('partial printing -> remaining 5 -> revise -> completed -> next step; panel stays intact', async () => {
+test('partial printing -> remaining 5 -> revise -> completed -> next step; only kanban stage changes', async () => {
   reset(); const before = fs.readFileSync(panelPath, 'utf8');
   let result = await service.submit(params(), interpreter);
   assert.match(result.snapshot.records[0].revision.action, /kalan 5/);
@@ -35,7 +35,8 @@ test('partial printing -> remaining 5 -> revise -> completed -> next step; panel
     { op: 'print', status: 'completed', remaining: null, reason: '', issue: null, evidence: 'Kalan baskılar tamamlandı.' },
   ] }));
   assert.match(result.snapshot.records[0].revision.action, /dikime götür/);
-  assert.equal(fs.readFileSync(panelPath, 'utf8'), before);
+  assert.equal(JSON.parse(fs.readFileSync(panelPath, 'utf8')).data.uretimTakip[0].status, 'Baskı/Nakışta');
+  assert.equal(result.snapshot.records[0].stale, false);
   const undone = await service.undo({ event_id: 'report-0002', revision: result.snapshot.revision });
   assert.match(undone.records[0].revision.action, /kalan 5/);
 });

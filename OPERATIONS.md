@@ -6,7 +6,8 @@ The panel's **Operasyon Planı** accepts today's free-text reports for one selec
 `uretimTakip.id`. A report becomes an immutable event after Claude extraction and
 server validation. Partial quantities remain open, dispatch does not imply work
 completion, and ambiguity asks a question without saving. Undo retains the event
-as voided and recalculates the plan. Existing panel records are never rewritten.
+as voided and recalculates the plan. Validated report revisions now synchronize
+only the selected production record’s kanban `status`, with backups and CAS.
 
 `DATA_DIR/operations/journal.json` owns this workflow. It is separate from the
 legacy `agent/uretim` progress ledger keyed by `jobs.id`; do not mix those IDs.
@@ -95,3 +96,36 @@ More than 255 pending jobs or oversized full context produces an explicit rule
 fallback; jobs are never silently dropped. Clients reject incomplete or stale
 plans atomically. TypeSafe contract: https://docs.typesafe.ai/api;
 relative priority: https://docs.typesafe.ai/cookbooks/semantic_find.
+
+## Report-to-kanban stage synchronization
+
+New events keep the report-time `basis_status` and original fingerprint. The
+revision is computed against that basis; its valid `URETIM_STATUSES` target is
+written through `writePanelData`, which preserves auth and unrelated data, creates
+backups and checks the latest `updatedAt`. Forward and backward moves are allowed,
+including delivery; incomplete work retains the report-time stage. The former
+previous-stage guard was removed for this explicit user decision.
+
+The journal first persists a narrow `stage_syncs[record_id]` intent, then applies
+it synchronously without an await between panel read/check/write. Saved retries
+and the next journal mutation recover a pending write; a crash after the panel
+write is recognized without writing again. Changed records are never overwritten.
+Provider calls are unchanged: no model decides or performs the stage patch.
+
+A new event is current only when its fingerprint matches the record reconstructed
+with `basis_status` AND the actual status equals the computed revision target.
+This catches manual stage changes, even a return to the original stage. Old events
+without a basis retain their strict fingerprint behavior.
+
+Undo restores the remaining revision target or the first event’s original stage.
+If the current record was manually changed, undo voids the event but leaves kanban
+untouched with a message. Legacy history without a provable original stage is
+also left unchanged with a warning. Undo retries of the same transition are
+idempotent. Read/transport failure still produces the daily plan’s visible warning.
+
+Report and undo responses add `stage_sync` plus canonical `panel_sync` data/token.
+The browser adopts this through its existing `adoptCloudSnapshot` path only when
+clean; it does not send a second whole-panel save. Edits made during extraction
+remain local and use the normal conflict decision path. Stale browser writes are
+rejected by the shared CAS route. Version tokens advance even within one millisecond.
+Run `npm run operations` (including real HTTP stage/CAS tests) and `npm run uretim`.

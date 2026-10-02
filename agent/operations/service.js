@@ -8,6 +8,7 @@ const memory = require('./memory');
 const jevContext = require('./jev-context');
 const jevClient = require('./jev-client');
 const jevPlan = require('./jev-plan');
+const stageSync = require('./stage-sync');
 const today = () => istanbulDay(new Date());
 // Fixed synthetic diagnostic: never reads panel records or saves progress.
 async function checkConnection(interpreter = interpret) {
@@ -34,18 +35,19 @@ function snapshot(data = panel.loadPanelData().data, journal = store.read(), inc
   if (!data) throw new Error('Panel verisi okunamadı.');
   const knowledge = memory.learn(journal);
   const records = (data.uretimTakip || []).map(record => {
-    const entries = core.latest(journal.events, record.id);
+    const assessed = stageSync.assessment(record, data.jobs, journal.events);
+    const entries = assessed.entries;
     const events = journal.events.filter(e => String(e.record_id) === String(record.id) && !e.voided);
-    const last = events.at(-1);
-    const stale = !!last && last.fingerprint !== core.fingerprint(record, data.jobs);
+    const stale = assessed.stale;
     return { record_id: record.id, fingerprint: core.fingerprint(record, data.jobs), entries,
       basis: { status: record.status, quantity: record.quantity, customer: record.customer_name,
         decoration: core.decoration(record, data.jobs), est_delivery: record.est_delivery || null },
       planning_basis: jevContext.planningBasis(record),
+      stage_sync: stageSync.publicChange(journal.stage_syncs?.[String(record.id)]),
       reminders: memory.reminders(record, core.decoration(record, data.jobs), entries, knowledge),
       revision: stale ? { status: record.status, section: 'Gün içi revizyon', hold: true,
         action: 'Panel kaydı bildirimden sonra değişti; son durumunu yeniden bildir.', note: '' }
-        : core.revision(record, entries, core.decoration(record, data.jobs)),
+        : assessed.revision,
       stale, history: events.slice(-20).reverse().map(e => ({ id: e.id, date: e.date, text: e.text, entries: e.entries })) };
   });
   const result = { version: 1, revision: journal.revision, records, knowledge,
@@ -92,11 +94,12 @@ async function submit(params, interpreter = interpret) {
   if (!/^[\w-]{8,100}$/.test(params.request_id || '')) throw new Error('Bildirim kimliği gerekli.');
   if (params.dry_run !== undefined && typeof params.dry_run !== 'boolean') throw new Error('Önizleme seçeneği doğru / yanlış olmalı.');
   return store.locked(async journal => {
+    stageSync.recover(journal);
     const existing = journal.events.find(e => e.id === params.request_id);
     if (existing) {
       if (existing.text !== text || String(existing.record_id) !== String(params.record_id)) throw new Error('Bildirim kimliği farklı içerikle kullanılmış.');
       if (existing.voided) return { saved: false, clarification: 'Bu bildirim geri alınmış; yeni bildirim yazın.' };
-      return { saved: true, reused: true, snapshot: snapshot(undefined, journal) };
+      return { saved: true, reused: true, stage_sync: stageSync.publicChange(journal.stage_syncs?.[String(existing.record_id)]), snapshot: snapshot(undefined, journal) };
     }
     const { data } = panel.loadPanelData();
     const record = getRecord(data, params.record_id);
@@ -104,7 +107,7 @@ async function submit(params, interpreter = interpret) {
     if (params.revision !== journal.revision || params.fingerprint !== core.fingerprint(record, data.jobs)) throw new Error('Plan değişti; yenileyip tekrar kaydedin.');
     const previous = core.latest(journal.events, record.id);
     const last = journal.events.filter(e => String(e.record_id) === String(record.id) && !e.voided).at(-1);
-    if (last?.text === text && last.date === date && last.fingerprint === params.fingerprint) return { saved: true, reused: true, snapshot: snapshot(data, journal) };
+    if (last?.text === text && last.date === date && !stageSync.assessment(record, data.jobs, journal.events).stale) return { saved: true, reused: true, stage_sync: stageSync.publicChange(journal.stage_syncs?.[String(record.id)]), snapshot: snapshot(data, journal) };
     const output = await interpreter(text, { ...record, decoration: core.decoration(record, data.jobs) }, previous, date);
     if (output.clarification) return { saved: false, clarification: String(output.clarification).slice(0, 600), usage: output.usage };
     const entries = core.validateEntries(output.entries, record, text);
@@ -113,19 +116,41 @@ async function submit(params, interpreter = interpret) {
     if (params.dry_run) return { saved: false, dry_run: true, entries,
       summary: entries.map(core.describe).join('\n'), usage: output.usage };
     const event = { id: params.request_id, record_id: record.id, fingerprint: params.fingerprint,
-      quantity: record.quantity, date, recorded_at: new Date().toISOString(), text, entries, usage: output.usage };
+      basis_status: record.status, quantity: record.quantity, date, recorded_at: new Date().toISOString(), text, entries, usage: output.usage };
     journal.events.push(event); journal.revision++;
-    store.write(journal);
-    return { saved: true, summary: entries.map(core.describe).join('\n'), usage: output.usage, snapshot: snapshot(fresh, journal) };
+    const current = getRecord(fresh, record.id);
+    const target = core.revision(current, core.latest(journal.events, record.id), core.decoration(current, fresh.jobs))?.status;
+    const change = stageSync.begin(journal, current, fresh.jobs, target, 'report', event.id);
+    store.write(journal); // durable intent before changing kanban
+    stageSync.recover(journal);
+    return { saved: true, stage_sync: stageSync.publicChange(change), summary: entries.map(core.describe).join('\n'), usage: output.usage, snapshot: snapshot(undefined, journal) };
   });
 }
 async function undo(params) {
   return store.locked(journal => {
-    if (params.revision !== journal.revision) throw new Error('Günlük değişti; yenileyin.');
-    const event = journal.events.find(e => e.id === params.event_id && !e.voided);
+    stageSync.recover(journal);
+    const event = journal.events.find(e => e.id === params.event_id);
     if (!event) throw new Error('Bildirim bulunamadı.');
-    event.voided = new Date().toISOString(); journal.revision++; store.write(journal);
-    return snapshot(undefined, journal);
+    const prior = journal.stage_syncs?.[String(event.record_id)];
+    if (event.voided && prior?.operation === 'undo' && prior.event_id === event.id)
+      return { ...snapshot(undefined, journal), stage_sync: stageSync.publicChange(prior), reused: true };
+    if (event.voided) throw new Error('Bu bildirim zaten geri alınmış.');
+    if (params.revision !== journal.revision) throw new Error('Günlük değişti; yenileyin.');
+    const { data } = panel.loadPanelData();
+    const record = getRecord(data, event.record_id);
+    const before = stageSync.assessment(record, data.jobs, journal.events);
+    event.voided = new Date().toISOString(); journal.revision++;
+    const after = stageSync.assessment(record, data.jobs, journal.events);
+    const first = journal.events.find(e => String(e.record_id) === String(record.id));
+    const last = journal.events.filter(e => String(e.record_id) === String(record.id) && !e.voided).at(-1);
+    const target = after.revision?.status || first?.basis_status;
+    const warning = before.stale ? 'Aşama veya iş kaydı arada elle değişti; geri alma sırasında kanban aşamasına dokunulmadı.'
+      : !stageSync.valid(target) || last && !stageSync.valid(last.basis_status)
+        ? 'Eski bildirimin başlangıç aşaması bilinmiyor; kanban aşaması korunarak bildirim geri alındı.' : null;
+    const change = stageSync.begin(journal, record, data.jobs, target, 'undo', event.id, warning);
+    store.write(journal);
+    stageSync.recover(journal);
+    return { ...snapshot(undefined, journal), stage_sync: stageSync.publicChange(change) };
   });
 }
 async function decideRule(params) {
@@ -139,4 +164,5 @@ async function decideRule(params) {
     return snapshot(undefined, journal);
   });
 }
-module.exports = { snapshot, submit, undo, decideRule, checkConnection, finalPlan, checkFinalConnection };
+function panelSnapshot() { return panel.loadPanelData(); }
+module.exports = { panelSnapshot, snapshot, submit, undo, decideRule, checkConnection, finalPlan, checkFinalConnection };

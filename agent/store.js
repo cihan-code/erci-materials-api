@@ -1,8 +1,8 @@
 // Ajan cikti deposu (su an yalniz gunluk-uretim-plani) + panel-data okuma/atomik yazma +
 // API maliyet gunlugu. server.js, agent/generate.js ve agent/act.js buradaki fonksiyonlari
 // kullanir ki kayit/okuma mantigi tek yerde dursun. Panel is verisi (panel-data.json) gibi,
-// DATA_DIR altinda duz JSON dosyalari; ajan SADECE kendi kovasina yazar, /api/paneldata'ya
-// dokunmaz.
+// DATA_DIR altinda duz JSON dosyalari. Dar aksiyonlar ve dogrulanmis uretim
+// bildirimlerinin kanban asamasi writePanelData CAS/yedek yolu ile yazilir.
 
 const fs = require('fs');
 const path = require('path');
@@ -116,7 +116,8 @@ function writePanelDataFull(opts) {
   const payload = {
     data,
     auth: (auth !== undefined) ? auth : ((cur && cur.auth) || null),
-    updatedAt: new Date().toISOString(),
+    // Distinct tokens even for two writes in the same millisecond.
+    updatedAt: new Date(Math.max(Date.now(), (Date.parse(cur?.updatedAt) || 0) + 1)).toISOString(),
   };
   writeJsonCompactAtomic(PANEL_DATA_FILE, payload);
   return payload.updatedAt;

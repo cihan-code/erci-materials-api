@@ -104,7 +104,7 @@ test('completion removes legal tasks, stale reports only allow confirmation, clo
   view.records[1].stale = true; prepared = context.prepare(data, view, 'jev-latest');
   assert.deepEqual(Object.keys(prepared.questions['action_IS-2'].criteria), ['confirm', 'defer']);
   const earlier = core.revision(records[2], [{ op: 'cut', status: 'completed' }], 'yok');
-  assert.equal(earlier.status, 'Dikimde'); assert.equal(earlier.previous_stage_report, true);
+  assert.equal(earlier.status, 'Kesimde'); assert.equal(earlier.previous_stage_report, undefined);
 });
 test('empty planning makes no paid call; limit overflow never silently drops jobs', async () => {
   reset(); writePanel([records[3]]);

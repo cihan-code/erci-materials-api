@@ -401,7 +401,8 @@ app.delete('/api/materials/:folder/:id', checkApiKey, (req, res) => {
 });
 
 // ---- Ajan ciktilari (su an yalniz gunluk-uretim-plani) ----
-// Ajan SADECE bu kovaya yazar. Panel is verisi (/api/paneldata) ajan icin salt-okunur.
+// Raporlar kendi kovasindadir; dogrulanmis operations bildirimleri ayrica
+// tek uretim kaydinin kanban status alanini ortak CAS/yedek yolu ile esitleyebilir.
 agentStore.ensureAgentDirs();
 
 // Intraday updates use a separate ledger keyed by production record IDs.
@@ -418,6 +419,7 @@ app.post('/api/agent/operations/report', checkApiKey, async (req, res) => {
       try { result.snapshot = await service.finalPlan(); }
       catch (_) { result.snapshot = service.snapshot(); }
     }
+    if (result.saved) result.panel_sync = service.panelSnapshot();
     res.json(result);
   }
   catch (e) { res.status(422).json({ error: e.message }); }
@@ -443,9 +445,13 @@ app.post('/api/agent/operations/check', checkApiKey, async (req, res) => {
 app.post('/api/agent/operations/undo', checkApiKey, async (req, res) => {
   try {
     const service = require('./agent/operations/service');
-    await service.undo(req.body || {});
-    try { res.json(await service.finalPlan()); }
-    catch (_) { res.json(service.snapshot()); }
+    const undone = await service.undo(req.body || {});
+    let result;
+    try { result = await service.finalPlan(); }
+    catch (_) { result = service.snapshot(); }
+    result.panel_sync = service.panelSnapshot();
+    result.stage_sync = undone.stage_sync;
+    res.json(result);
   }
   catch (e) { res.status(409).json({ error: e.message }); }
 });
