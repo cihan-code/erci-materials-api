@@ -5,6 +5,9 @@ const core = require('./core');
 const { istanbulDay } = require('../lib/util');
 const { interpret } = require('./interpret');
 const memory = require('./memory');
+const jevContext = require('./jev-context');
+const jevClient = require('./jev-client');
+const jevPlan = require('./jev-plan');
 const today = () => istanbulDay(new Date());
 // Fixed synthetic diagnostic: never reads panel records or saves progress.
 async function checkConnection(interpreter = interpret) {
@@ -27,7 +30,7 @@ function getRecord(data, id) {
   if (!r) throw new Error('Üretim kaydı bulunamadı.');
   return r;
 }
-function snapshot(data = panel.loadPanelData().data, journal = store.read()) {
+function snapshot(data = panel.loadPanelData().data, journal = store.read(), includePlan = true) {
   if (!data) throw new Error('Panel verisi okunamadı.');
   const knowledge = memory.learn(journal);
   const records = (data.uretimTakip || []).map(record => {
@@ -38,15 +41,50 @@ function snapshot(data = panel.loadPanelData().data, journal = store.read()) {
     return { record_id: record.id, fingerprint: core.fingerprint(record, data.jobs), entries,
       basis: { status: record.status, quantity: record.quantity, customer: record.customer_name,
         decoration: core.decoration(record, data.jobs), est_delivery: record.est_delivery || null },
+      planning_basis: jevContext.planningBasis(record),
       reminders: memory.reminders(record, core.decoration(record, data.jobs), entries, knowledge),
       revision: stale ? { status: record.status, section: 'Gün içi revizyon', hold: true,
         action: 'Panel kaydı bildirimden sonra değişti; son durumunu yeniden bildir.', note: '' }
         : core.revision(record, entries, core.decoration(record, data.jobs)),
       stale, history: events.slice(-20).reverse().map(e => ({ id: e.id, date: e.date, text: e.text, entries: e.entries })) };
   });
-  return { version: 1, revision: journal.revision, records, knowledge,
+  const result = { version: 1, revision: journal.revision, records, knowledge,
     build: process.env.RENDER_GIT_COMMIT || null,
     configured: !!process.env.ANTHROPIC_API_KEY, model: require('../pricing').HAIKU };
+  if (includePlan) {
+    const config = jevClient.config();
+    const prepared = jevContext.prepare(data, result, config.model);
+    result.state_hash = prepared.state_hash;
+    result.jev = { configured: config.configured, model: config.model };
+    result.plan = jevPlan.peek(prepared);
+  }
+  return result;
+}
+async function finalPlan(evaluator) {
+  await jevPlan.compute(() => {
+    const data = panel.loadPanelData().data;
+    return { data, snapshot: snapshot(data, store.read(), false) };
+  }, evaluator);
+  return snapshot();
+}
+async function checkFinalConnection(evaluator = jevClient.evaluate) {
+  const data = { jobs: [], uretimTakip: [
+    { id: 9001, customer_name: 'Sentetik kesim', quantity: 100, status: 'Kumaş Geldi', decoration: 'baski' },
+    { id: 9002, customer_name: 'Sentetik baskı', quantity: 100, status: 'Baskı/Nakışta', decoration: 'baski' },
+    { id: 9003, customer_name: 'Sentetik dikim', quantity: 80, status: 'Dikimde', decoration: 'yok' },
+    { id: 9004, customer_name: 'Sentetik teslim', quantity: 50, status: 'Teslim Edildi', decoration: 'yok' },
+  ] };
+  const record = data.uretimTakip[1];
+  const journal = { version: 1, revision: 1, rules: {}, events: [{ id: 'synthetic-final-test', record_id: record.id,
+    fingerprint: core.fingerprint(record, []), date: today(), entries: [
+      { op: 'print_dropoff', status: 'completed', remaining: null, reason: '', issue: null },
+      { op: 'print', status: 'partial', remaining: 5, reason: 'baskı kağıdı eksik', issue: 'print_paper' },
+    ] }] };
+  const view = snapshot(data, journal, false);
+  const prepared = jevContext.prepare(data, view, jevClient.config().model);
+  const response = jevClient.validate_choices(await evaluator(prepared.state, prepared.questions), prepared.questions);
+  return { ok: true, synthetic: true, saved: false, model: response.model, considered_count: prepared.considered_count,
+    record_count: prepared.tasks.length, decisions: jevContext.decisions(prepared, response), usage: response.usage || null };
 }
 async function submit(params, interpreter = interpret) {
   const text = String(params.text || '').trim();
@@ -101,4 +139,4 @@ async function decideRule(params) {
     return snapshot(undefined, journal);
   });
 }
-module.exports = { snapshot, submit, undo, decideRule, checkConnection };
+module.exports = { snapshot, submit, undo, decideRule, checkConnection, finalPlan, checkFinalConnection };

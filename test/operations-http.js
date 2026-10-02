@@ -63,7 +63,7 @@ test('HTTP report -> plan -> learned rule -> undo; auth, retries and call budget
     assert.equal(fs.readFileSync(panelFile, 'utf8'), original);
   } finally {
     child.kill();
-    await new Promise(r => child.once('exit', r));
+    if (child.exitCode === null && child.signalCode === null) await new Promise(r => child.once('exit', r));
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

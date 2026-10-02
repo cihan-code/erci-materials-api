@@ -89,6 +89,15 @@ function revision(record, entries, deco) {
     note: incomplete.map(e => e.reason).filter(Boolean).join('; '),
   };
   const done = new Set(entries.map(e => e.op));
+  const phase = { 'Kumaş Bekleniyor': 0, 'Kumaş Geldi': 1, 'Kesimde': 2, 'Baskı/Nakışta': 3,
+    'Dikimde': 4, 'Ütü-Pakette-Teslimat Bekliyor': 5, 'Teslim Edildi': 6 };
+  const operationPhase = { fabric: 1, cut: 2, print_dropoff: 3, print: 3,
+    embroidery_dropoff: 3, embroidery: 3, sewing: 4, pack: 5, delivery: 6 };
+  if (phase[record.status] > Math.max(...entries.map(e => operationPhase[e.op]))) return {
+    status: record.status, section: ({ 'Dikimde': 'Dikim', 'Ütü-Pakette-Teslimat Bekliyor': 'Ütü / Paket / Teslimat',
+      'Baskı/Nakışta': 'Baskı / Nakış', 'Kesimde': 'Kesim', 'Teslim Edildi': 'Tamamlanan' })[record.status] || 'Kontrol gerekli',
+    hold: true, previous_stage_report: true, action: 'Bildirilen önceki aşama tamamlandı; paneldeki ' + record.status + ' aşamasının son durumunu teyit et.', note: '',
+  };
   if (done.has('delivery')) return { status: 'Teslim Edildi', section: 'Tamamlanan', hold: false, action: 'Teslimat tamamlandı.', note: '' };
   if (done.has('pack')) return { status: 'Ütü-Pakette-Teslimat Bekliyor', section: 'Ütü / Paket / Teslimat', hold: false, action: 'Ütü / paket tamamlandı; teslimatı planla.', note: '' };
   if (done.has('sewing')) return { status: 'Ütü-Pakette-Teslimat Bekliyor', section: 'Ütü / Paket / Teslimat', hold: false, action: 'Dikim tamamlandı; ütü / paket yap.', note: '' };

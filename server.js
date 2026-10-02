@@ -411,19 +411,51 @@ app.get('/api/agent/operations', checkApiKey, (req, res) => {
   catch (_) { res.status(503).json({ error: 'Üretim günlüğü okunamadı; planı yenileyin.' }); }
 });
 app.post('/api/agent/operations/report', checkApiKey, async (req, res) => {
-  try { res.json(await require('./agent/operations/service').submit(req.body || {})); }
+  try {
+    const service = require('./agent/operations/service');
+    const result = await service.submit(req.body || {});
+    if (result.saved) {
+      try { result.snapshot = await service.finalPlan(); }
+      catch (_) { result.snapshot = service.snapshot(); }
+    }
+    res.json(result);
+  }
   catch (e) { res.status(422).json({ error: e.message }); }
+});
+app.post('/api/agent/operations/plan', checkApiKey, async (req, res) => {
+  try { res.json(await require('./agent/operations/service').finalPlan()); }
+  catch (e) { res.status(409).json({ error: e.message }); }
+});
+app.post('/api/agent/operations/jev/config', checkApiKey, (req, res) => {
+  try {
+    const config = require('./agent/operations/jev-client').configure(req.body?.api_key);
+    res.json({ configured: config.configured, model: config.model });
+  } catch (e) { res.status(422).json({ error: e.message }); }
+});
+app.post('/api/agent/operations/jev/check', checkApiKey, async (req, res) => {
+  try { res.json(await require('./agent/operations/service').checkFinalConnection()); }
+  catch (e) { res.status(503).json({ error: e.message }); }
 });
 app.post('/api/agent/operations/check', checkApiKey, async (req, res) => {
   try { res.json(await require('./agent/operations/service').checkConnection()); }
   catch (e) { res.status(503).json({ error: e.message, diagnostic: e.diagnostic || null }); }
 });
 app.post('/api/agent/operations/undo', checkApiKey, async (req, res) => {
-  try { res.json(await require('./agent/operations/service').undo(req.body || {})); }
+  try {
+    const service = require('./agent/operations/service');
+    await service.undo(req.body || {});
+    try { res.json(await service.finalPlan()); }
+    catch (_) { res.json(service.snapshot()); }
+  }
   catch (e) { res.status(409).json({ error: e.message }); }
 });
 app.post('/api/agent/operations/rule', checkApiKey, async (req, res) => {
-  try { res.json(await require('./agent/operations/service').decideRule(req.body || {})); }
+  try {
+    const service = require('./agent/operations/service');
+    await service.decideRule(req.body || {});
+    try { res.json(await service.finalPlan()); }
+    catch (_) { res.json(service.snapshot()); }
+  }
   catch (e) { res.status(409).json({ error: e.message }); }
 });
 
