@@ -164,5 +164,11 @@ async function decideRule(params) {
     return snapshot(undefined, journal);
   });
 }
-function panelSnapshot() { return panel.loadPanelData(); }
+function panelSnapshot() {
+  // Same canonical shape as GET /paneldata: adopting a new cloud token must
+  // also adopt current auth, otherwise a later browser save could restore old auth.
+  const raw = panel.readPanelRaw();
+  return raw ? { data: raw.data, auth: raw.auth || null, updatedAt: raw.updatedAt || null }
+    : { data: null, updatedAt: null };
+}
 module.exports = { panelSnapshot, snapshot, submit, undo, decideRule, checkConnection, finalPlan, checkFinalConnection };

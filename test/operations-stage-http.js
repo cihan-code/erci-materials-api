@@ -15,7 +15,7 @@ test('real HTTP report and undo synchronize kanban, stale tab cannot overwrite, 
   const payload={record_id:7,request_id:'stage-http-report',text:'Baskıya sevk edildi.',revision:s.revision,fingerprint:s.records[0].fingerprint};
   const result=await request('agent/operations/report',payload);assert.equal(result.status,200);
   const saved=result.body;assert.equal(saved.saved,true);assert.equal(saved.stage_sync.to_status,'Baskı/Nakışta');assert.equal(saved.snapshot.records[0].stale,false);
-  assert.equal(saved.panel_sync.data.uretimTakip[0].status,'Baskı/Nakışta');assert.notEqual(saved.panel_sync.updatedAt,before.updatedAt);
+  assert.equal(saved.panel_sync.data.uretimTakip[0].status,'Baskı/Nakışta');assert.notEqual(saved.panel_sync.updatedAt,before.updatedAt);assert.equal(saved.panel_sync.auth.test,true);
   assert.equal((await request('agent/operations/report',payload)).body.reused,true);assert.equal(fs.readFileSync(path.join(dir,'calls'),'utf8'),'1');
   const stale=await request('paneldata',{data:before.data,expectedUpdatedAt:before.updatedAt});assert.equal(stale.status,409);
   assert.equal((await request('paneldata')).body.data.uretimTakip[0].status,'Baskı/Nakışta');
