@@ -125,3 +125,16 @@ test('corrupted cached decisions are discarded and never presented as a valid fi
   let calls = 0; const result = await service.finalPlan(async (state, questions) => { calls++; return response(questions); });
   assert.equal(calls, 1); assert.equal(result.plan.decisions.length, 3);
 });
+
+
+test('null cache values and null decision entries are disposable without breaking the journal', async () => {
+  reset(); const infer = async (state, questions) => response(questions);
+  await service.finalPlan(infer);
+  const cacheFile = path.join(directory, 'operations/jev-plan.json');
+  const valid = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+  for (const invalid of [null, { ...valid, decisions: [null, ...valid.decisions.slice(1)] }]) {
+    fs.writeFileSync(cacheFile, JSON.stringify(invalid));
+    assert.equal(service.snapshot().plan.status, 'stale');
+    assert.equal(store.read().revision, 1);
+  }
+});

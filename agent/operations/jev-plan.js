@@ -6,7 +6,7 @@ const client = require('./jev-client');
 const file = path.join(DATA_DIR, 'operations', 'jev-plan.json');
 const pending = new Map();
 function read() {
-  try { const result = JSON.parse(fs.readFileSync(file, 'utf8')); return result.version === 1 ? result : null; }
+  try { const result = JSON.parse(fs.readFileSync(file, 'utf8')); return result?.version === 1 ? result : null; }
   catch (e) { if (e.code === 'ENOENT' || e instanceof SyntaxError) return null; throw e; }
 }
 function write(result) {
@@ -32,6 +32,7 @@ function matches(result, prepared, config) {
       (result.status === 'empty') !== !prepared.tasks.length) return false;
   const ids = new Set(), priorities = new Set();
   for (const d of result.decisions) {
+    if (!d || typeof d !== 'object' || Array.isArray(d)) return false;
     const task = prepared.tasks.find(t => String(t.record_id) === String(d.record_id));
     if (!task || ids.has(String(d.record_id)) || d.task_key !== task.key ||
         typeof d.action !== 'string' || !d.action.trim() || !['do', 'defer', 'confirm'].includes(d.disposition) ||
