@@ -10,4 +10,10 @@ function safeClarification(value) {
   const text = typeof value === 'string' ? value.trim() : '';
   return MESSAGES.includes(text) ? text : MESSAGES[0];
 }
-module.exports = { MESSAGES, safeClarification };
+function publicError(error) {
+  // Native JSON/filesystem failures contain English text and internal paths.
+  if (error?.code || error instanceof SyntaxError || error instanceof TypeError)
+    return 'Üretim işlemi tamamlanamadı; planı yenileyip tekrar deneyin.';
+  return error?.message || 'Üretim işlemi tamamlanamadı; planı yenileyip tekrar deneyin.';
+}
+module.exports = { MESSAGES, safeClarification, publicError };

@@ -422,25 +422,25 @@ app.post('/api/agent/operations/report', checkApiKey, async (req, res) => {
     if (result.saved) result.panel_sync = service.panelSnapshot();
     res.json(result);
   }
-  catch (e) { res.status(422).json({ error: e.message }); }
+  catch (e) { res.status(422).json({ error: require('./agent/operations/clarification').publicError(e) }); }
 });
 app.post('/api/agent/operations/plan', checkApiKey, async (req, res) => {
   try { res.json(await require('./agent/operations/service').finalPlan()); }
-  catch (e) { res.status(409).json({ error: e.message }); }
+  catch (e) { res.status(409).json({ error: require('./agent/operations/clarification').publicError(e) }); }
 });
 app.post('/api/agent/operations/jev/config', checkApiKey, (req, res) => {
   try {
     const config = require('./agent/operations/jev-client').configure(req.body?.api_key);
     res.json({ configured: config.configured, model: config.model });
-  } catch (e) { res.status(422).json({ error: e.message }); }
+  } catch (e) { res.status(422).json({ error: require('./agent/operations/clarification').publicError(e) }); }
 });
 app.post('/api/agent/operations/jev/check', checkApiKey, async (req, res) => {
   try { res.json(await require('./agent/operations/service').checkFinalConnection()); }
-  catch (e) { res.status(503).json({ error: e.message }); }
+  catch (e) { res.status(503).json({ error: require('./agent/operations/clarification').publicError(e) }); }
 });
 app.post('/api/agent/operations/check', checkApiKey, async (req, res) => {
   try { res.json(await require('./agent/operations/service').checkConnection()); }
-  catch (e) { res.status(503).json({ error: e.message, diagnostic: e.diagnostic || null }); }
+  catch (e) { res.status(503).json({ error: require('./agent/operations/clarification').publicError(e), diagnostic: e.diagnostic || null }); }
 });
 app.post('/api/agent/operations/undo', checkApiKey, async (req, res) => {
   try {
@@ -453,7 +453,7 @@ app.post('/api/agent/operations/undo', checkApiKey, async (req, res) => {
     result.stage_sync = undone.stage_sync;
     res.json(result);
   }
-  catch (e) { res.status(409).json({ error: e.message }); }
+  catch (e) { res.status(409).json({ error: require('./agent/operations/clarification').publicError(e) }); }
 });
 app.post('/api/agent/operations/rule', checkApiKey, async (req, res) => {
   try {
@@ -462,7 +462,7 @@ app.post('/api/agent/operations/rule', checkApiKey, async (req, res) => {
     try { res.json(await service.finalPlan()); }
     catch (_) { res.json(service.snapshot()); }
   }
-  catch (e) { res.status(409).json({ error: e.message }); }
+  catch (e) { res.status(409).json({ error: require('./agent/operations/clarification').publicError(e) }); }
 });
 
 // Read-only ledger shared by the browser plan and the morning agent.

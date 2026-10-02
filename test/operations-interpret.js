@@ -31,3 +31,12 @@ test('adapter preserves approved Turkish clarifications and replaces any other l
     assert.doesNotMatch(result.clarification, /Please/);
   }
 });
+
+test('native provider-independent failures are Turkish while existing Turkish errors survive', () => {
+  const { publicError } = require('../agent/operations/clarification');
+  for (const error of [new SyntaxError('Unexpected token'), new TypeError('Cannot read properties'), Object.assign(new Error('permission denied'), { code: 'EACCES' })]) {
+    assert.match(publicError(error), /Üretim işlemi tamamlanamadı/);
+    assert.doesNotMatch(publicError(error), /Unexpected|Cannot|permission/);
+  }
+  assert.equal(publicError(new Error('Plan değişti; yenileyip tekrar kaydedin.')), 'Plan değişti; yenileyip tekrar kaydedin.');
+});
