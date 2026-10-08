@@ -204,3 +204,48 @@ changed capacity inputs reuse the existing single batched evaluation.
 
 Run `npm run operations` for capacity, cached allocation, reports, undo and CAS
 checks; run `npm run uretim` for the separate legacy production workflow.
+
+## Product recipes (2026-10-08)
+
+`agent/operations/recipes.json` holds the general production recipe of each product
+(user statement of 2026-10-05, Beyin `notes/mercitex/uretim-receteleri-2026-10-05.md`):
+grams of material per unit (`kumas`, `kaskorse`, `ribana`, `astar`; never g/m²),
+ordered steps, and product-specific notes. Product keys match the Üretim Takip
+`product_type` field (`esofman` is eşofman altı). To change a recipe, edit this
+file, run `npm run operations` and deploy; the file is validated at load and its
+derived values are planning inputs, so the cached final plan is re-evaluated.
+
+`recipes.js` computes everything deterministically; the model never produces kg,
+counts or dates:
+
+- **Material need** for jobs that are not cut yet (`Kumaş Bekleniyor`, `Kumaş Geldi`,
+  `Kesimde`): units (explicit reported cut remainder, else order quantity) × g/unit,
+  shown as `≈` kg (one decimal below 10 kg), labelled *fire hariç*. Unknown amounts
+  (eşofman paça kaşkorse) are named, never estimated. No product or no quantity
+  means no calculation, stated explicitly.
+- **Preparation confirmations:** tam/yarım fermuar → zipper; polar → zipper only
+  "modelde fermuar varsa"; polo → yaka-kol. Shown until a report confirms them;
+  they never block work by themselves.
+- **Product steps:** polo yaka-kol and tela cut, yarım fermuar yaka cut, astar cut,
+  kordonlu kapüşon/kemer to the ilikçi, tişört biyelik to sewing, eşofman/şort
+  kemerleme, polo ilik-düğme after sewing.
+- **Kordon / Astar** panel fields (`cord`, `lining`: `var` / `yok` / empty) make the
+  ilik and astar notes definite and include astar kg only for `var`; empty keeps a
+  conditional note. They do not affect report fingerprints.
+
+Decisions carry a `recipe` object (`text`, `materials`, `preparations`, `hints`)
+next to the unchanged `action`; panel and daily mail show `action` + `recipe.text`.
+The Jev state includes each product's steps once (`product_recipes`) and a compact
+per-record `recipe`. Cached plans are rejected if a decision's recipe differs.
+
+New report operations: `zipper` (Fermuar temini), `collar` (Yaka-kol temini) and
+`buttonhole` (İlik / düğme). Supply reports (`zipper`, `collar`) are journal facts
+only: they never move, pin or revert the kanban stage, are ignored for staleness,
+and their undo does not touch the stage. `buttonhole` moves the stage only for
+products whose recipe has ilik-düğme after sewing (polo): **user decision
+2026-10-08**, a polo with finished sewing stays `Dikimde` with "ilik-düğmeye
+gönder" until ilik-düğme is reported, then moves to `Ütü-Pakette-Teslimat Bekliyor`.
+The interpreter still makes one Haiku call per report.
+
+Stock tracking (`/api/stokdata`) is intentionally not read or written yet; material
+keys and kg units are kept stable for that later step.

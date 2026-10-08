@@ -8,7 +8,9 @@ const { URETIM_STATUSES } = require('../lib/enums');
 const valid = value => URETIM_STATUSES.includes(value);
 function assessment(record, jobs, events) {
   const active = events.filter(e => String(e.record_id) === String(record.id) && !e.voided);
-  const last = active.at(-1), entries = core.latest(events, record.id);
+  const entries = core.latest(events, record.id);
+  // Supply-only reports (e.g. "fermuar geldi") never pin or move the kanban stage.
+  const last = active.filter(e => core.stageEntries(record, e.entries).length).at(-1);
   if (!last) return { entries, revision: null, stale: false };
   const tracked = valid(last.basis_status);
   const basis = tracked ? { ...record, status: last.basis_status } : record;

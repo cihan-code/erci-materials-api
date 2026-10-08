@@ -121,8 +121,9 @@ async function submit(params, interpreter = interpret) {
       basis_status: record.status, product_type: record.product_type || '', quantity: record.quantity, date, recorded_at: new Date().toISOString(), text, entries, usage: output.usage };
     journal.events.push(event); journal.revision++;
     const current = getRecord(fresh, record.id);
-    const target = core.revision(current, core.latest(journal.events, record.id), core.decoration(current, fresh.jobs))?.status;
-    const change = stageSync.begin(journal, current, fresh.jobs, target, 'report', event.id);
+    // Supply-only reports are recorded without touching the kanban stage.
+    const change = core.stageEntries(current, entries).length ? stageSync.begin(journal, current, fresh.jobs,
+      core.revision(current, core.latest(journal.events, record.id), core.decoration(current, fresh.jobs))?.status, 'report', event.id) : null;
     store.write(journal); // durable intent before changing kanban
     stageSync.recover(journal);
     return { saved: true, stage_sync: stageSync.publicChange(change), summary: entries.map(core.describe).join('\n'), usage: output.usage, snapshot: snapshot(undefined, journal) };
@@ -134,17 +135,26 @@ async function undo(params) {
     const event = journal.events.find(e => e.id === params.event_id);
     if (!event) throw new Error('Bildirim bulunamadı.');
     const prior = journal.stage_syncs?.[String(event.record_id)];
+    // Supply-only reports never changed the kanban, so undoing them must not either.
+    const found = panel.loadPanelData().data?.uretimTakip?.find(r => String(r.id) === String(event.record_id));
+    const supplyOnly = !core.stageEntries(found || {}, event.entries).length;
+    if (event.voided && supplyOnly) return { ...snapshot(undefined, journal), stage_sync: null, reused: true };
     if (event.voided && prior?.operation === 'undo' && prior.event_id === event.id)
       return { ...snapshot(undefined, journal), stage_sync: stageSync.publicChange(prior), reused: true };
     if (event.voided) throw new Error('Bu bildirim zaten geri alınmış.');
     if (params.revision !== journal.revision) throw new Error('Günlük değişti; yenileyin.');
     const { data } = panel.loadPanelData();
     const record = getRecord(data, event.record_id);
+    if (supplyOnly) {
+      event.voided = new Date().toISOString(); journal.revision++; store.write(journal);
+      return { ...snapshot(undefined, journal), stage_sync: null };
+    }
     const before = stageSync.assessment(record, data.jobs, journal.events);
     event.voided = new Date().toISOString(); journal.revision++;
     const after = stageSync.assessment(record, data.jobs, journal.events);
-    const first = journal.events.find(e => String(e.record_id) === String(record.id));
-    const last = journal.events.filter(e => String(e.record_id) === String(record.id) && !e.voided).at(-1);
+    const stageEvents = journal.events.filter(e => String(e.record_id) === String(record.id) && core.stageEntries(record, e.entries).length);
+    const first = stageEvents[0];
+    const last = stageEvents.filter(e => !e.voided).at(-1);
     const target = after.revision?.status || first?.basis_status;
     const warning = before.stale ? 'Aşama veya iş kaydı arada elle değişti; geri alma sırasında kanban aşamasına dokunulmadı.'
       : !stageSync.valid(target) || last && !stageSync.valid(last.basis_status)

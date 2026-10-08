@@ -40,7 +40,7 @@ function matches(result, prepared, config) {
         typeof d.action !== 'string' || !d.action.trim() || !['do', 'defer', 'confirm'].includes(d.disposition) ||
         (task.type === 'verify' ? d.disposition === 'do' : d.disposition === 'confirm') ||
         d.source !== source || !Number.isInteger(d.priority) || d.priority < 1 || d.priority > prepared.tasks.length ||
-        priorities.has(d.priority) || (d.confidence !== null &&
+        priorities.has(d.priority) || JSON.stringify(d.recipe ?? null) !== JSON.stringify(task.recipe ?? null) || (d.confidence !== null &&
           !(typeof d.confidence === 'number' && Number.isFinite(d.confidence) && d.confidence >= 0 && d.confidence <= 1))) return false;
     ids.add(String(d.record_id)); priorities.add(d.priority);
   }

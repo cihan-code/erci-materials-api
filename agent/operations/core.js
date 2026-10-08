@@ -4,17 +4,19 @@
 // validated revisions to the commercial kanban; this core only computes facts
 // solely from validated reports. Remaining counts are cumulative snapshots, not deltas.
 const crypto = require('crypto');
+const recipes = require('./recipes');
 const OPS = {
   fabric: 'Kumaş hazırlığı', cut: 'Kesim', print_dropoff: 'Baskıya sevk',
   print: 'Baskı', embroidery_dropoff: 'Nakışa sevk', embroidery: 'Nakış',
   sewing: 'Dikim', pack: 'Ütü / paket', delivery: 'Teslimat',
+  zipper: 'Fermuar temini', collar: 'Yaka-kol temini', buttonhole: 'İlik / düğme',
 };
 const ISSUES = {
   print_paper: { label: 'Baskı kâğıdı eksikliği', reminder: 'Baskıya sevkten önce tüm ürünlerin baskı kâğıtlarını sayıp teyit et.', ops: ['print', 'print_dropoff'] },
   print_file: { label: 'Baskı dosyası eksikliği', reminder: 'Baskıya sevkten önce dosyanın baskıcıya ulaştığını teyit et.', ops: ['print', 'print_dropoff'] },
   embroidery_file: { label: 'Nakış dosyası eksikliği', reminder: 'Nakışa sevkten önce dosyanın nakışçıya ulaştığını teyit et.', ops: ['embroidery', 'embroidery_dropoff'] },
-  material: { label: 'Malzeme eksikliği', reminder: 'İşe başlamadan önce kumaş ve yardımcı malzemeleri teyit et.', ops: ['fabric', 'cut', 'sewing'] },
-  supplier: { label: 'Atölye / tedarikçi beklemesi', reminder: 'Sevkten önce atölyenin teslim alma ve bitirme zamanını teyit et.', ops: ['print', 'embroidery', 'sewing'] },
+  material: { label: 'Malzeme eksikliği', reminder: 'İşe başlamadan önce kumaş ve yardımcı malzemeleri teyit et.', ops: ['fabric', 'cut', 'sewing', 'zipper', 'collar'] },
+  supplier: { label: 'Atölye / tedarikçi beklemesi', reminder: 'Sevkten önce atölyenin teslim alma ve bitirme zamanını teyit et.', ops: ['print', 'embroidery', 'sewing', 'buttonhole'] },
   other: { label: 'Diğer engel', reminder: '', ops: [] },
 };
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -68,11 +70,16 @@ const ACTIVE_STAGES = {
   sewing: 'Dikimde', pack: 'Ütü-Pakette-Teslimat Bekliyor', delivery: 'Ütü-Pakette-Teslimat Bekliyor',
 };
 const STAGE_ORDER = ['Kumaş Geldi', 'Kesimde', 'Baskı/Nakışta', 'Dikimde', 'Ütü-Pakette-Teslimat Bekliyor'];
-function revision(record, entries, deco) {
+const stageEntries = (record, entries) => recipes.stageEntries(record, entries);
+// Stage facts come only from entries that may move the kanban (see recipes.stageEntries).
+function revision(record, allEntries, deco) {
+  const entries = stageEntries(record, allEntries);
   if (!entries.length) return null;
+  const post = recipes.postSewingOp(record.product_type);
   const incomplete = entries.filter(e => e.status !== 'completed');
   const active = incomplete.filter(e => ['partial', 'in_progress'].includes(e.status));
-  const stage = active.map(e => ACTIVE_STAGES[e.op]).sort((a, b) => STAGE_ORDER.indexOf(a) - STAGE_ORDER.indexOf(b))[0];
+  const stage = active.map(e => e.op === post ? 'Dikimde' : ACTIVE_STAGES[e.op]).filter(Boolean)
+    .sort((a, b) => STAGE_ORDER.indexOf(a) - STAGE_ORDER.indexOf(b))[0];
   if (incomplete.length) return {
     status: stage || record.status, section: 'Gün içi revizyon', hold: true,
     action: incomplete.map(e => e.status === 'partial' ? partialAction(e) : describe(e)).join('; '),
@@ -81,6 +88,8 @@ function revision(record, entries, deco) {
   const done = new Set(entries.map(e => e.op));
   if (done.has('delivery')) return { status: 'Teslim Edildi', section: 'Tamamlanan', hold: false, action: 'Teslimat tamamlandı.', note: '' };
   if (done.has('pack')) return { status: 'Ütü-Pakette-Teslimat Bekliyor', section: 'Ütü / Paket / Teslimat', hold: false, action: 'Ütü / paket tamamlandı; teslimatı planla.', note: '' };
+  if (post && done.has(post)) return { status: 'Ütü-Pakette-Teslimat Bekliyor', section: 'Ütü / Paket / Teslimat', hold: false, action: 'İlik-düğme tamamlandı; ütü / paket yap.', note: '' };
+  if (post && done.has('sewing')) return { status: 'Dikimde', section: 'Dikim', hold: true, action: 'Dikim tamamlandı; ilik-düğmeye gönder.', note: '' };
   if (done.has('sewing')) return { status: 'Ütü-Pakette-Teslimat Bekliyor', section: 'Ütü / Paket / Teslimat', hold: false, action: 'Dikim tamamlandı; ütü / paket yap.', note: '' };
   if (done.has('print') || done.has('embroidery')) {
     const ready = deco === 'baski' ? done.has('print') : deco === 'nakis' ? done.has('embroidery') : deco === 'ikisi' ? done.has('print') && done.has('embroidery') : false;
@@ -93,4 +102,4 @@ function revision(record, entries, deco) {
     action: 'Kesim tamamlandı; ' + ({ baski: 'baskıya götür.', nakis: 'nakışa götür.', ikisi: 'ilgili parçaları baskıya ve nakışa götür.', yok: 'dikime götür.' }[deco] || 'baskı/nakış rotasını teyit et.'), note: '' };
   return { status: 'Kumaş Geldi', section: 'Kesim', hold: false, action: 'Kumaş hazır; kesimi planla.', note: '' };
 }
-module.exports = { OPS, ISSUES, STATUS, hash, decoration, fingerprint, validateEntries, latest, describe, partialAction, revision };
+module.exports = { OPS, ISSUES, STATUS, hash, decoration, fingerprint, validateEntries, latest, describe, partialAction, stageEntries, revision };

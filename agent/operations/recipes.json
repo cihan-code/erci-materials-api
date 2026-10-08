@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "source": "Beyin notes/mercitex/uretim-receteleri-2026-10-05.md (kullanıcı beyanı, 2026-10-05)",
+  "materials": { "kumas": "kumaş", "kaskorse": "kaşkorse", "ribana": "ribana", "astar": "astar" },
+  "products": {
+    "sweat": {
+      "label": "Sweatshirt",
+      "materials": [
+        { "key": "kumas", "g_per_unit": 720 },
+        { "key": "kaskorse", "g_per_unit": 125 },
+        { "key": "astar", "g_per_unit": 50, "when": "lining" }
+      ],
+      "lining": true, "cord_part": "kapüşonu", "cord_piece": "kapüşon",
+      "steps": [
+        "Kumaş kesimi yapılır.", "Kaşkorse kesimi yapılır.", "Modelde astar varsa astar kesimi yapılır.",
+        "Model kordonluysa kapüşon, ilik işlemine gönderilir.", "Baskı/nakış uygulanacak parçalar baskı/nakış işlemine gönderilir.",
+        "Kalan parçalar doğrudan dikime gönderilir.", "İlik ve baskı/nakış işlemleri tamamlanan parçalar dikime gönderilir.",
+        "Tüm parçaların dikimi tamamlanır.", "Dikimi tamamlanan sweatshirt paketlenir."
+      ]
+    },
+    "tisort": {
+      "label": "Tişört",
+      "materials": [
+        { "key": "kumas", "g_per_unit": 250 },
+        { "key": "ribana", "g_per_unit": 10 }
+      ],
+      "sewing_hint": "Biyelik kumaşı da dikime gönder.",
+      "steps": [
+        "Tişört kumaşının kesimi yapılır.", "Ribana kesimi yapılır.", "Modelde baskı veya nakış varsa ilgili parçalar bu işleme gönderilir.",
+        "Kalan parçalar biyelik kumaşla birlikte dikime gönderilir.", "Baskı veya nakış işlemi tamamlanan parçalar dikime gönderilir.",
+        "Tüm parçaların dikimi tamamlanır.", "Dikimi tamamlanan tişörte ütü ve paket işlemi uygulanır."
+      ]
+    },
+    "polar": {
+      "label": "Polar",
+      "materials": [{ "key": "kumas", "g_per_unit": 650 }],
+      "preparations": [{ "op": "zipper", "label": "Fermuar temini", "condition": "modelde fermuar varsa" }],
+      "steps": [
+        "Polar kumaşının kesimi yapılır.", "Modelde fermuar varsa modele uygun fermuar tedarikçiden temin edilir.",
+        "Modelde baskı veya nakış varsa ilgili parçalar bu işleme gönderilir.", "Kalan parçalar doğrudan dikime gönderilir.",
+        "Baskı veya nakış işlemi tamamlanan parçalar dikime gönderilir.", "Tüm parçaların dikimi tamamlanır.",
+        "Dikimi tamamlanan polar ürüne ütü ve paket işlemi uygulanır."
+      ]
+    },
+    "polo": {
+      "label": "Polo yaka",
+      "materials": [{ "key": "kumas", "g_per_unit": 250 }],
+      "preparations": [{ "op": "collar", "label": "Yaka-kol siparişi" }],
+      "extra_cut": "yaka-kol ve tela", "post_sewing_op": "buttonhole",
+      "steps": [
+        "Yaka ve kol, iş adedine göre sipariş edilir.", "Polo yaka kumaşının kesimi yapılır.", "Yaka ve kol kesimi yapılır.",
+        "Tela kesimi yapılır.", "Modelde baskı veya nakış varsa ilgili parçalar bu işleme gönderilir.",
+        "Kalan parçalar doğrudan dikime gönderilir.", "Baskı veya nakış tamamlandığında tüm parçalar dikime gönderilir.",
+        "Tüm parçaların dikimi tamamlanır.", "Dikimi tamamlanan ürün ilik-düğme işlemine gönderilir; ilikler açılır ve düğmeler takılır.",
+        "Ütü ve paket işlemi yapılarak ürün teslime hazır hale getirilir."
+      ]
+    },
+    "esofman": {
+      "label": "Eşofman",
+      "materials": [
+        { "key": "kumas", "g_per_unit": 650 },
+        { "key": "kaskorse", "g_per_unit": null, "condition": "paçada kaşkorse varsa" }
+      ],
+      "cord_part": "kemeri", "cord_piece": "kemer", "sewing_note": "Dikimde kemerleme yapılır; paça modele göre kaşkorse, reçme veya lastik.",
+      "steps": [
+        "Eşofman altı kumaşının kesimi yapılır.", "Paçada kaşkorse varsa kaşkorse kesilir; yoksa bu adım uygulanmaz.",
+        "Modelde baskı veya nakış varsa ilgili parçalar bu işleme gönderilir.",
+        "Modelde kordon varsa kemer kısmına ilik açılması için ilikçiye gönderilir.", "Kalan parçalar doğrudan dikime gönderilir.",
+        "Baskı, nakış ve ilik işlemleri tamamlandığında tüm parçalar dikime gönderilir.", "Dikimde kemerleme işlemi yapılır.",
+        "Kalan kısımların dikimi tamamlanır. Paça modele göre kaşkorse, reçme veya lastik olarak uygulanır.",
+        "Dikimi tamamlanan eşofman altına ütü ve paket işlemi uygulanır."
+      ]
+    },
+    "sort": {
+      "label": "Şort",
+      "materials": [{ "key": "kumas", "g_per_unit": 500 }],
+      "cord_part": "kemeri", "cord_piece": "kemer", "sewing_note": "Dikimde kemerleme yapılır; tüm paçalar reçme.",
+      "steps": [
+        "Şort kumaşının kesimi yapılır.", "Modelde baskı veya nakış varsa ilgili parçalar bu işleme gönderilir.",
+        "Modelde kordon varsa kemer kısmına ilik açılması için ilikçiye gönderilir.", "Kalan parçalar doğrudan dikime gönderilir.",
+        "Baskı, nakış ve ilik işlemleri tamamlandığında tüm parçalar dikime gönderilir.", "Dikimde kemerleme işlemi yapılır.",
+        "Kalan kısımların dikimi tamamlanır. Tüm paçalara reçme işlemi uygulanır.", "Dikimi tamamlanan şorta ütü ve paket işlemi uygulanır."
+      ]
+    },
+    "tam_fermuar": {
+      "label": "Tam fermuarlı",
+      "materials": [
+        { "key": "kumas", "g_per_unit": 720 },
+        { "key": "kaskorse", "g_per_unit": 125 },
+        { "key": "astar", "g_per_unit": 50, "when": "lining" }
+      ],
+      "lining": true, "cord_part": "kapüşonu", "cord_piece": "kapüşon",
+      "preparations": [{ "op": "zipper", "label": "Tam fermuar temini" }],
+      "steps": [
+        "Modele uygun tam fermuar, üretim öncesinde uygun üreticiden sipariş edilir.", "Kumaş kesimi yapılır.", "Kaşkorse kesimi yapılır.",
+        "Modelde astar varsa astar kesimi yapılır.", "Model kordonluysa kapüşon, ilik işlemine gönderilir.",
+        "Baskı/nakış uygulanacak parçalar baskı/nakış işlemine gönderilir.", "Kalan parçalar doğrudan dikime gönderilir.",
+        "İlik ve baskı/nakış işlemleri tamamlanan parçalar dikime gönderilir.", "Tüm parçalar ve tam fermuar dikilerek ürün tamamlanır.",
+        "Dikimi tamamlanan tam fermuarlı sweatshirt paketlenir."
+      ]
+    },
+    "yarim_fermuar": {
+      "label": "Yarım fermuarlı",
+      "materials": [
+        { "key": "kumas", "g_per_unit": 650 },
+        { "key": "kaskorse", "g_per_unit": 125 }
+      ],
+      "extra_cut": "yaka",
+      "preparations": [{ "op": "zipper", "label": "Yarım fermuar temini" }],
+      "steps": [
+        "Modele uygun yarım fermuar, üretim öncesinde uygun üreticiden sipariş edilir.", "Kumaş kesimi yapılır.", "Yaka kesimi yapılır.",
+        "Kaşkorse kesimi yapılır.", "Baskı/nakış uygulanacak parçalar baskı/nakış işlemine gönderilir.",
+        "Kalan parçalar doğrudan dikime gönderilir.", "Baskı/nakış işlemleri tamamlanan parçalar dikime gönderilir.",
+        "Tüm parçalar ve yarım fermuar dikilerek ürün tamamlanır.", "Dikimi tamamlanan yarım fermuarlı sweatshirt paketlenir."
+      ]
+    }
+  }
+}
