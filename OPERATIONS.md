@@ -205,6 +205,15 @@ changed capacity inputs reuse the existing single batched evaluation.
 Run `npm run operations` for capacity, cached allocation, reports, undo and CAS
 checks; run `npm run uretim` for the separate legacy production workflow.
 
+**Correction (2026-10-08, after the first live plan):** capacity never overrules the
+model's decision because of missing inputs. A job without product or quantity keeps
+its do/defer choice with an explicit "hesaplanamadı" note and no invented amount;
+only a reported obstacle, or no sewing hours left today, defers it. Cutting limits
+depend on order size only, so cutting is allocated without a product (an unknown
+size counts as a large order). Model-deferred cuts are placed after the do-jobs and
+never hold today's slot; blocked cuts use no cutting capacity. Before this fix the
+live plan (no products selected yet) turned every cut and sewing job into "defer".
+
 ## Product recipes (2026-10-08)
 
 `agent/operations/recipes.json` holds the general production recipe of each product

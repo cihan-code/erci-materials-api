@@ -125,3 +125,27 @@ test('rates, product inputs and setup are part of the model context and cache id
   data.uretimTakip[0].product_type = 'tisort';
   assert.notEqual(context.prepare(data, snapshot, 'test', '2026-10-08').state_hash, one.state_hash);
 });
+test('a model-deferred cut never holds today\'s slot; the next do-job is cut today', () => {
+  const plan = run([facts(1, 100, 'sweat', 'cut'), facts(2, 100, 'sweat', 'cut')], '2026-10-08', 'sweat', { 1: { disposition: 'defer' } });
+  const [first, second] = plan.decisions;
+  assert.equal(second.disposition, 'do'); assert.equal(second.capacity.today_quantity, 100);
+  assert.equal(first.disposition, 'defer'); assert.equal(first.capacity.estimated_finish, '2026-10-09');
+});
+test('unknown product or amount keeps the model decision without inventing amounts', () => {
+  // Cutting limits depend on order size only: a job without a product still uses today's single large slot.
+  const cut = run([facts(1, 100, '', 'cut'), facts(2, 100, 'sweat', 'cut')]);
+  assert.equal(cut.decisions[0].disposition, 'do'); assert.equal(cut.decisions[0].capacity.today_quantity, 100);
+  assert.equal(cut.decisions[1].disposition, 'defer');
+  const noAmount = run([facts(1, null, 'sweat', 'cut', { order_quantity: null })]);
+  assert.equal(noAmount.decisions[0].disposition, 'do'); assert.equal(noAmount.decisions[0].capacity.status, 'unavailable');
+  assert.equal(noAmount.decisions[0].capacity.today_quantity, null);
+  assert.match(noAmount.decisions[0].action, /^Original Adet yok/);
+  const sewing = run([facts(1, 100, ''), facts(2, 100)]);
+  assert.deepEqual(sewing.decisions.map(d => d.disposition), ['do', 'do']);
+  assert.ok(sewing.decisions.every(d => d.capacity.status === 'unavailable' && d.capacity.today_quantity === null));
+  assert.match(sewing.decisions[0].action, /^Dikime devam et\. Ürün seçilmemiş/);
+  // A real obstacle still defers and uses no cutting capacity.
+  const blocked = run([facts(1, 100, 'sweat', 'cut', { blocked: true, reason: 'kumaş eksik' }), facts(2, 100, 'sweat', 'cut')]);
+  assert.equal(blocked.decisions[0].disposition, 'defer'); assert.equal(blocked.decisions[0].capacity.status, 'blocked');
+  assert.equal(blocked.decisions[1].disposition, 'do'); assert.equal(blocked.decisions[1].capacity.today_quantity, 100);
+});

@@ -132,13 +132,24 @@ function allocate(prepared, decisions) {
     c.message = c.message || description(c);
     if (f.reason && !c.message.includes(f.reason)) c.message += ' ' + f.reason;
     d.capacity = c;
-    if (c.status !== 'scheduled' || c.today_quantity === 0) d.disposition = 'defer';
-    d.action = (f.queue === 'handoff' ? 'Dikim kuyruğuna al. ' : '') + c.message;
+    // Unknown inputs never invent amounts, but they do not overrule the model's decision either:
+    // only a real obstacle or no sewing hours left today defers the job.
+    if (c.status === 'blocked' || (c.status === 'scheduled' && c.today_quantity === 0)) d.disposition = 'defer';
+    d.action = (f.queue === 'handoff' ? 'Dikim kuyruğuna al. ' : c.status === 'unavailable' ? 'Dikime devam et. ' : '') + c.message;
   }
   let cutSlots = [], cutDay = start;
-  for (const { task, d, f } of tasks.filter(x => x.f.station === 'cut').sort((a, b) => a.d.priority - b.d.priority)) {
+  // Model-deferred jobs never hold today's slot; blocked work uses no cutting capacity.
+  const cuts = tasks.filter(x => x.f.station === 'cut').sort((a, b) =>
+    (a.d.disposition === 'defer') - (b.d.disposition === 'defer') || a.d.priority - b.d.priority);
+  for (const { task, d, f } of cuts) {
     const c = { version: 1, ...f, status: 'scheduled', today_quantity: null, remaining_after_today: null,
       estimated_finish: null, risk_days: null, boost: null };
+    if (f.blocked) {
+      c.status = 'blocked'; c.message = 'Kesim engeli sürüyor; kapasite hesaplanamadı. ' + f.reason;
+      d.disposition = 'defer'; d.capacity = c; d.action = c.message;
+      continue;
+    }
+    // Cutting limits depend on order size only, not on the product; an unknown size counts as large.
     const small = f.order_quantity != null && f.order_quantity < cfg.cutting.small_order_below;
     const canJoin = () =>
       (small && cutSlots.every(s => s.small) && cutSlots.length < cfg.cutting.small_orders_per_day) ||
@@ -146,20 +157,17 @@ function allocate(prepared, decisions) {
       ((d.urgent || cutSlots.some(s => s.urgent)) && cutSlots.length < cfg.cutting.urgent_orders_per_day);
     if ((cutDay === today && d.disposition === 'defer') || (cutSlots.length && !canJoin())) { cutDay = workingDay(nextDay(cutDay), cfg); cutSlots = []; }
     cutSlots.push({ small, urgent: !!d.urgent });
-    if (!f.product_type || f.quantity == null || f.blocked) {
-      c.status = f.blocked ? 'blocked' : 'unavailable';
-      c.message = f.blocked ? 'Kesim engeli sürüyor; kapasite hesaplanamadı. ' + f.reason
-        : !f.product_type ? 'Ürün seçilmemiş, kapasite hesaplanamadı.' : 'Adet yok veya geçersiz; kesim miktarı hesaplanamadı.';
+    if (f.quantity == null) {
+      c.status = 'unavailable'; c.message = 'Adet yok veya geçersiz; kesim miktarı hesaplanamadı.';
     } else {
       c.today_quantity = cutDay === today ? f.quantity : 0;
       c.remaining_after_today = rounded(f.quantity - c.today_quantity); c.estimated_finish = cutDay;
       c.risk_days = risk(cutDay, f.delivery_date); c.message = description(c);
-      if (cutDay !== today) d.disposition = 'defer';
       if (d.urgent) c.message += ' Acil kesim kapasitesi kullanılıyor (günde en fazla ≈' + cfg.cutting.urgent_orders_per_day + ' sipariş).';
     }
     if (f.reason && !c.message.includes(f.reason)) c.message += ' ' + f.reason;
-    if (c.status !== 'scheduled') d.disposition = 'defer';
-    d.capacity = c; d.action = c.message;
+    if (cutDay !== today) d.disposition = 'defer';
+    d.capacity = c; d.action = c.status === 'scheduled' ? c.message : task.action + ' ' + c.message;
   }
   summary.transitions_today = summary.transitions_today.map(t => ({ ...t, from_label: cfg.products[t.from_type].label, to_label: cfg.products[t.to_type].label }));
   return { decisions, capacity: summary };
