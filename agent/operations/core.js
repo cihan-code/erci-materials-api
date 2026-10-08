@@ -25,7 +25,9 @@ function decoration(record, jobs = []) {
   return p && e ? 'ikisi' : p ? 'baski' : e ? 'nakis' : '';
 }
 function fingerprint(record, jobs) {
-  return hash([record.id, record.customer_name, record.quantity, record.status, decoration(record, jobs), record.est_delivery]);
+  const fields = [record.id, record.customer_name, record.quantity, record.status, decoration(record, jobs), record.est_delivery];
+  if (record.product_type) fields.push(record.product_type); // preserve old untyped fingerprints
+  return hash(fields);
 }
 function validateEntries(entries, record, text) {
   if (!Array.isArray(entries) || !entries.length || entries.length > 9) throw new Error('İşlem anlaşılamadı; yapılan işlemi açıkça yazın.');

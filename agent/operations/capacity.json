@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "workday": { "start": "09:00", "end": "19:00", "hours": 10, "closed_weekdays": [0] },
+  "sewing": { "transition_hours": 3, "boost_factor": 1.15, "max_forecast_workdays": 3660 },
+  "cutting": { "small_order_below": 50, "small_orders_per_day": 2, "large_orders_per_day": 1, "urgent_orders_per_day": 2 },
+  "products": {
+    "sweat": { "label": "Sweatshirt", "sewing_per_day": 200 },
+    "tisort": { "label": "Tişört", "sewing_per_day": 230 },
+    "polar": { "label": "Polar", "sewing_per_day": 100 },
+    "polo": { "label": "Polo yaka", "sewing_per_day": 100 },
+    "esofman": { "label": "Eşofman", "sewing_per_day": 160 },
+    "yarim_fermuar": { "label": "Yarım fermuarlı", "sewing_per_day": 150 },
+    "tam_fermuar": { "label": "Tam fermuarlı", "sewing_per_day": 150 },
+    "sort": { "label": "Şort", "sewing_per_day": 150 }
+  }
+}

@@ -34,6 +34,25 @@ function response(questions) {
       probabilities: Object.fromEntries(keys.map(key => [key, key === selected ? 1 : 0])) }];
   })) };
 }
+test('typed capacity plans share the cached allocation and product edits invalidate it', async () => {
+  reset();
+  const typed = [1, 2].map(id => ({ id, customer_name: 'Synthetic ' + id, quantity: 250,
+    status: 'Dikimde', decoration: 'yok', product_type: 'sweat' }));
+  writePanel(typed); store.write({ version: 1, revision: 0, rules: {}, events: [] });
+  let calls = 0;
+  const infer = async (_, questions) => { calls++; return response(questions); };
+  const first = await service.finalPlan(infer), second = await service.finalPlan(infer);
+  assert.equal(calls, 1);
+  assert.equal(first.plan.status, 'ready');
+  assert.deepEqual(first.plan, second.plan);
+  assert.deepEqual(service.snapshot().plan, first.plan);
+  assert.equal(first.plan.decisions.filter(d => d.capacity.today_quantity > 0).length,
+    first.plan.capacity.workday.closed_weekdays.includes(new Date(first.plan.date + 'T00:00:00Z').getUTCDay()) ? 0 : 1);
+  assert.equal(store.read().events.length, 0);
+  writePanel(typed.map(r => r.id === 1 ? { ...r, product_type: 'tisort' } : r));
+  assert.equal(service.snapshot().plan.status, 'stale');
+  await service.finalPlan(infer); assert.equal(calls, 2);
+});
 test('one final evaluation sees all stages, actual progress, blockers and accepted rules', async () => {
   reset();
   const data = { uretimTakip: records, jobs: [] }, view = service.snapshot(data, store.read(), false);

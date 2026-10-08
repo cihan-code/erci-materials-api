@@ -5,6 +5,7 @@ const core = require('./core');
 const { istanbulDay } = require('../lib/util');
 const { interpret } = require('./interpret');
 const memory = require('./memory');
+const capacity = require('./capacity');
 const { safeClarification } = require('./clarification');
 const jevContext = require('./jev-context');
 const jevClient = require('./jev-client');
@@ -51,7 +52,7 @@ function snapshot(data = panel.loadPanelData().data, journal = store.read(), inc
         : assessed.revision,
       stale, history: events.slice(-20).reverse().map(e => ({ id: e.id, date: e.date, text: e.text, entries: e.entries })) };
   });
-  const result = { version: 1, revision: journal.revision, records, knowledge,
+  const result = { version: 1, revision: journal.revision, records, knowledge, sewing_setup: capacity.previousSetup(journal, today()),
     build: process.env.RENDER_GIT_COMMIT || null,
     configured: !!process.env.ANTHROPIC_API_KEY, model: require('../pricing').HAIKU };
   if (includePlan) {
@@ -87,7 +88,7 @@ async function checkFinalConnection(evaluator = jevClient.evaluate) {
   const prepared = jevContext.prepare(data, view, jevClient.config().model);
   const response = jevClient.validate_choices(await evaluator(prepared.state, prepared.questions), prepared.questions);
   return { ok: true, synthetic: true, saved: false, model: response.model, considered_count: prepared.considered_count,
-    record_count: prepared.tasks.length, decisions: jevContext.decisions(prepared, response), usage: response.usage || null };
+    record_count: prepared.tasks.length, decisions: capacity.allocate(prepared, jevContext.decisions(prepared, response)).decisions, usage: response.usage || null };
 }
 async function submit(params, interpreter = interpret) {
   const text = String(params.text || '').trim();
@@ -117,7 +118,7 @@ async function submit(params, interpreter = interpret) {
     if (params.dry_run) return { saved: false, dry_run: true, entries,
       summary: entries.map(core.describe).join('\n'), usage: output.usage };
     const event = { id: params.request_id, record_id: record.id, fingerprint: params.fingerprint,
-      basis_status: record.status, quantity: record.quantity, date, recorded_at: new Date().toISOString(), text, entries, usage: output.usage };
+      basis_status: record.status, product_type: record.product_type || '', quantity: record.quantity, date, recorded_at: new Date().toISOString(), text, entries, usage: output.usage };
     journal.events.push(event); journal.revision++;
     const current = getRecord(fresh, record.id);
     const target = core.revision(current, core.latest(journal.events, record.id), core.decoration(current, fresh.jobs))?.status;

@@ -2,6 +2,7 @@
 const fs = require('fs'), path = require('path'), crypto = require('crypto');
 const { DATA_DIR } = require('../store');
 const context = require('./jev-context');
+const capacity = require('./capacity');
 const client = require('./jev-client');
 const file = path.join(DATA_DIR, 'operations', 'jev-plan.json');
 const pending = new Map();
@@ -16,11 +17,12 @@ function write(result) {
   finally { if (fs.existsSync(temp)) fs.unlinkSync(temp); }
 }
 function build(prepared, source, reason, answer, fingerprint) {
-  return { version: 1, status: !prepared.tasks.length ? 'empty' : source === 'jev' ? 'ready' : 'fallback', source,
+  const allocated = capacity.allocate(prepared, context.decisions(prepared, answer));
+  return { version: 1, capacity: allocated.capacity, status: !prepared.tasks.length ? 'empty' : source === 'jev' ? 'ready' : 'fallback', source,
     reason: reason || null, date: prepared.date, state_hash: prepared.state_hash,
     generated_at: new Date().toISOString(), model: answer?.model || client.config().model,
     record_count: prepared.tasks.length, considered_count: prepared.considered_count,
-    decisions: context.decisions(prepared, answer), credential_fingerprint: fingerprint || null };
+    decisions: allocated.decisions, credential_fingerprint: fingerprint || null };
 }
 function matches(result, prepared, config) {
   if (result?.state_hash !== prepared.state_hash || result.credential_fingerprint !== config.keyFingerprint ||
@@ -41,6 +43,12 @@ function matches(result, prepared, config) {
         priorities.has(d.priority) || (d.confidence !== null &&
           !(typeof d.confidence === 'number' && Number.isFinite(d.confidence) && d.confidence >= 0 && d.confidence <= 1))) return false;
     ids.add(String(d.record_id)); priorities.add(d.priority);
+  }
+  const expected = capacity.allocate(prepared, result.decisions.map(d => ({ ...d })));
+  if (JSON.stringify(result.capacity) !== JSON.stringify(expected.capacity)) return false;
+  for (const d of result.decisions) {
+    const correct = expected.decisions.find(x => String(x.record_id) === String(d.record_id));
+    if (correct.capacity && (JSON.stringify(d.capacity) !== JSON.stringify(correct.capacity) || d.action !== correct.action)) return false;
   }
   return true;
 }
