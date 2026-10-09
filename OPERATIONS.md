@@ -258,3 +258,11 @@ The interpreter still makes one Haiku call per report.
 
 Stock tracking (`/api/stokdata`) is intentionally not read or written yet; material
 keys and kg units are kept stable for that later step.
+
+**Mixed reports (2026-10-09):** a live report combined today's work with plans
+("…nakışa bırakıldı. Yarın … alınacak, kalanı pazartesi bitecek, Salı teslim") and
+was rejected as "another day". The interpreter now extracts today's events and
+silently ignores future/planned parts; the another-day clarification is only for
+reports whose every event explicitly happened on another day. Supply ordered but not
+arrived ("fermuar siparişi verildi") is `zipper` `in_progress`; arrived is `completed`.
+Still one Haiku call per report.
