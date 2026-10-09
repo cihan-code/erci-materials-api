@@ -5,6 +5,7 @@ const core = require('./core');
 const { istanbulDay } = require('../lib/util');
 const { interpret } = require('./interpret');
 const memory = require('./memory');
+const expectations = require('./expectations');
 const capacity = require('./capacity');
 const { safeClarification } = require('./clarification');
 const jevContext = require('./jev-context');
@@ -47,10 +48,12 @@ function snapshot(data = panel.loadPanelData().data, journal = store.read(), inc
       planning_basis: jevContext.planningBasis(record),
       stage_sync: stageSync.publicChange(journal.stage_syncs?.[String(record.id)]),
       reminders: memory.reminders(record, core.decoration(record, data.jobs), entries, knowledge),
+      expectations: expectations.open(record, journal.events, today(), core.OPS),
       revision: stale ? { status: record.status, section: 'Gün içi revizyon', hold: true,
         action: 'Panel kaydı bildirimden sonra değişti; son durumunu yeniden bildir.', note: '' }
         : assessed.revision,
-      stale, history: events.slice(-20).reverse().map(e => ({ id: e.id, date: e.date, text: e.text, entries: e.entries })) };
+      stale, history: events.slice(-20).reverse().map(e => ({ id: e.id, date: e.date, text: e.text, entries: e.entries,
+        expectations: (e.expectations || []).map(x => ({ ...x, label: core.OPS[x.op] })), delivery_change: e.delivery_change || null })) };
   });
   const result = { version: 1, revision: journal.revision, records, knowledge, sewing_setup: capacity.previousSetup(journal, today()),
     build: process.env.RENDER_GIT_COMMIT || null,
@@ -112,23 +115,37 @@ async function submit(params, interpreter = interpret) {
     if (last?.text === text && last.date === date && !stageSync.assessment(record, data.jobs, journal.events).stale) return { saved: true, reused: true, stage_sync: stageSync.publicChange(journal.stage_syncs?.[String(record.id)]), snapshot: snapshot(data, journal) };
     const output = await interpreter(text, { ...record, decoration: core.decoration(record, data.jobs) }, previous, date);
     if (output.clarification) return { saved: false, clarification: safeClarification(output.clarification), usage: output.usage };
-    const entries = core.validateEntries(output.entries, record, text);
+    // Dated plans ("pazartesi bitecek") are kept as expectations; dates come from code, never the model.
+    const expected = expectations.validate(output.expectations, text, date, core.OPS);
+    const entries = (Array.isArray(output.entries) && output.entries.length) || !expected.length ? core.validateEntries(output.entries, record, text) : [];
     const fresh = panel.loadPanelData().data;
     if (core.fingerprint(getRecord(fresh, record.id), fresh.jobs) !== params.fingerprint) throw new Error('İş kaydı yorumlama sırasında değişti; yenileyip tekrar deneyin.');
-    if (params.dry_run) return { saved: false, dry_run: true, entries,
-      summary: entries.map(core.describe).join('\n'), usage: output.usage };
-    const event = { id: params.request_id, record_id: record.id, fingerprint: params.fingerprint,
-      basis_status: record.status, product_type: record.product_type || '', quantity: record.quantity, date, recorded_at: new Date().toISOString(), text, entries, usage: output.usage };
-    journal.events.push(event); journal.revision++;
     const current = getRecord(fresh, record.id);
-    // Supply-only reports are recorded without touching the kanban stage.
-    const change = core.stageEntries(current, entries).length ? stageSync.begin(journal, current, fresh.jobs,
-      core.revision(current, core.latest(journal.events, record.id), core.decoration(current, fresh.jobs))?.status, 'report', event.id) : null;
+    const deadline = expected.find(x => x.op === 'delivery');
+    const delivery = deadline && deadline.date !== (current.est_delivery || null) ? { from: current.est_delivery || null, to: deadline.date } : null;
+    const summary = [...entries.map(core.describe), ...expected.filter(x => x.op !== 'delivery').map(expectationText),
+      ...(delivery ? [deliveryText(delivery)] : [])].join('\n');
+    if (params.dry_run) return { saved: false, dry_run: true, entries, expectations: expected, delivery_change: delivery, summary, usage: output.usage };
+    const event = { id: params.request_id, record_id: record.id, fingerprint: params.fingerprint,
+      basis_status: record.status, product_type: record.product_type || '', quantity: record.quantity, date, recorded_at: new Date().toISOString(), text, entries,
+      expectations: expected, ...(delivery ? { delivery_change: delivery } : {}), usage: output.usage };
+    journal.events.push(event); journal.revision++;
+    // Supply-only and expectation-only reports leave the kanban stage alone; a stated
+    // delivery date is patched with the same backup/CAS write as a stage change.
+    const stageReport = core.stageEntries(current, entries).length > 0;
+    const change = stageReport || delivery ? stageSync.begin(journal, current, fresh.jobs,
+      stageReport ? core.revision(current, core.latest(journal.events, record.id), core.decoration(current, fresh.jobs))?.status : current.status,
+      'report', event.id, undefined, delivery || undefined) : null;
+    if (delivery && change?.status === 'pending') event.fingerprint = core.fingerprint({ ...current, est_delivery: delivery.to }, fresh.jobs);
+    else delete event.delivery_change;
     store.write(journal); // durable intent before changing kanban
     stageSync.recover(journal);
-    return { saved: true, stage_sync: stageSync.publicChange(change), summary: entries.map(core.describe).join('\n'), usage: output.usage, snapshot: snapshot(undefined, journal) };
+    return { saved: true, stage_sync: stageSync.publicChange(change), summary, usage: output.usage, snapshot: snapshot(undefined, journal) };
   });
 }
+const short = date => date ? date.slice(8, 10) + '.' + date.slice(5, 7) : 'boş';
+function expectationText(x) { return 'Beklenti: ' + core.OPS[x.op] + ' — ' + short(x.date) + ' (' + x.when + ')'; }
+function deliveryText(d) { return 'Tahmini teslimat: ' + short(d.from) + ' → ' + short(d.to); }
 async function undo(params) {
   return store.locked(journal => {
     stageSync.recover(journal);
@@ -145,9 +162,14 @@ async function undo(params) {
     if (params.revision !== journal.revision) throw new Error('Günlük değişti; yenileyin.');
     const { data } = panel.loadPanelData();
     const record = getRecord(data, event.record_id);
+    // A delivery date set by this report is restored only if nobody changed it since.
+    const restore = event.delivery_change && (record.est_delivery || null) === event.delivery_change.to
+      ? { from: event.delivery_change.to, to: event.delivery_change.from } : undefined;
     if (supplyOnly) {
-      event.voided = new Date().toISOString(); journal.revision++; store.write(journal);
-      return { ...snapshot(undefined, journal), stage_sync: null };
+      event.voided = new Date().toISOString(); journal.revision++;
+      const change = restore ? stageSync.begin(journal, record, data.jobs, record.status, 'undo', event.id, undefined, restore) : null;
+      store.write(journal); stageSync.recover(journal);
+      return { ...snapshot(undefined, journal), stage_sync: stageSync.publicChange(change) };
     }
     const before = stageSync.assessment(record, data.jobs, journal.events);
     event.voided = new Date().toISOString(); journal.revision++;
@@ -159,7 +181,7 @@ async function undo(params) {
     const warning = before.stale ? 'Aşama veya iş kaydı arada elle değişti; geri alma sırasında kanban aşamasına dokunulmadı.'
       : !stageSync.valid(target) || last && !stageSync.valid(last.basis_status)
         ? 'Eski bildirimin başlangıç aşaması bilinmiyor; kanban aşaması korunarak bildirim geri alındı.' : null;
-    const change = stageSync.begin(journal, record, data.jobs, target, 'undo', event.id, warning);
+    const change = stageSync.begin(journal, record, data.jobs, target, 'undo', event.id, warning, restore);
     store.write(journal);
     stageSync.recover(journal);
     return { ...snapshot(undefined, journal), stage_sync: stageSync.publicChange(change) };

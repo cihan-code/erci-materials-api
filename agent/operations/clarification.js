@@ -3,7 +3,7 @@
 const MESSAGES = [
   'Hangi üretim işlemi yapıldı? Bugün yapılan işlemi ve varsa kalan işi açıkça yazın.',
   'Bildirilen işlemler çelişiyor; bugün yapılan işlemi ve kalan işi açıkça yazın.',
-  'Bugün gerçekleşen üretim işlemini yazın; soru veya gelecek planı kaydedilmez.',
+  'Bugün gerçekleşen üretim işlemini veya bir işin hangi gün biteceğini yazın; soru kaydedilmez.',
   'Bildirim başka bir güne ait; bugünkü üretim durumunu yazın.',
 ];
 function safeClarification(value) {

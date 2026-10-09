@@ -9,20 +9,23 @@ const valid = value => URETIM_STATUSES.includes(value);
 function assessment(record, jobs, events) {
   const active = events.filter(e => String(e.record_id) === String(record.id) && !e.voided);
   const entries = core.latest(events, record.id);
-  // Supply-only reports (e.g. "fermuar geldi") never pin or move the kanban stage.
-  const last = active.filter(e => core.stageEntries(record, e.entries).length).at(-1);
+  // Supply-only reports (e.g. "fermuar geldi") never pin or move the kanban stage. A report
+  // that changed the delivery date carries the post-change fingerprint, so it is the basis too.
+  const last = active.filter(e => core.stageEntries(record, e.entries).length || e.delivery_change).at(-1);
   if (!last) return { entries, revision: null, stale: false };
   const tracked = valid(last.basis_status);
   const basis = tracked ? { ...record, status: last.basis_status } : record;
   const revision = core.revision(basis, entries, core.decoration(record, jobs));
   const stale = tracked
-    ? last.fingerprint !== core.fingerprint(basis, jobs) || record.status !== revision?.status
+    ? last.fingerprint !== core.fingerprint(basis, jobs) || (!!revision && record.status !== revision.status)
     : last.fingerprint !== core.fingerprint(record, jobs);
   return { entries, revision, stale };
 }
-function begin(journal, record, jobs, target, operation, eventId, warning) {
+// delivery = { from, to }: the report's delivery date patch, applied with the stage in one write.
+function begin(journal, record, jobs, target, operation, eventId, warning, delivery) {
   journal.stage_syncs ||= {};
   const change = { record_id: record.id, from_status: record.status, to_status: target,
+    ...(delivery ? { from_delivery: delivery.from ?? null, to_delivery: delivery.to ?? null } : {}),
     before_fingerprint: core.fingerprint(record, jobs), operation, event_id: eventId,
     status: warning || !valid(target) ? 'skipped' : 'pending',
     ...(warning ? { message: warning } : {}) };
@@ -37,14 +40,17 @@ function recover(journal) {
       const record = data?.uretimTakip?.find(r => String(r.id) === String(change.record_id));
       if (!record || !valid(change.to_status)) throw new Error('stage conflict');
       const current = core.fingerprint(record, data.jobs);
-      const alreadyApplied = record.status === change.to_status &&
-        core.fingerprint({ ...record, status: change.from_status }, data.jobs) === change.before_fingerprint;
+      const delivery = 'to_delivery' in change;
+      const target = { status: change.to_status, ...(delivery ? { est_delivery: change.to_delivery } : {}) };
+      const original = { status: change.from_status, ...(delivery ? { est_delivery: change.from_delivery } : {}) };
+      const differs = Object.keys(target).some(k => (record[k] ?? null) !== (target[k] ?? null));
+      const alreadyApplied = !differs && core.fingerprint({ ...record, ...original }, data.jobs) === change.before_fingerprint;
       if (current !== change.before_fingerprint && !alreadyApplied) {
         change.status = 'skipped';
-        change.message = 'Panel kaydı arada elle değişti; kanban aşamasına dokunulmadı. Son durumu teyit et.';
+        change.message = 'Panel kaydı arada elle değişti; kanban aşamasına ve teslim tarihine dokunulmadı. Son durumu teyit et.';
       } else {
-        if (!alreadyApplied && record.status !== change.to_status) {
-          record.status = change.to_status;
+        if (!alreadyApplied && differs) {
+          Object.assign(record, target);
           panel.writePanelData(data, updatedAt); // auth + unrelated records retained, backup + CAS
         }
         change.status = 'applied';

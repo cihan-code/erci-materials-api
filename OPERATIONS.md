@@ -266,3 +266,26 @@ silently ignores future/planned parts; the another-day clarification is only for
 reports whose every event explicitly happened on another day. Supply ordered but not
 arrived ("fermuar siparişi verildi") is `zipper` `in_progress`; arrived is `completed`.
 Still one Haiku call per report.
+
+## Dated expectations and delivery date from reports (2026-10-09)
+
+User request: "pazartesi nakışı bitecek" should be remembered and reminded on that
+day; a stated delivery date should update Tahmini Teslimat automatically (user
+decision). The same single Haiku call returns `expectations`: `{op, when, evidence}`
+where `when` is the day words copied from the report and must appear inside the exact
+`evidence`. `expectations.js` resolves the date in code from the report's Istanbul day
+(bugün, yarın, öbür gün, weekdays — nearest on/after today, "haftaya" +7 —, `13.10`,
+`13 Ekim`); past, invalid or >90-day dates are dropped. One expectation per operation
+(latest day). Invalid items never block a report. A report may now contain only dated
+expectations (no actual entry); nothing actual and nothing dated is still rejected.
+
+Reminders (`snapshot.records[].expectations`): `upcoming` → row note, `due` (that
+day) and `overdue` → Günün planı "Bugün beklenenler" in panel and morning mail. A
+completed report of that operation in the same or a later event, or the kanban moving
+past the operation's stage, closes it; undo removes it. Jev sees `{op, date, status}`.
+
+`op: delivery` sets `est_delivery` when it differs: the patch travels with the stage
+change through `stageSync` (journal intent, backup + CAS, `from/to_delivery`), the
+event keeps `delivery_change` and the post-change fingerprint so it does not look
+stale. Undo restores the previous date only if the date is still the one this report
+set. Expectation-only and delivery-only reports never move the kanban stage.

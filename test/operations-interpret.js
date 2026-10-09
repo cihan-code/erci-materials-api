@@ -40,18 +40,24 @@ test('native provider-independent failures are Turkish while existing Turkish er
   }
   assert.equal(publicError(new Error('Plan değişti; yenileyip tekrar kaydedin.')), 'Plan değişti; yenileyip tekrar kaydedin.');
 });
-test('today\'s work mixed with plans is extracted; the future part is no reason to clarify', async () => {
+test('today\'s work mixed with plans: entries hold today, dated plans become expectations', async () => {
   const text = 'Kumaş kesimi bitti kaşkorse kaldı fermuar siparişi verildi ve nakışa bırakıldı. Yarın nakıştan ürünlerin bir kısmı alınacak kalanı da pazartesi akşam bitecek Salı akşam teslim edilmesi gerekiyor';
   calls = [];
   answer = { clarification: '', entries: [
     { op: 'cut', status: 'partial', remaining: null, reason: 'kaşkorse kaldı', issue: null, evidence: 'Kumaş kesimi bitti kaşkorse kaldı' },
     { op: 'zipper', status: 'in_progress', remaining: null, reason: '', issue: null, evidence: 'fermuar siparişi verildi' },
-    { op: 'embroidery_dropoff', status: 'completed', remaining: null, reason: '', issue: null, evidence: 'nakışa bırakıldı' }] };
+    { op: 'embroidery_dropoff', status: 'completed', remaining: null, reason: '', issue: null, evidence: 'nakışa bırakıldı' }],
+    expectations: [{ op: 'embroidery', when: 'pazartesi', evidence: 'kalanı da pazartesi akşam bitecek' },
+      { op: 'delivery', when: 'Salı', evidence: 'Salı akşam teslim edilmesi gerekiyor' }] };
   const result = await interpret(text, { customer_name: 'Synthetic', status: 'Kesimde', product_type: 'yarim_fermuar' }, [], '2026-10-09');
-  assert.match(calls[0].system, /silently ignore every future or planned part/);
-  assert.match(calls[0].system, /every reported event explicitly happened on another day/);
+  assert.match(calls[0].system, /entries hold ONLY today's actual events/);
+  assert.match(calls[0].system, /Never compute or convert dates/);
   assert.match(calls[0].system, /fermuar siparişi verildi\) is in_progress/);
+  assert.deepEqual(calls[0].schema.required, ['clarification', 'entries', 'expectations']);
   assert.equal(JSON.parse(calls[0].user).selected_record.product, 'Yarım fermuarlı');
   assert.deepEqual(core.validateEntries(result.entries, {}, text).map(e => [e.op, e.status]),
     [['cut', 'partial'], ['zipper', 'in_progress'], ['embroidery_dropoff', 'completed']]);
+  const expectations = require('../agent/operations/expectations');
+  assert.deepEqual(expectations.validate(result.expectations, text, '2026-10-09', core.OPS).map(x => [x.op, x.date]),
+    [['embroidery', '2026-10-12'], ['delivery', '2026-10-13']]);
 });
