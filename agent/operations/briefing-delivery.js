@@ -39,8 +39,8 @@ function claim(p, now = new Date()) {
     return { claimed: true, token: prior.token, status: prior.status };
   const receipt = { key, date: p.date, audience: p.audience, request_id: p.request_id,
     token: crypto.randomUUID(), status: 'reserved', reserved_at: now.toISOString(),
-    scheduled_for: p.date + 'T08:00:00+03:00',
-    delay_seconds: Math.max(0, Math.round((now - new Date(p.date + 'T08:00:00+03:00')) / 1000)),
+    scheduled_for: [p.date + 'T07:40:00+03:00', p.date + 'T08:00:00+03:00'].includes(p.scheduled_for) ? p.scheduled_for : p.date + 'T08:00:00+03:00',
+    delay_seconds: Math.max(0, Math.round((now - new Date([p.date + 'T07:40:00+03:00', p.date + 'T08:00:00+03:00'].includes(p.scheduled_for) ? p.scheduled_for : p.date + 'T08:00:00+03:00')) / 1000)),
     lease_until: new Date(now.getTime() + LEASE_MS).toISOString(),
     run_id: /^\d{1,30}$/.test(String(p.run_id || '')) ? String(p.run_id) : null, attempts: [...(prior?.attempts || []),
       ...(prior ? [{ status: prior.status, at: prior.updated_at || prior.reserved_at, run_id: prior.run_id }] : [])] };

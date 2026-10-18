@@ -310,8 +310,11 @@ A lost SMTP acknowledgment is treated as uncertain. Inspect the sent folder and
 receipt for manual recovery; there is no force-send route. Corrupt/unreachable
 receipt storage fails visibly to avoid duplicates. Back it up with service data.
 
-The client logs separate target/start/report-ready/SMTP-accepted events; scheduled
-briefing now targets 08:00 Europe/Istanbul daily (`0 5 * * *` UTC). This does not
+The client logs separate target/start/report-ready/SMTP-accepted events; requested
+briefing target is 08:00 Europe/Istanbul daily (`0 5 * * *` UTC). The workflow
+change remains pending explicit approval after an OAuth scope rejection and
+automatic approval review rejection; current cron is still 07:40 Mon–Sat.
+Receipts/timing distinguish the current known schedule from the requested target. This does not
 change workshop workdays. GitHub's observed hours-late scheduling is external to
 the planner; changing cron cannot provide an exact-minute guarantee. No external
 scheduler or infrastructure was added. Deploy API, then panel, then daily agent.
