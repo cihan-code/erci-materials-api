@@ -406,6 +406,19 @@ app.delete('/api/materials/:folder/:id', checkApiKey, (req, res) => {
 agentStore.ensureAgentDirs();
 
 // Intraday updates use a separate ledger keyed by production record IDs.
+app.post('/api/agent/briefing-delivery/claim', checkApiKey, (req, res) => {
+  try { res.json(require('./agent/operations/briefing-delivery').claim(req.body || {})); }
+  catch (e) { res.status(409).json({ error: require('./agent/operations/clarification').publicError(e) }); }
+});
+app.post('/api/agent/briefing-delivery/update', checkApiKey, (req, res) => {
+  try { res.json(require('./agent/operations/briefing-delivery').update(req.body || {})); }
+  catch (e) { res.status(409).json({ error: require('./agent/operations/clarification').publicError(e) }); }
+});
+app.get('/api/agent/briefing-delivery', checkApiKey, (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try { res.json(require('./agent/operations/briefing-delivery').recent()); }
+  catch (e) { res.status(503).json({ error: require('./agent/operations/clarification').publicError(e) }); }
+});
 app.get('/api/agent/operations', checkApiKey, (req, res) => {
   res.set('Cache-Control', 'no-store');
   try { res.json(require('./agent/operations/service').snapshot()); }

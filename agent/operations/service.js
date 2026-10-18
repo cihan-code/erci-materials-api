@@ -64,6 +64,7 @@ function snapshot(data = panel.loadPanelData().data, journal = store.read(), inc
     result.state_hash = prepared.state_hash;
     result.jev = { configured: config.configured, model: config.model };
     result.plan = jevPlan.peek(prepared);
+    result.briefing = require('./briefing').build(result);
   }
   return result;
 }

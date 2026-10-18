@@ -289,3 +289,33 @@ change through `stageSync` (journal intent, backup + CAS, `from/to_delivery`), t
 event keeps `delivery_change` and the post-change fingerprint so it does not look
 stale. Undo restores the previous date only if the date is still the one this report
 set. Expectation-only and delivery-only reports never move the kanban stage.
+
+## Shared briefing presentation and delivery receipts (2026-10-18)
+
+`briefing.js` projects the existing validated final plan into a versioned
+`snapshot.briefing`: exact priority/actions and complete structured details. No
+ranking, capacity, recipe, expectation, kanban or interpretation logic changes;
+ordinary reads still make no model call. A stale plan has no current briefing.
+The panel and daily PDF consume the same dated/state-hashed items. A short action
+is presentation only; the original action and all notes remain in item details.
+
+Authenticated `/api/agent/briefing-delivery/claim` and `/update` protect one daily
+send per normalized sender/recipient-group hash; GET lists recent redacted receipt
+metadata. Receipts use `DATA_DIR/operations/briefing-delivery.json` on the existing
+disk, separate from production facts. Writes are atomic and synchronous inside
+the existing single Node service. Tokens are private; addresses and message bodies
+are never stored. Expired preparation (15 min) or proven pre-SMTP failure can retry;
+`sending`/`sent`/`uncertain` never authorize a second automatic SMTP attempt.
+A lost SMTP acknowledgment is treated as uncertain. Inspect the sent folder and
+receipt for manual recovery; there is no force-send route. Corrupt/unreachable
+receipt storage fails visibly to avoid duplicates. Back it up with service data.
+
+The client logs separate target/start/report-ready/SMTP-accepted events; scheduled
+briefing now targets 08:00 Europe/Istanbul daily (`0 5 * * *` UTC). This does not
+change workshop workdays. GitHub's observed hours-late scheduling is external to
+the planner; changing cron cannot provide an exact-minute guarantee. No external
+scheduler or infrastructure was added. Deploy API, then panel, then daily agent.
+
+Tests: `npm run operations` includes projection conservation, private receipts,
+competing/restarted runs and real local HTTP auth/state tests. `npm run uretim`
+retains the separate production regression suite. All use synthetic data/SMTP.
