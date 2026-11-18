@@ -103,12 +103,12 @@ test('müşteri ve atölye ölçüleri tek kaynaktan gelir; en/boy yer değişti
   order.applications[0].height_mm = 123;
   for (const render of [renderProductionForm, renderApprovalForm, renderPrintForm]) {
     const result = await extract(await render(order));
-    assert.match(result.text, /28\.1 × 12\.3 cm/);
+    assert.match(result.text, /28,1 × 12,3 cm/);
     assert.doesNotMatch(result.text, /12\.3 × 28\.1/);
   }
   for (const render of [renderProductionForm, renderApprovalForm, renderEmbroideryForm]) {
     const result = await extract(await render(order));
-    assert.match(result.text, /7\.5 × 4 cm/);
+    assert.match(result.text, /7,5 × 4 cm/);
   }
 });
 
@@ -180,11 +180,11 @@ test('uzun açıklamalar ve çok uygulama kaybolmadan devam sayfalarına akar', 
   order.applications = Array.from({ length: 8 }, (_, i) => ({ ...order.applications[0], width_mm: 280 + i }));
   const production = await extract(await renderProductionForm(order));
   assert.match(production.text, /Açıklama 44/);
-  assert.match(production.text, /28\.7 × 12 cm/);
+  assert.match(production.text, /28,7 × 12 cm/);
   assert.ok(production.numpages > 1);
   const workshop = await extract(await renderPrintForm(order));
   assert.match(workshop.text, /Açıklama 44/);
-  for (let i = 0; i < 8; i++) assert.ok(workshop.text.includes(`${(280 + i) / 10} × 12 cm`));
+  for (let i = 0; i < 8; i++) assert.ok(workshop.text.includes(`${String((280 + i) / 10).replace('.', ',')} × 12 cm`));
   for (const page of workshop.pages) assert.match(page, /MRC-T001 · sürüm 2/);
 });
 
