@@ -60,6 +60,7 @@ module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, r
   router.post('/outbox/:id/tekrar', requireUser('onay'), wrap((req,res) => res.json(outbox.retry(db,Number(req.params.id),req.user))));
   router.post('/outbox/:id/manuel', requireUser('onay'), wrap((req,res) => res.json(outbox.setManual(db,Number(req.params.id),req.user))));
   router.post('/outbox/:id/elle-gonderildi', requireUser('onay'), wrap((req,res) => res.json(outbox.markManualSent(db,Number(req.params.id),req.user,req.body.providerRef))));
+  require('./routes-maliyet')(router, { db, dataDir, worker });
   router.use((err,req,res,next) => {
     if (res.headersSent) return next(err);
     const status = err.status || (err.code?.startsWith('SQLITE_CONSTRAINT') ? 409 : 500);
