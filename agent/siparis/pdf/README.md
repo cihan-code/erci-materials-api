@@ -1,0 +1,84 @@
+# Sipariş ölçüleri ve PDF formları
+
+CommonJS, Node ≥18; veritabanı veya tarayıcı gerektirmez. `pdfkit` ve `pngjs` çalışma bağımlılığıdır. `pdf-parse` yalnız test bağımlılığıdır.
+
+```js
+const {
+  renderProductionForm, renderApprovalForm,
+  renderPrintForm, renderEmbroideryForm,
+} = require('./agent/siparis/pdf');
+
+const order = {
+  orderNo: 'MRC-T001',
+  name: 'Örnek Kulüp',
+  date: '19.11.2026',          // Hazırlanma tarihi; gösterim metni
+  deliveryDate: '30.11.2026',  // Teslim tarihi; gösterim metni
+  version: 2,                // Pozitif tam sayı
+  description: ['Dikişler numuneye uygun olacak.'],
+  lines: [{
+    id: 'satir-1',            // Benzersiz metin
+    product: 'Örnek Tişört',
+    color: 'Gece Mavisi',
+    fabric: 'Pamuk',
+    sizes: { XS: 3, S: 2, M: 4, L: 1 },
+    images: { front: onGorselBuffer, back: arkaGorselBuffer },
+  }],
+  applications: [{
+    type: 'baski',            // 'baski' | 'nakis'
+    position: 'sirt',         // 'gogus' | 'sirt' | 'kol' | 'ense' | 'kapuson'
+    width_mm: 280,            // Negatif olmayan tam sayı; onaylanmış ölçü
+    height_mm: 120,
+    preview: desenPngBuffer,
+    lineIds: ['satir-1'],     // İsteğe bağlı; yoksa tüm satırlara uygulanır
+  }],
+};
+
+// DATA_DIR'e erişim çağırandadır; modül gerçek marka dosyalarını kendisi aramaz.
+const options = {
+  brand: {
+    logo: logoPngBuffer,      // İsteğe bağlı PNG/JPEG Buffer
+    termsText: 'Şartlar…',    // İsteğe bağlı metin; \n ile paragraflar
+  },
+};
+const pdf = await renderProductionForm(order, options); // Buffer
+const printPdf = await renderPrintForm(order, options); // Buffer veya null
+```
+
+Üretim/onay fonksiyonları `Promise<Buffer>` döndürür. Baskı/nakış fonksiyonları ilgili uygulama yoksa doğrudan `null`, varsa `Promise<Buffer>` döndürür; her durumda `await` kullanılabilir. PDFKit akışları içeride Buffer olarak toplanır. Geçersiz girdiler hata verir; `await` çağrısını hata yakalama bloğunda kullanın. Girdi nesnesi değiştirilmez.
+
+Bedenler `XS, S, M, L, XL, XXL, 3XL, 4XL`; eksik beden 0 sayılır. Adetler negatif olmayan güvenli tam sayılardır. Bilinmeyen beden, kesirli adet, geçersiz uygulama, olmayan satır kimliği ve eksik ölçü reddedilir. `applications: []` ve `description: []` geçerlidir. Ürün ve desen görselleri isteğe bağlı PNG/JPEG Buffer'lardır; yoksa açık bir yer tutucu görünür. Hatalı görsel sessizce atlanmaz.
+
+Ölçüler bütün formlarda aynı biçimleyiciyle yalnız `width_mm` / `height_mm` alanlarından gelir: `280 / 10 × 120 / 10` → `28 × 12 cm`. Kesirli cm noktayla yazılır (`7.5 × 4 cm`). Görselin sayfadaki boyutu fiziksel uygulama ölçüsü değildir. Konum hücresinde birden fazla uygulama varsa her ölçü ayrı satırda görünür. `lineIds` renk/ürün varyantına özel desenleri ayırır.
+
+Üretim formu her sipariş satırı için bir dikey sayfa açar; satır beden toplamını ve bütün sipariş toplamını gösterir. Onay formu renk bazında ayrı yatay sayfalar oluşturur; aynı renkteki en fazla iki model aynı sayfada yer alır, renk toplamı bedenlerden hesaplanır. Son sayfa şartlardır. Baskı ve nakış ayrı belgelerdir: ilk sayfa açıklama ve en fazla iki satırın ön/arka görsellerini; ikinci sayfa yalnız ilgili türün desenlerini ve ölçülerini içerir. Daha fazla ürün, desen veya uzun açıklama ek devam sayfaları oluşturabilir. Bütün sayfalarda sipariş kodu ve sürüm alt bilgisi bulunur. Sayfa ölçüleri referanslardaki gibi dikey `810 × 1440`, onayda `1440 × 810` PDF puanıdır.
+
+## Ölçü hesabı
+
+```js
+const { measureApplication, designBoxFromPng } = require('../measure');
+const box = designBoxFromPng(pngBuffer); // {x, y, w, h} veya boş görselde null
+const result = measureApplication({
+  refLengthPx: 280, refLengthCm: 56,
+  designBoxPx: { w: 140, h: 60 },
+  imageKind: 'flat', flags: { perspective: false, wrinkled: false },
+});
+// {width_mm:280, height_mm:120, scaleCmPerPx:0.2,
+//  needsConfirmation:false, reasons:[], reason:''}
+```
+
+Ölçek cm/px olarak hesaplanır; en ve boy bağımsız olarak en yakın tam mm'ye yuvarlanır. `imageKind !== 'flat'`, perspektif, kırışıklık veya eksik/geçersiz referans ayrı teyit gerekçeleridir. Referans geçersizse ölçüler ve ölçek `null` döner. Fotoğraf/perspektifte geçerli referansla hesaplanan değerler yalnız öneridir; `needsConfirmation` çağıran tarafından çözülmeden siparişe onaylı ölçü yazılmamalıdır. PDF üreticisi ölçü teyit akışını veya veritabanını yönetmez.
+
+PNG sınır kutusu yalnız alfa değeri 0'dan büyük ve RGB'si saf beyaz (`255,255,255`) olmayan pikselleri içerir; yarı saydam renkler dahildir. Koordinatlar sol üstten 0 tabanlıdır; `w/h` kenar piksellerini içerir. Bozuk PNG hata verir. Beyaz desenin saydam zemindeki beyaz pikselleri de bu sözleşmeye göre dışlanır; beyaz desenler için kutu başka bir kaynaktan sağlanmalıdır.
+
+## Çalıştırma ve kaynaklar
+
+```sh
+node --test test/siparis-olcu-pdf.test.js
+npm run siparis:ornek-pdf
+```
+
+Örnek komut tamamen uydurma `test/fixtures/siparis/example-order.js` verisini ve kodla çizilmiş görselleri kullanarak `test/tmp/{uretim,onay,baski,nakis}.pdf` dosyalarını yazar. Bu klasör git tarafından dışlanır. Gerçek müşteri dosyası içermez.
+
+`fonts/Montserrat-Regular.ttf` ve `fonts/Montserrat-Bold.ttf`, [Montserrat resmi deposundan](https://github.com/JulietaUla/Montserrat/tree/master/fonts/ttf) alınmıştır. SIL Open Font License 1.1 metni `fonts/OFL.txt` içindedir ([Google Fonts lisans kopyası](https://github.com/google/fonts/blob/main/ofl/montserrat/OFL.txt)). Türkçe metinler için font PDF'e gömülür. `assets/placeholder-logo.png` bu iş için çizilmiş uydurma geometrik logodur; gerçek marka veya şartlar metni değildir. `options.brand` sağlanmazsa bu logo ve açıkça yer tutucu olduğunu söyleyen bir şartlar metni kullanılır.
+
+Görsel referanslar yalnız geçici klasörde görüntülenmiştir; repoya kopyalanmamıştır. Başlık yerleri, beyaz zemin, mavi üretim tabloları ve koyu gri onay bantları korunmuştur. Bilinen farklar: Montserrat yazı metrikleri, uydurma ürün/desen/logolar, eklenen cm ölçüleri ve alt bilgi; üretim beden tablosundaki elle kesim takibi yerine siparişin gerçek adetleri gösterilir. Yatay nakış görsel referansları, istenen iki sayfalı atölye formu için baskı formuyla aynı dikey düzene uyarlanmıştır.
