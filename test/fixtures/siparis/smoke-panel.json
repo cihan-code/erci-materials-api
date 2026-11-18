@@ -1,0 +1,64 @@
+{
+  "data": {
+    "tasks": [
+      {
+        "id": 1,
+        "title": "Örnek görev",
+        "done": false,
+        "carried_forward": true
+      },
+      {
+        "id": 2,
+        "title": "Örnek açık görev",
+        "done": false
+      }
+    ],
+    "jobs": [],
+    "incomes": [],
+    "expenses": [],
+    "invoices": [],
+    "debts": [
+      {
+        "id": 1,
+        "type": "Alacak",
+        "name": "Örnek Kulüp",
+        "amount": 30000,
+        "paid_amount": 0
+      }
+    ],
+    "customers": [],
+    "pipeline": [],
+    "uretimTakip": [
+      {
+        "id": 11,
+        "customer_name": "Örnek Kulüp",
+        "status": "Kumaş Bekleniyor",
+        "quantity": 10
+      }
+    ],
+    "okullar": [],
+    "fixedExpenses": [],
+    "costTemplates": {
+      "products": [
+        {
+          "name": "Sweatshirt",
+          "items": [
+            {
+              "category": "Kumaş",
+              "amount": 10
+            }
+          ]
+        }
+      ],
+      "baski": {
+        "Küçük Boyut": 1,
+        "Orta Boyut": 2
+      },
+      "nakis": {
+        "Küçük Boyut": 3
+      }
+    }
+  },
+  "auth": {},
+  "updatedAt": "2026-01-01T00:00:00.000Z"
+}

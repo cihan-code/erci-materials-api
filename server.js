@@ -109,6 +109,7 @@ function safeOriginalName(name) {
 const app = express();
 app.use(cors({ origin: CORS_ORIGIN }));
 app.use(express.json({ limit: '20mb' }));
+require('./agent/siparis/routes')(app, { dataDir: DATA_DIR });
 
 function checkApiKey(req, res, next) {
   if (!API_KEY) return next(); // API_KEY ayarlanmadiysa kontrol atlanir (kurulum kolaylastirma - onerilmez)
