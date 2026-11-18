@@ -20,8 +20,14 @@
     "operations": "node --test test/operations-feedback.js test/operations-memory.js test/operations-http.js test/operations-jev-client.js test/operations-jev-plan.js test/operations-final-http.js test/operations-stage-sync.js test/operations-stage-http.js test/operations-interpret.js test/operations-capacity.js test/operations-recipes.js test/operations-expectations.js test/operations-briefing.js test/operations-briefing-http.js"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^1.1.1",
+    "@neplex/vectorizer": "^0.1.0",
     "cors": "^2.8.5",
     "express": "^4.19.2",
-    "multer": "^2.0.0"
+    "multer": "^2.0.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^4.8.69",
+    "pdfkit": "^0.20.2",
+    "svg-to-pdfkit": "^0.1.8"
   }
 }
