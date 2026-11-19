@@ -2,7 +2,8 @@
 // Render.com uzerinde kalici disk (persistent disk) ile calisir.
 // Gerekli ortam degiskenleri (Render > Environment):
 //   DATA_DIR      -> disk mount yolu, orn: /data
-//   API_KEY       -> panelin gonderdigi gizli anahtar (rastgele uzun bir metin sen belirlersin)
+//   API_KEY       -> sunucudan sunucuya istemcilerin x-api-key anahtari (rastgele uzun bir metin sen belirlersin);
+//                    panel bu anahtari tasimaz, kisi oturumuyla (Bearer) girer
 //   CORS_ORIGIN   -> panelin yayinlandigi adres, orn: https://cihan-code.github.io
 //   PORT          -> Render otomatik verir, dokunma
 //   ANTHROPIC_API_KEY -> Yonetim Ajani + SDR arastirma/puanlama/mail taslagi
@@ -107,20 +108,45 @@ function safeOriginalName(name) {
 
 // ---- app kurulumu ----
 const app = express();
+// allowedHeaders verilmedigi icin on kontrol istenen basliklari yansitir: x-api-key ve Authorization (kisi oturumu) gecer.
 app.use(cors({ origin: CORS_ORIGIN }));
 app.use(express.json({ limit: '20mb' }));
 // Siparis modulu acilamazsa (better-sqlite3 / veritabani) panelin geri kalani calismaya devam eder; uclari 503 doner.
-try { require('./agent/siparis/routes')(app, { dataDir: DATA_DIR }); }
+// Kisi oturumu da bu veritabaninda; modul acilamazsa eski uclara yalniz x-api-key ile girilir.
+let sessionGate = null, siparisAudit = null, siparisDb = null;
+try {
+  siparisDb = require('./agent/siparis/routes')(app, { dataDir: DATA_DIR }).db;
+  sessionGate = require('./agent/siparis/auth').authFor(siparisDb)();
+  siparisAudit = require('./agent/siparis/db').audit;
+}
 catch (err) {
   console.error('[siparis] modul acilamadi:', err && err.message);
   app.use('/api/siparis', (req, res) => res.status(503).json({ error: 'Sipariş servisi şu an kullanılamıyor.' }));
 }
 
+// Eski uclar iki yolla acilir: sunucudan sunucuya istemciler icin x-api-key, panel icin kisi oturumu
+// (Authorization: Bearer). Oturum siparis modulunun requireUser denetimiyle aynen dogrulanir; servis
+// anahtari (SIPARIS_SERVIS_ANAHTARI) oturum bicimine uymadigi icin burada gecmez.
 function checkApiKey(req, res, next) {
   if (!API_KEY) return next(); // API_KEY ayarlanmadiysa kontrol atlanir (kurulum kolaylastirma - onerilmez)
   const key = req.header('x-api-key');
-  if (key !== API_KEY) return res.status(401).json({ error: 'Yetkisiz istek (x-api-key hatali veya eksik).', code: CODES.AUTH_401 });
-  next();
+  if (key === API_KEY) return next();
+  if (sessionGate && /^Bearer /i.test(req.get('authorization') || '')) {
+    return sessionGate(req, res, () => { auditSessionWrite(req, res); next(); });
+  }
+  return res.status(401).json({ error: 'Yetkisiz istek (x-api-key hatali veya eksik).', code: CODES.AUTH_401 });
+}
+
+// Oturumla gelen yazmalar siparis denetim kaydina kisi adina gecer (anahtarla gelende kisi bilinmez).
+// Yanit tamamlanmadan baglanti koparsa durum bilinmez: null yazilir.
+function auditSessionWrite(req, res) {
+  if (req.method === 'GET' || req.method === 'HEAD') return;
+  const ref = req.method + ' ' + req.baseUrl + req.path;
+  const user = req.user;
+  res.once('close', () => {
+    try { siparisAudit(siparisDb, user.id, 'eski_uc_yazma', ref, { user: user.name, status: res.writableFinished ? res.statusCode : null }); }
+    catch (e) { console.warn('[AUTH] eski uc yazmasi denetim kaydina yazilamadi:', e && e.message); }
+  });
 }
 
 app.get('/', (req, res) => {

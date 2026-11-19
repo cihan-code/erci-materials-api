@@ -19,7 +19,7 @@ serbest metin kutusu) kaldırıldı. Kalan tek rapor tipi `gunluk-uretim-plani` 
 | `act.js` | Serbest metin komuttan aksiyon çıkarır (Haiku, structured output), backend uygular. **İkinci Claude çağrısı yok** |
 | `prompts/` | `identity.md` (paylaşılan sistem tanımı) + `gunluk-uretim-plani.md` + `act.md` |
 
-## Uçlar (hepsi `x-api-key` arkasında)
+## Uçlar (hepsi `x-api-key` ya da kişi oturumu `Bearer` arkasında)
 
 | Metot & yol | İş |
 |---|---|
@@ -43,7 +43,7 @@ serbest metin kutusu) kaldırıldı. Kalan tek rapor tipi `gunluk-uretim-plani` 
 
 ```
 Render → Environment: ANTHROPIC_API_KEY = sk-ant-...   (DATA_DIR=/data, API_KEY, CORS_ORIGIN zaten var)
-GitHub → repo secret: MERCI_API_KEY = panelin x-api-key'i
+GitHub → repo secret: MERCI_API_KEY = sunucunun API_KEY değeri (panel artık taşımaz; yenilenince burası da güncellenir)
 ```
 
 ## Test — ÖNCE ücretsiz yol

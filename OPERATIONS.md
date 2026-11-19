@@ -16,7 +16,8 @@ with other agent data. Corruption fails visibly instead of replacing history.
 
 ## API and concurrency
 
-All routes use the existing `x-api-key` authentication:
+All routes use the legacy route authentication (`x-api-key` or a personal
+session; see the 2026-11-20 section):
 
 - `GET /api/agent/operations`: versioned snapshot, history, rules and revision.
 - `POST /api/agent/operations/report`: `record_id`, `text`, `request_id`,
@@ -322,3 +323,26 @@ scheduler or infrastructure was added. Deploy API, then panel, then daily agent.
 Tests: `npm run operations` includes projection conservation, private receipts,
 competing/restarted runs and real local HTTP auth/state tests. `npm run uretim`
 retains the separate production regression suite. All use synthetic data/SMTP.
+
+## Legacy route authentication and key rotation (2026-11-20)
+
+Every `checkApiKey` route (`/api/paneldata`, `/api/stokdata`, `/api/costtemplates`,
+`/api/folders`, `/api/materials/*`, `/api/agent/*`, `/api/sdr/*`) accepts either a
+valid `x-api-key` or a personal session `Authorization: Bearer <token>` from
+`POST /api/siparis/giris`. The session is checked by the siparis `requireUser` gate;
+expired or deleted sessions get 401. The siparis service key does not open these
+routes. Writes made with a session go to the siparis `audit_log` as `eski_uc_yazma`
+with the user and the final HTTP status (null if the connection dropped first).
+If the siparis module cannot open, only `x-api-key` works.
+
+The public panel no longer carries `API_KEY`. Server-to-server clients keep
+`x-api-key`: Finans Ajanı (`PANEL_API_KEY`), the daily briefing agent
+(`MERCI_API_KEY`) and any Excel/Power Query link to `/api/costtemplates`.
+
+Release order:
+1. Deploy this API.
+2. Deploy the panel (`index.html`, `stok.html`, `assets/session.js`).
+3. Rotate `API_KEY` on Render; the old value is in the public panel history.
+4. Give the new key to the server-to-server clients above.
+
+Tests: `node --test test/eski-uc-oturum.test.js`.
