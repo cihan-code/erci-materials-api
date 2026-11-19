@@ -141,13 +141,18 @@ function receive(db, { invoiceLineId, itemId, qtyMilli, allocations, userId = nu
       reserve(db, row, qty, { itemId, userId, invoiceLineId, businessKey: `teslim_tahsis:${invoiceLineId}:${row.id}` });
       remaining -= qty;
     }
-  } else {
-    for (const t of fillShortages(db, itemId, { budget: remaining, userId, invoiceLineId, keyPrefix: `teslim_tahsis:${invoiceLineId}` })) {
-      targets.push(t); remaining -= t.qty;
-    }
+  }
+  // Explicit targets go first; whatever is left is usable stock and closes open shortages FIFO like any other increase.
+  const budget = Math.min(remaining, Math.max(0, available(db, itemId)));
+  const prefix = allocations !== undefined ? `teslim_fifo:${invoiceLineId}` : `teslim_tahsis:${invoiceLineId}`;
+  for (const t of fillShortages(db, itemId, { budget, userId, invoiceLineId, keyPrefix: prefix })) { targets.push(t); remaining -= t.qty; }
+  const given = new Map();
+  for (const t of targets) {
+    const g = given.get(t.row.id) || { orderLineId: t.row.order_line_id, materialKey: t.row.material_key, qtyMilli: 0 };
+    g.qtyMilli += t.qty; given.set(t.row.id, g);
   }
   db.prepare("UPDATE invoice_lines SET delivery_status='teslim_alindi',match_status='eslesti',item_id=?,allocation_json=? WHERE id=?")
-    .run(itemId, JSON.stringify(targets.map(t => ({ orderLineId: t.row.order_line_id, materialKey: t.row.material_key, qtyMilli: t.qty }))), invoiceLineId);
+    .run(itemId, JSON.stringify([...given.values()]), invoiceLineId);
   audit(db, userId, 'teslim_al', invoiceLineId, { itemId, qtyMilli, allocatedMilli: qtyMilli-remaining });
   return db.prepare('SELECT * FROM stock_movements WHERE id=?').get(id);
 }

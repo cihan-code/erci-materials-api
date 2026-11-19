@@ -1,14 +1,6 @@
 'use strict';
 // Read-only summary for the Ajan Paneli. No price, amount or write path here.
-const crypto = require('crypto');
-const { authFor } = require('./auth');
-const sha = s => crypto.createHash('sha256').update(String(s)).digest();
-// Constant-time compare on fixed-length digests; an unset key never matches.
-function serviceKeyOk(header) {
-  const key = process.env.SIPARIS_SERVIS_ANAHTARI;
-  const given = /^Bearer (.+)$/.exec(header || '')?.[1];
-  return !!key && key.length >= 16 && !!given && crypto.timingSafeEqual(sha(given), sha(key));
-}
+const { serviceOrUser } = require('./auth');
 function panelData(db) {
   const rows = (sql, ...a) => db.prepare(sql).all(...a);
   const confirmations = rows("SELECT kind,COUNT(*) AS n FROM confirmations WHERE status='acik' GROUP BY kind");
@@ -41,10 +33,6 @@ function panelData(db) {
   };
 }
 module.exports = function mountPanel(router, db) {
-  const requireUser = authFor(db);
-  router.get('/panel-veri', (req, res, next) => {
-    if (serviceKeyOk(req.get('authorization'))) return res.json(panelData(db));
-    requireUser()(req, res, () => res.json(panelData(db)));
-  });
+  router.get('/panel-veri', serviceOrUser(db), (req, res) => res.json(panelData(db)));
 };
 module.exports.panelData = panelData;

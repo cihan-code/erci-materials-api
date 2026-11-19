@@ -61,4 +61,22 @@ function authFor(db) {
     };
   };
 }
-module.exports = { createUser, login, assertUser, authFor, requireUser: (db, role) => authFor(db)(role), passwordHash, verifyPassword };
+// Service key (SIPARIS_SERVIS_ANAHTARI) for machine callers: compared on equal-length digests, so constant time
+// whatever its length. An unset or short (<16 characters) key never matches.
+const SERVICE_KEY_MIN = 16;
+const digest = v => crypto.createHash('sha256').update(String(v)).digest();
+function serviceKeyMatches(header, key = process.env.SIPARIS_SERVIS_ANAHTARI) {
+  const expected = String(key ?? '').trim();
+  const given = /^Bearer (\S+)$/i.exec(header || '')?.[1];
+  return expected.length >= SERVICE_KEY_MIN && !!given && crypto.timingSafeEqual(digest(given), digest(expected));
+}
+// Accepts the service key or, failing that, a signed-in user (req.service / req.user tell which).
+function serviceOrUser(db) {
+  const user = authFor(db)();
+  return (req, res, next) => {
+    if (serviceKeyMatches(req.get('authorization'))) { req.service = true; return next(); }
+    return user(req, res, next);
+  };
+}
+module.exports = { createUser, login, assertUser, authFor, requireUser: (db, role) => authFor(db)(role), passwordHash, verifyPassword,
+  serviceKeyMatches, serviceOrUser };
