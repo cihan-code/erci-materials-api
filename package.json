@@ -4,7 +4,7 @@
   "private": true,
   "description": "Merci Tekstil Paneli - Sirket Materyalleri dosya depolama API'si (Render + kalici disk)",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "scripts": {
     "start": "node server.js",
@@ -24,7 +24,7 @@
   "dependencies": {
     "@napi-rs/canvas": "^1.1.1",
     "@neplex/vectorizer": "^0.1.0",
-    "better-sqlite3": "^11.10.0",
+    "better-sqlite3": "^12.11.1",
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "multer": "^2.0.0",

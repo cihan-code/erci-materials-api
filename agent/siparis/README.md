@@ -1,6 +1,6 @@
 # Sipariş çekirdeği — G1 entegrasyon sözleşmesi
 
-CommonJS; Node >=18; `better-sqlite3` 11.x. Sunucu `DATA_DIR/siparis.sqlite` dosyasını açar. Şema WAL + foreign keys kullanır. `openDb` eski bir veritabanını bir kez ve idempotent biçimde günceller: `files` tablosundaki `UNIQUE(version_id,kind)` kaldırılır, `confirmations.kind` listesine `eski_surum` eklenir, `invoice_lines` ve `stock_items` tablolarına yeni sütunlar eklenir. Modül açılamazsa (`better-sqlite3` ya da veritabanı) `server.js` hatayı loglar, panelin geri kalanı çalışmaya devam eder ve `/api/siparis/*` uçları 503 döner. Bütün iş mutasyonları aynı `BEGIN IMMEDIATE` işlemi içinde denetim kaydı üretir; bekleyen dış işler onay işlemiyle birlikte yazılır. Dış çağrı veritabanı işleminin dışında yapılır.
+CommonJS; Node >=20; `better-sqlite3` 12.x. Sunucu `DATA_DIR/siparis.sqlite` dosyasını açar. Şema WAL + foreign keys kullanır. `openDb` eski bir veritabanını bir kez ve idempotent biçimde günceller: `files` tablosundaki `UNIQUE(version_id,kind)` kaldırılır, `confirmations.kind` listesine `eski_surum` eklenir, `invoice_lines` ve `stock_items` tablolarına yeni sütunlar eklenir. Modül açılamazsa (`better-sqlite3` ya da veritabanı) `server.js` hatayı loglar, panelin geri kalanı çalışmaya devam eder ve `/api/siparis/*` uçları 503 döner. Bütün iş mutasyonları aynı `BEGIN IMMEDIATE` işlemi içinde denetim kaydı üretir; bekleyen dış işler onay işlemiyle birlikte yazılır. Dış çağrı veritabanı işleminin dışında yapılır.
 
 ## Dışa açık işlevler
 
@@ -44,7 +44,7 @@ CommonJS; Node >=18; `better-sqlite3` 11.x. Sunucu `DATA_DIR/siparis.sqlite` dos
 
 **Açılış ve sayım:** `importLegacyFabrics` yalnız kalemleri aktarır, hareket yazmaz. Fiziksel stok `recordCount` ile girilir: kalemin hiç hareketi yoksa `acilis`, varsa fark kadar `duzeltme` yazılır, fark 0 ise yalnız audit düşer. Anahtar `sayim:<countKey>:<itemId>`; aynı yük idempotent, farklı yük 409. Sayım ayrılmış miktarın altına inemez (409).
 
-**Serbest kalan stok (FIFO):** Kullanılabilir stok arttığında aynı işlemde o kalemin açık eksikleri onay sırasıyla kapatılır: revizyonla serbest kalan miktar (`tahsis_iade`), artı yönlü `duzeltme`, sayım artışı ve yönlendirmesiz teslimat. Revizyonun kendi yeni ihtiyacı, onayı en son olduğu için sıranın sonundadır. Açık dağıtımlı teslimatta kalan miktar kullanılabilir kalır (G1 davranışı).
+**Serbest kalan stok (FIFO):** Kullanılabilir stok arttığında aynı işlemde o kalemin açık eksikleri onay sırasıyla kapatılır: revizyonla serbest kalan miktar (`tahsis_iade`), artı yönlü `duzeltme`, sayım artışı ve teslimat. Açık dağıtımlı teslimatta önce verilen hedefler doldurulur, artan miktar aynı FIFO kuralıyla diğer açık eksikleri (hedeflerin kalan eksiği dahil) kapatır; ancak geri kalanı kullanılabilir olur. Revizyonun kendi yeni ihtiyacı, onayı en son olduğu için sıranın sonundadır.
 
 **İdempotentlik:** `consume`, `adjustStock`, `receiveDelivery` ve `recordCount` aynı anahtarla farklı yük (satır, kalem, miktar) gelirse 409 verir; aynı yükte ilk sonucu döndürür.
 
@@ -66,7 +66,7 @@ Onay, son onaylı sürümle sabit `line_key` üzerinden karşılaştırır. Ayr�
 
 ## Fatura satırları
 
-- **Giriş:** `POST /api/siparis/fatura-satirlari`, gövde Finans Ajanı `uretim-aktar` biçimi: `{source, lines:[{sourceInvoiceId, sourceLineId, invoiceNo, invoiceDate, supplier, supplierVkn, description, quantity, unit, unitPrice, purchaseRef, deliveryConfirmed}]}` (en çok 500 satır). Kimlik `Authorization: Bearer <SIPARIS_SERVIS_ANAHTARI>` (sabit sürede karşılaştırma) ya da kullanıcı token'ı. Ortam değişkeni boşsa servis anahtarı kabul edilmez.
+- **Giriş:** `POST /api/siparis/fatura-satirlari`, gövde Finans Ajanı `uretim-aktar` biçimi: `{source, lines:[{sourceInvoiceId, sourceLineId, invoiceNo, invoiceDate, supplier, supplierVkn, description, quantity, unit, unitPrice, purchaseRef, deliveryConfirmed}]}` (en çok 500 satır). Kimlik `Authorization: Bearer <SIPARIS_SERVIS_ANAHTARI>` (sabit sürede karşılaştırma) ya da kullanıcı token'ı. Servis anahtarı denetimi `auth.serviceKeyMatches` / `auth.serviceOrUser` ortak yardımcısındadır (fatura girişi ve `panel-veri` aynı kuralı kullanır). Değişken boşsa ya da 16 karakterden kısaysa servis anahtarı kabul edilmez.
 - **Yanıt:** `{results:[{id, sourceInvoiceId, sourceLineId, status: yeni|ayni|guncellendi|reddedildi, matchStatus, deliveryStatus, reasons}]}`. Finans Ajanı 2xx alan partiyi gönderilmiş sayar; bu yüzden saklanamayan satır (kimlik, miktar ya da birim okunamadı) `reddedildi` olur ve `audit_log`'a bağlı açık bir `fatura_eslesme` teyidiyle görünür kalır. Beklenmeyen hata partinin tamamını 500 yapar; satırlar tekil olduğundan yeniden gönderim güvenlidir.
 - **Birim:** `kg/kgm/kilo`, `g/gr` (kg'a çevrilir), `m/mt/mtr/metre`, `adet/c62/nar`. Birim boşsa açıklamadaki birim yalnız oradaki miktar satır miktarıyla birebir aynıysa kabul edilir.
 - **Tekillik ve değişiklik:** `(source_invoice_id, source_line_id)`. İçerik özeti (açıklama, miktar, birim) aynıysa `ayni`, etkisiz. Değiştiyse teslim alınmamış satır güncellenir, eski fatura teyitleri kapanır ve yeniden eşleştirilir (`guncellendi`); teslim alınmış satır değişmez, `fatura_eslesme` teyidi açılır (`reddedildi`).
@@ -78,7 +78,7 @@ Onay, son onaylı sürümle sabit `line_key` üzerinden karşılaştırır. Ayr�
 
 **`fabric_key` sözleşmesi:** Anlamlı anahtar `"<tür>|<renk>"` biçimindedir ve yalnız `matching.fabricKey()` ile üretilir (ASCII, alt çizgili: `sardonlu_3_iplik|gri_melanj`). Eski kumaşlar `parseInvoiceDescription(ad + ' ' + renk)` ile okunur. Tür ve renk net, okunmayan sözcük yoksa anlamlı anahtar alır. Okunamazsa `legacy:<id>` kalır ve `eksik_alan` teyidi açılır. Aynı anahtara iki eski kumaş (ya da var olan bir kalem) çıkarsa ikisi de `legacy` kalır.
 
-**Ortam değişkenleri:** `SIPARIS_SERVIS_ANAHTARI` (Finans Ajanı servis anahtarı), `OTOMATIK_GONDERIM=1` (atölye gönderimi), `DATA_DIR`.
+**Ortam değişkenleri:** `SIPARIS_SERVIS_ANAHTARI` (Finans Ajanı ve Ajan Paneli servis anahtarı, en az 16 karakter), `OTOMATIK_GONDERIM=1` (atölye gönderimi), `DATA_DIR`.
 
 ## HTTP
 
@@ -112,4 +112,4 @@ DATA_DIR="$TASK_SMOKE_DIR" npm run smoke -- test/fixtures/siparis/smoke-panel.js
 
 Smoke mevcut haliyle bir panel snapshot'ı gerektirir; sağlanan fixture tamamen uydurmadır. Gerçek `data/` veya `.env` kullanılmaz. Yerel HTTP testleri için loopback port açma izni gerekir.
 
-Çalışma zamanı notu: Bu makinedeki Node 24.21.0 + better-sqlite3 11.10.0, Worker Thread denemesinde native cleanup assertion üretti. Aynı hata (`RemoveEnvironmentCleanupHook ... env != nullptr`), sunucu ve `fetch` (undici) aynı test sürecindeyken rastgele GC anlarında da görüldü. Ayrı bir sunucu sürecine 900 istekte görülmedi. Fatura testleri bu yüzden `node:http` istemcisi kullanır. Sunucu tek iş parçacığında setInterval kullanır; eşzamanlılık testi iki ayrı Node sürecinde iki bağlantıyla yapılır. Bu sürüm kombinasyonunda veritabanını Worker Thread içine taşımayın; Node 18 uyumluluğunu kaldırmadan 12+ sürümüne geçilmedi.
+Çalışma zamanı notu: Node 24 + better-sqlite3 11.10, rastgele GC anlarında `RemoveEnvironmentCleanupHook ... env != nullptr` native hatasıyla süreci düşürüyordu (Worker Thread'de ve testlerde; fatura testlerinde 15 koşunun 11–12'sinde). better-sqlite3 12.11 ile aynı koşularda görülmedi (0/15, `fetch`'li eski test biçimiyle de). Bu yüzden `engines` `>=20` oldu. Sunucu tek iş parçacığında setInterval kullanır; eşzamanlılık testi iki ayrı Node sürecinde iki bağlantıyla yapılır.
