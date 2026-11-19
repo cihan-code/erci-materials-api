@@ -29,7 +29,11 @@ function createWorkshopHandler(env = process.env, options = {}) {
     if (env.OTOMATIK_GONDERIM !== '1' || mode === 'manual') return manual(job);
     if (!['test', 'cloud'].includes(mode)) return manual(job);
     // Cloud must never send without the caller's durable, awaited checkpoint storage.
-    if (mode === 'cloud' && !options.store) return manual(job);
+    if (mode === 'test' && env.NODE_ENV !== 'test') return manual(job);
+    if (mode === 'cloud' && (options.store?.durable !== true || typeof options.store.get !== 'function' || typeof options.store.set !== 'function')) {
+      (options.logger || console).warn('Atölye cloud modu: kalıcı (durable) kontrol noktası deposu yok; manual moda geçildi');
+      return manual(job);
+    }
     store ||= options.store || createMemoryStore();
     provider ||= options.provider || (mode === 'test' ? createTestAdapter(options.test)
       : createCloudAdapter(env, options));

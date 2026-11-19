@@ -8,6 +8,8 @@ const PDFKit = require('pdfkit');
 const SVGtoPDF = require('svg-to-pdfkit');
 const tracer = require('@neplex/vectorizer');
 const canvasLib = require('@napi-rs/canvas');
+const { PNG } = require('pngjs');
+const { imageSize, pixelBounds } = require('./measure');
 const PT_PER_MM = 72 / 25.4;
 let pdfjsPromise;
 
@@ -36,7 +38,7 @@ async function openPdf(buffer) {
 
 async function renderPage(page, scale = 2) {
   const viewport = page.getViewport({ scale });
-  if (viewport.width * viewport.height > 40_000_000) throw new Error('PDF sayfasi cok buyuk (40 MP siniri)');
+  if (viewport.width * viewport.height > 40_000_000) throw Object.assign(new Error('PDF sayfasi cok buyuk (40 MP siniri)'),{status:413});
   const pair = new CanvasFactory().create(viewport.width, viewport.height);
   await page.render({ canvasContext: pair.context, viewport, canvasFactory: new CanvasFactory() }).promise;
   return pair.canvas.toBuffer('image/png');
@@ -54,9 +56,8 @@ function targetSize(targetMm) {
 
 function fit(source, target) {
   const size = target || source;
-  const scale = Math.min(size.width / source.width, size.height / source.height);
-  return { ...size, scale, x: (size.width - source.width * scale) / 2,
-    y: (size.height - source.height * scale) / 2 };
+  const scaleX = size.width/source.width, scaleY = size.height/source.height;
+  return {...size,scaleX,scaleY,scale:Math.min(scaleX,scaleY),x:0,y:0};
 }
 
 function svgPdf(svg, source, target) {
@@ -68,16 +69,29 @@ function svgPdf(svg, source, target) {
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
     try {
-      SVGtoPDF(doc, svg, layout.x, layout.y, { width: source.width * layout.scale,
-        height: source.height * layout.scale, preserveAspectRatio: 'xMidYMid meet', assumePt: true });
+      SVGtoPDF(doc, svg, layout.x, layout.y, { width: layout.width,
+        height: layout.height, preserveAspectRatio: 'none', assumePt: true });
       doc.end();
     } catch (err) { doc.destroy(); reject(err); }
   });
 }
 
 async function trace(buffer, source, target) {
-  const image = await tracer.readImage(buffer);
-  const dimensions = source || { width: image.width * 0.75, height: image.height * 0.75 };
+  const jpeg=buffer[0]!==137;
+  imageSize(buffer,jpeg ? 'image/jpeg' : 'image/png');
+  const decoded = await tracer.readImage(buffer);
+  // Lossy JPEG halos on white margins are background, not physical artwork.
+  // Keep a pale-only design measurable as well; raster output still needs review.
+  const bounds = pixelBounds(decoded,jpeg ? 235 : 250) || (jpeg ? pixelBounds(decoded,250) : null);
+  if (!bounds) throw new Error('Desen içerik kutusu boş');
+  const cropped = new PNG({width:bounds.w,height:bounds.h});
+  const pixels = Buffer.from(decoded.pixels);
+  for (let y=0;y<bounds.h;y++) pixels.copy(cropped.data,y*bounds.w*4,
+    ((bounds.y+y)*decoded.width+bounds.x)*4,((bounds.y+y)*decoded.width+bounds.x+bounds.w)*4);
+  buffer=PNG.sync.write(cropped);
+  const image={width:bounds.w,height:bounds.h,pixels:cropped.data};
+  const dimensions = source ? {width:image.width*source.width/decoded.width,height:image.height*source.height/decoded.height}
+    : {width:image.width*0.75,height:image.height*0.75};
   const svg = await tracer.vectorize(buffer, {
     colorMode: tracer.ColorMode.Color, hierarchical: tracer.Hierarchical.Stacked,
     mode: tracer.PathSimplifyMode.Spline, filterSpeckle: 0, colorPrecision: 6,
@@ -178,50 +192,63 @@ function rasterMinDetail(image, widthMm) {
   return min === Infinity ? null : min * widthMm / width;
 }
 
-function resizePage(page, target) {
-  const crop = page.getCropBox();
+// Measure rendered ink, then transform the original PDF operators; the output stays vector.
+async function pageContentBox(page) {
+  const scale=2, viewport=page.getViewport({scale});
+  const png=PNG.sync.read(await renderPage(page,scale));
+  const bounds=pixelBounds(png,250);
+  if (!bounds) throw new Error('PDF desen içerik kutusu boş');
+  const corners=[viewport.convertToPdfPoint(bounds.x,bounds.y),
+    viewport.convertToPdfPoint(bounds.x+bounds.w,bounds.y+bounds.h)];
+  return {x:Math.min(corners[0][0],corners[1][0]),y:Math.min(corners[0][1],corners[1][1]),
+    width:Math.abs(corners[1][0]-corners[0][0]),height:Math.abs(corners[1][1]-corners[0][1])};
+}
+function resizePage(page, target, crop) {
   const rotation = ((page.getRotation().angle % 360) + 360) % 360;
-  // Retain page content, fonts, forms and annotations; transform the coordinate space.
   const rotated = rotation === 90 || rotation === 270;
-  const physicalTarget = rotated ? { width: target.height, height: target.width } : target;
-  const layout = fit(crop, physicalTarget);
-  page.scaleContent(layout.scale, layout.scale);
-  page.translateContent(layout.x - crop.x * layout.scale, layout.y - crop.y * layout.scale);
-  page.scaleAnnotations(layout.scale, layout.scale);
-  const annots = page.node.Annots();
-  if (annots) for (let i = 0; i < annots.size(); i++) {
-    const annotation = page.doc.context.lookup(annots.get(i));
-    const rect = annotation.lookup(PDFName.of('Rect'), PDFArray);
-    if (rect) for (let j = 0; j < 4; j++) rect.set(j, PDFNumber.of(rect.lookup(j, PDFNumber).asNumber()
-      + (j % 2 ? layout.y - crop.y * layout.scale : layout.x - crop.x * layout.scale)));
+  const physicalTarget = rotated ? {width:target.height,height:target.width} : target;
+  const {scaleX,scaleY}=fit(crop,physicalTarget);
+  page.scaleContent(scaleX,scaleY);
+  page.translateContent(-crop.x*scaleX,-crop.y*scaleY);
+  page.scaleAnnotations(scaleX,scaleY);
+  const annots=page.node.Annots();
+  if (annots) for (let i=0;i<annots.size();i++) {
+    const annotation=page.doc.context.lookup(annots.get(i));
+    const rect=annotation.lookup(PDFName.of('Rect'),PDFArray);
+    if (rect) for (let j=0;j<4;j++) rect.set(j,PDFNumber.of(rect.lookup(j,PDFNumber).asNumber()
+      - (j%2 ? crop.y*scaleY : crop.x*scaleX)));
   }
-  for (const box of ['setMediaBox', 'setCropBox', 'setTrimBox', 'setBleedBox', 'setArtBox']) {
-    page[box](0, 0, physicalTarget.width, physicalTarget.height);
-  }
+  for (const box of ['setMediaBox','setCropBox','setTrimBox','setBleedBox','setArtBox'])
+    page[box](0,0,physicalTarget.width,physicalTarget.height);
+  return Math.abs(scaleX/scaleY-1);
 }
 
-/** Local only. targetMm is the FULL page size; artwork is uniformly fitted and centered. */
-async function vectorize({ buffer, mime, targetMm } = {}) {
+/** Local only. targetMm is the artwork content boundary in millimetres. */
+async function vectorize({ buffer, mime, targetMm, manualVector = false } = {}) {
   if (!Buffer.isBuffer(buffer) || !buffer.length) throw new TypeError('buffer gerekli');
   const target = targetSize(targetMm);
   mime = String(mime || '').split(';')[0].toLowerCase();
-  let pdf, kind, inputPages, rasterDetails = [], reasons = [];
+  let pdf, kind, inputPages, rasterDetails = [], reasons = [], aspectRatioError = 0;
+  if (manualVector && mime!=='application/pdf') throw new Error('Hazır vektör PDF gerekli');
   if (['image/png', 'image/jpeg', 'image/jpg'].includes(mime)) {
     const result = await trace(buffer, null, target);
     pdf = result.pdf; kind = 'raster';
     inputPages = [{ width: result.image.width, height: result.image.height }];
     const source = { width: result.image.width * 0.75, height: result.image.height * 0.75 };
-    rasterDetails.push(rasterMinDetail(result.image, source.width * fit(source, target).scale / PT_PER_MM));
+    if (target) aspectRatioError=Math.abs((target.width/target.height)/(source.width/source.height)-1);
+    rasterDetails.push(rasterMinDetail(result.image, (target || source).width / PT_PER_MM));
     reasons.push('raster_detay_ve_metin_gorsel_teyidi');
   } else if (mime === 'application/pdf') {
     inputPages = await inspectPdf(buffer);
+    if (manualVector && inputPages.some(p=>p.imageCount || (!p.vectorPaintCount && !p.textCount)))
+      throw Object.assign(new Error('Hazır vektör raster veya boş sayfa içeremez'),{status:400});
     const rasterPages = inputPages.map(x => x.imageCount > 0 && x.vectorPaintCount === 0 && x.textCount === 0);
     kind = rasterPages.every(Boolean) ? 'raster' : 'vector';
     if (!rasterPages.some(Boolean) && !target) pdf = Buffer.from(buffer);
     else {
       // Fresh document for pure raster inputs avoids serializing unused source image objects.
       const original = kind === 'raster' ? await PDFDocument.create() : await PDFDocument.load(buffer);
-      const rendered = rasterPages.some(Boolean) ? await openPdf(buffer) : null;
+      const rendered = rasterPages.some(Boolean) || target ? await openPdf(buffer) : null;
       try {
         for (let i = 0; i < inputPages.length; i++) {
           if (rasterPages[i]) {
@@ -232,9 +259,11 @@ async function vectorize({ buffer, mime, targetMm } = {}) {
             const [replacement] = await original.copyPages(traced, [0]);
             if (kind === 'raster') original.addPage(replacement);
             else { original.removePage(i); original.insertPage(i, replacement); }
-            rasterDetails.push(rasterMinDetail(result.image,
-              inputPages[i].width * fit(inputPages[i], target).scale / PT_PER_MM));
-          } else if (target) resizePage(original.getPage(i), target);
+            const source={width:result.image.width*0.75,height:result.image.height*0.75};
+            if (target) aspectRatioError=Math.max(aspectRatioError,Math.abs((target.width/target.height)/(source.width/source.height)-1));
+            rasterDetails.push(rasterMinDetail(result.image,(target || source).width/PT_PER_MM));
+          } else if (target) aspectRatioError=Math.max(aspectRatioError,
+            resizePage(original.getPage(i),target,await pageContentBox(await rendered.getPage(i+1))));
         }
         pdf = Buffer.from(await original.save({ updateFieldAppearances: false }));
       } finally { if (rendered) await rendered.destroy(); }
@@ -249,8 +278,7 @@ async function vectorize({ buffer, mime, targetMm } = {}) {
     .concat(rasterDetails.filter(x => x !== null));
   const minLineWidth = minValues.length ? Math.min(...minValues) : null;
   const pathCount = pages.reduce((sum, x) => sum + x.pathCount, 0);
-  // Uniform x/y scale is an invariant of every transform above; page aspect may differ (letterbox).
-  const aspectRatioError = 0;
+  // Both stored dimensions are authoritative; report any aspect change for visual review.
   if (pathCount > 2000) reasons.push('cok_yol');
   if (minLineWidth !== null && minLineWidth < 0.2) reasons.push('ince_cizgi');
   if (pages.some(x => x.textCount)) reasons.push('metin');
@@ -259,8 +287,8 @@ async function vectorize({ buffer, mime, targetMm } = {}) {
   if (aspectRatioError > 0.01) reasons.push('oran_bozuldu');
   return { pdf, kind, report: { pathCount, colorCount: colors.size, minLineWidth,
     minLineWidthUnit: 'mm', minLineWidthEstimated: true, aspectRatioPreserved: aspectRatioError <= 0.01,
-    aspectRatioError, aspectRatioMethod: 'uniform-transform-invariant',
-    quality: reasons.length ? 'teyit' : 'iyi', reasons: [...new Set(reasons)],
+    aspectRatioError, aspectRatioMethod: 'content-boundary-transform',
+    quality: manualVector ? 'iyi' : reasons.length ? 'teyit' : 'iyi', reasons: [...new Set(reasons)],
     pageCount: pages.length, pages: pages.map(x => ({ pathCount: x.pathCount,
       imageCount: x.imageCount, textCount: x.textCount, widthMm: x.width / PT_PER_MM,
       heightMm: x.height / PT_PER_MM })), rasterPdfMethod: kind === 'raster' && mime === 'application/pdf'
