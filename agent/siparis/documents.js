@@ -7,7 +7,7 @@ const { assertUser } = require('./auth');
 const orders = require('./orders');
 const flats = require('./flats');
 const { measureApplication, designBoxFromPng, imageSize } = require('./measure');
-const { fork } = require('node:child_process');
+const childProcess = require('node:child_process');
 const { buildWorkshopMessage, createWorkshopHandler } = require('./workshop');
 const { registerHandler } = require('./outbox');
 const UPLOAD_KINDS = ['urun_gorsel','desen_kaynak','desen_kaynak_vektor'];
@@ -344,15 +344,18 @@ async function normalizeVectorInput({buffer,mime,...rest}) {
 }
 // One render pipeline at a time, with a deadline covering queue wait AND all children.
 // An aborted task keeps its queue slot until its worker has exited.
+function preparationTimeout() {
+  return Object.assign(new Error('Hazırlama zaman aşımına uğradı'),{status:504,code:'PREPARE_TIMEOUT'});
+}
 function createRenderQueue({timeoutMs=PREPARE_TIMEOUT_MS,lockMs=PREPARE_LOCK_MS}={}) {
-  if (!(timeoutMs>0 && lockMs>timeoutMs)) throw new Error('Hazırlama kilit süresi toplam zaman aşımından uzun olmalı');
+  if (!(Number.isFinite(timeoutMs) && Number.isFinite(lockMs) && timeoutMs>0 && lockMs>timeoutMs)) throw new Error('Hazırlama kilit süresi toplam zaman aşımından uzun olmalı');
   let tail=Promise.resolve();
   return run=> {
     const controller=new AbortController();
     let timer;
     const deadline=new Promise((resolve,reject)=> {
       timer=setTimeout(()=> {
-        const error=Object.assign(new Error('Hazırlama zaman aşımı'),{status:504});
+        const error=preparationTimeout();
         reject(error);controller.abort(error);
       },timeoutMs);
     });
@@ -364,28 +367,39 @@ function createRenderQueue({timeoutMs=PREPARE_TIMEOUT_MS,lockMs=PREPARE_LOCK_MS}
   };
 }
 const renderQueue=createRenderQueue();
-function generateInChild(input,signal) {
+function generateInChild(input,signal,{timeoutMs=120000}={}) {
+  if (!(Number.isFinite(timeoutMs) && timeoutMs>0)) throw new TypeError('Geçerli render süresi gerekli');
   signal?.throwIfAborted();
   return new Promise((resolve,reject)=> {
-    const child=fork(__filename,['--vector-worker'],{serialization:'advanced',execArgv:[],stdio:['ignore','ignore','pipe','ipc']});
+    const child=childProcess.fork(__filename,['--vector-worker'],{serialization:'advanced',execArgv:[],stdio:['ignore','ignore','pipe','ipc']});
     let result,error,received=false;
-    const abort=()=> {error=signal.reason;child.kill('SIGKILL');};
+    const stop=e=> {error ||= e;child.kill('SIGKILL');};
+    const abort=()=>stop(signal.reason);
     signal?.addEventListener('abort',abort,{once:true});
-    const timer=setTimeout(()=> {error=new Error('Vektör üretimi zaman aşımına uğradı');child.kill('SIGKILL');},120000);
+    const timer=setTimeout(()=>stop(preparationTimeout()),timeoutMs);
     child.stderr.resume();
-    child.once('error',e=> {error=e;});
-    child.once('exit',code=> {
+    child.once('error',stop);
+    // exit can precede the final IPC/stdio events. Keep listeners and the queue
+    // slot until close, including failed spawns and SIGKILL cancellation.
+    child.once('close',(code,exitSignal)=> {
       clearTimeout(timer);signal?.removeEventListener('abort',abort);
       if (error) reject(error);
-      else if (!received || code!==0) reject(new Error(`Vektör süreci tamamlanamadı (${code})`));
+      else if (!received || code!==0) reject(new Error(`Vektör süreci tamamlanamadı (${exitSignal || code})`));
       else resolve(result);
     });
     child.once('message',message=> {
+      if (!message || (!Object.hasOwn(message,'result') && typeof message.error!=='string')) {
+        stop(new Error('Geçersiz render yanıtı'));return;
+      }
       received=true;
-      if (message.error) error=Object.assign(new Error(message.error),{status:message.status});
+      if (message.error) error ||= Object.assign(new Error(message.error),{status:message.status,code:message.code});
       else result=message.result;
     });
-    child.send(input,e=> {if (e) {error=e;child.kill('SIGKILL');}});
+    child.once('disconnect',()=> {
+      if (!received) stop(new Error('Vektör süreci yanıt vermeden bağlantıyı kapattı'));
+    });
+    if (signal?.aborted) {abort();return;}
+    try {child.send(input,e=> {if (e) stop(e);});} catch (e) {stop(e);}
   });
 }
 async function prepare(db,dataDir,versionId,user,regenerate=false) {
@@ -436,7 +450,14 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
       audit(db,user.id,'belgeler_hazirla',versionId,{regenerate});
       return orders.snapshot(db,versionId).files;
     });
-  } catch (e) { for (const f of written) fs.unlinkSync(f); throw e; }
+  } catch (e) {
+    for (const f of written) fs.unlinkSync(f);
+    if (e.code==='PREPARE_TIMEOUT') db.prepare(`INSERT INTO confirmations(kind,ref_table,ref_id,message)
+      SELECT 'baglanti_hatasi','order_versions',?,? WHERE NOT EXISTS
+      (SELECT 1 FROM confirmations WHERE kind='baglanti_hatasi' AND ref_table='order_versions'
+        AND ref_id=? AND message=? AND status='acik')`).run(versionId,e.message,versionId,e.message);
+    throw e;
+  }
   finally { db.prepare('UPDATE document_preparations SET token=NULL WHERE version_id=? AND token=?').run(versionId,token); }
 }
 function workshopPackage(db,versionId) {
@@ -468,8 +489,12 @@ function registerWorkshop(boundDb,dataDir) {
     return {providerRef:result.providerRef};
   });
 }
-module.exports={init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,validateUpload,upload,measure,prepare,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+module.exports={init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
 if (require.main===module && process.argv[2]==='--vector-worker') {
+  // A one-shot worker must not depend on PDF/native-library handles becoming
+  // idle. Flush the entire IPC response before exiting; close drains it in the parent.
+  const reply=message=>process.send(message,error=>process.exit(error ? 1 : 0));
+  process.once('disconnect',()=>process.exit(1));
   process.once('message',async job=> {
     try {
       let result;
@@ -481,7 +506,7 @@ if (require.main===module && process.argv[2]==='--vector-worker') {
           if (buffer!==null) result.push({kind,buffer});
         }
       }
-      process.send({result},()=>process.disconnect());
-    } catch (e) {process.send({error:e.message,status:e.status},()=>process.disconnect());}
+      reply({result});
+    } catch (e) {reply({error:e.message,status:e.status,code:e.code});}
   });
 }

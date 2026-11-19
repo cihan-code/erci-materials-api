@@ -1,5 +1,12 @@
 'use strict';
-const {test}=require('node:test');
+const {test,after}=require('node:test');
+// Bound the whole file, including stuck HTTP requests or referenced worker handles.
+// A test-only watchdog also fails the file when ordinary test cancellation cannot drain it.
+const fileDeadline=setTimeout(()=> {
+  console.error('Belge test dosyası 120 saniyeyi aştı');process.exit(1);
+},120000);
+fileDeadline.unref();
+after(()=>clearTimeout(fileDeadline));
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
@@ -361,7 +368,7 @@ test('G14-9 rendering serializes jobs, releases after failure and bounds the com
   await assert.rejects(queue(async()=> {throw Error('fixture');}),/fixture/);
   await queue(run);
   const short=documents.createRenderQueue({timeoutMs:10,lockMs:30});
-  await assert.rejects(short(signal=>new Promise(resolve=>signal.addEventListener('abort',resolve))),/zaman aşımı/);
+  await assert.rejects(short(signal=>new Promise(resolve=>signal.addEventListener('abort',resolve))),/zaman aşımına/);
   await short(async()=>{});
   assert.throws(()=>documents.createRenderQueue({timeoutMs:100,lockMs:50}),/kilit/);
 });

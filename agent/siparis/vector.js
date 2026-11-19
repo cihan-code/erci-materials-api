@@ -32,16 +32,20 @@ class CanvasFactory {
 
 async function openPdf(buffer) {
   const lib = await pdfjs();
-  return lib.getDocument({ data: Uint8Array.from(buffer), isEvalSupported: false,
-    useSystemFonts: true, CanvasFactory, verbosity: 0 }).promise;
+  const task = lib.getDocument({ data: Uint8Array.from(buffer), isEvalSupported: false,
+    useSystemFonts: true, CanvasFactory, verbosity: 0 });
+  try { return await task.promise; }
+  catch (error) { await task.destroy(); throw error; }
 }
 
 async function renderPage(page, scale = 2) {
   const viewport = page.getViewport({ scale });
   if (viewport.width * viewport.height > 40_000_000) throw Object.assign(new Error('PDF sayfasi cok buyuk (40 MP siniri)'),{status:413});
-  const pair = new CanvasFactory().create(viewport.width, viewport.height);
-  await page.render({ canvasContext: pair.context, viewport, canvasFactory: new CanvasFactory() }).promise;
-  return pair.canvas.toBuffer('image/png');
+  const factory = new CanvasFactory(), pair = factory.create(viewport.width, viewport.height);
+  try {
+    await page.render({ canvasContext: pair.context, viewport, canvasFactory: factory }).promise;
+    return pair.canvas.toBuffer('image/png');
+  } finally { factory.destroy(pair); }
 }
 
 function targetSize(targetMm) {
