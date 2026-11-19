@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS users (
  id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
- role TEXT NOT NULL CHECK(role IN ('yonetici','ekip')), onay_yetkisi INTEGER NOT NULL DEFAULT 0 CHECK(onay_yetkisi IN (0,1)),
+ role TEXT NOT NULL CHECK(role IN ('yonetici','ekip')), onay_yetkisi INTEGER NOT NULL DEFAULT 1 CHECK(onay_yetkisi IN (0,1)),
  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS order_versions (
 );
 CREATE TABLE IF NOT EXISTS stock_items (
  id INTEGER PRIMARY KEY, fabric_key TEXT NOT NULL UNIQUE, name TEXT NOT NULL, color_name TEXT, color_no TEXT,
- unit TEXT NOT NULL CHECK(unit IN ('kg','m','adet')), legacy_fabric_id TEXT UNIQUE
+ unit TEXT NOT NULL CHECK(unit IN ('kg','m','adet')), legacy_fabric_id TEXT UNIQUE, color_hex TEXT
 );
 CREATE TABLE IF NOT EXISTS order_lines (
  id INTEGER PRIMARY KEY, version_id INTEGER NOT NULL REFERENCES order_versions(id), line_key TEXT NOT NULL,
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS applications (
 );
 CREATE TABLE IF NOT EXISTS files (
  id INTEGER PRIMARY KEY, version_id INTEGER NOT NULL REFERENCES order_versions(id), kind TEXT NOT NULL, path TEXT NOT NULL,
- sha256 TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), UNIQUE(version_id,kind)
+ sha256 TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE TABLE IF NOT EXISTS approvals (
  id INTEGER PRIMARY KEY, version_id INTEGER NOT NULL UNIQUE REFERENCES order_versions(id), approved_by INTEGER NOT NULL REFERENCES users(id),
@@ -47,7 +47,9 @@ CREATE TABLE IF NOT EXISTS invoice_lines (
  unit TEXT NOT NULL CHECK(unit IN ('kg','m','adet')), purchase_ref TEXT,
  delivery_status TEXT NOT NULL DEFAULT 'teslim_bekliyor' CHECK(delivery_status IN ('teslim_bekliyor','teslim_alindi')),
  match_status TEXT NOT NULL DEFAULT 'eslesmedi' CHECK(match_status IN ('eslesti','teyit','eslesmedi')),
- item_id INTEGER REFERENCES stock_items(id), allocation_json TEXT, UNIQUE(source_invoice_id,source_line_id)
+ item_id INTEGER REFERENCES stock_items(id), allocation_json TEXT, source TEXT, invoice_no TEXT, invoice_date TEXT,
+ supplier_vkn TEXT, unit_price REAL, content_hash TEXT, match_reasons_json TEXT, created_at TEXT, updated_at TEXT,
+ UNIQUE(source_invoice_id,source_line_id)
 );
 CREATE TABLE IF NOT EXISTS stock_movements (
  id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL REFERENCES stock_items(id),
@@ -64,7 +66,7 @@ CREATE TABLE IF NOT EXISTS allocations (
  consumed_milli INTEGER NOT NULL DEFAULT 0 CHECK(typeof(consumed_milli)='integer' AND consumed_milli>=0), UNIQUE(order_line_id,material_key)
 );
 CREATE TABLE IF NOT EXISTS confirmations (
- id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('olcu','fatura_eslesme','eksik_alan','baglanti_hatasi','vektor_kalite')),
+ id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('olcu','fatura_eslesme','eksik_alan','baglanti_hatasi','vektor_kalite','eski_surum')),
  ref_table TEXT NOT NULL, ref_id INTEGER NOT NULL, message TEXT NOT NULL,
  status TEXT NOT NULL DEFAULT 'acik' CHECK(status IN ('acik','cozuldu')), resolved_by INTEGER REFERENCES users(id)
 );
@@ -84,3 +86,5 @@ CREATE INDEX IF NOT EXISTS stock_movements_item ON stock_movements(item_id);
 CREATE INDEX IF NOT EXISTS allocation_item ON allocations(item_id);
 CREATE INDEX IF NOT EXISTS outbox_due ON outbox(status,next_run_at);
 CREATE INDEX IF NOT EXISTS lines_version ON order_lines(version_id);
+CREATE INDEX IF NOT EXISTS files_version ON files(version_id,kind);
+CREATE INDEX IF NOT EXISTS confirmations_ref ON confirmations(ref_table,ref_id,status);

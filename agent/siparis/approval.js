@@ -2,7 +2,9 @@
 const { tx, audit, fail, integer } = require('./db');
 const { assertUser } = require('./auth');
 const { version, retireWorkshopJobs } = require('./orders');
-const { available, movement } = require('./stock');
+const { available, movement, fillShortages } = require('./stock');
+// Only these kinds go to the workshop; onay_formu, uretim_formu and customer files never do.
+const WORKSHOP_KINDS = ['baski_formu', 'nakis_formu', 'desen_vektor'];
 const recipeReader = require('../operations/recipes');
 function result(db, versionId) {
   return { approval: db.prepare('SELECT * FROM approvals WHERE version_id=?').get(versionId),
@@ -15,7 +17,7 @@ function approveVersion(db, { versionId, userId, fileId, recipes = recipeReader.
     const v = version(db, versionId);
     if (db.prepare('SELECT id FROM approvals WHERE version_id=?').get(versionId)) return result(db, versionId);
     if (v.status !== 'onay_bekliyor') fail('Sürüm onay beklemiyor', 409);
-    if (!db.prepare('SELECT id FROM files WHERE id=? AND version_id=?').get(fileId ?? null, versionId)) fail('Onay dosyası bu sürüme ait olmalı');
+    if (!db.prepare("SELECT id FROM files WHERE id=? AND version_id=? AND kind='onay_formu'").get(fileId ?? null, versionId)) fail('Onay dosyası bu sürüme ait onay_formu olmalı');
     if (!recipes.version) fail('Reçete sürümü gerekli');
     const lines = db.prepare('SELECT * FROM order_lines WHERE version_id=? ORDER BY id').all(versionId);
     if (!lines.length) fail('Sipariş satırı gerekli');
@@ -58,17 +60,23 @@ function approveVersion(db, { versionId, userId, fileId, recipes = recipeReader.
       db.prepare('UPDATE order_lines SET recipe_version=? WHERE id=?').run(String(recipes.version), line.id);
     }
     // Release only excess or removed material. Carried reservations are transferred to the new allocation without ledger churn.
+    const released = new Set();
     for (const a of old) {
       const target = plan.find(p => p.prior?.id === a.id);
       if (!target && a.consumed_milli) fail('Tüketilmiş malzeme revizyondan kaldırılamaz', 409);
       const release = a.reserved_milli - (target?.carried || 0);
-      if (release) movement(db, { itemId: a.item_id, type: 'tahsis_iade', qtyMilli: release, orderLineId: a.order_line_id,
-        businessKey: `tahsis_iade:${versionId}:${a.id}`, userId });
+      if (release) {
+        movement(db, { itemId: a.item_id, type: 'tahsis_iade', qtyMilli: release, orderLineId: a.order_line_id,
+          businessKey: `tahsis_iade:${versionId}:${a.id}`, userId });
+        released.add(a.item_id);
+      }
       db.prepare('UPDATE allocations SET reserved_milli=0,shortage_milli=0 WHERE id=?').run(a.id);
     }
     // Install every carry before computing availability so one revised line cannot steal another line's reservation.
     for (const p of plan) db.prepare(`INSERT INTO allocations(order_line_id,material_key,item_id,need_milli,reserved_milli,shortage_milli,consumed_milli)
       VALUES(?,?,?,?,?,?,?)`).run(p.line.id, p.materialKey, p.itemId, p.need, p.carried, p.need-p.consumed-p.carried, p.consumed);
+    // Released stock first closes earlier approvals' shortages (FIFO); this version has no approval row yet, so it comes last.
+    for (const itemId of released) fillShortages(db, itemId, { userId, keyPrefix: `serbest:onay:${versionId}:${itemId}` });
     for (const p of plan) {
       const extra = p.itemId == null ? 0 : Math.min(p.need-p.consumed-p.carried, Math.max(0, available(db, p.itemId)));
       if (extra) {
@@ -82,11 +90,11 @@ function approveVersion(db, { versionId, userId, fileId, recipes = recipeReader.
     db.prepare("UPDATE order_versions SET status='onaylandi' WHERE id=?").run(versionId);
     const order = db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id);
     const enqueue = db.prepare('INSERT INTO outbox(kind,idempotency_key,version_id,payload_json) VALUES(?,?,?,?)');
-    for (const file of db.prepare('SELECT * FROM files WHERE version_id=? ORDER BY id').all(versionId))
-      enqueue.run('atolye_dosya', `atolye:${versionId}:${file.kind}`, versionId, JSON.stringify({ versionId, orderNo: order.order_no, versionNo: v.version_no, file }));
+    for (const file of db.prepare(`SELECT * FROM files WHERE version_id=? AND kind IN (${WORKSHOP_KINDS.map(() => '?').join(',')}) ORDER BY id`).all(versionId, ...WORKSHOP_KINDS))
+      enqueue.run('atolye_dosya', `atolye:${versionId}:${file.id}`, versionId, JSON.stringify({ versionId, orderNo: order.order_no, versionNo: v.version_no, file }));
     enqueue.run('maliyet_aktarim', `maliyet:${order.order_no}:${v.version_no}`, versionId, JSON.stringify({ versionId, orderNo: order.order_no, versionNo: v.version_no }));
     audit(db, userId, 'surum_onayla', versionId, { fileId, recipeVersion: recipes.version });
     return result(db, versionId);
   });
 }
-module.exports = { approveVersion };
+module.exports = { approveVersion, WORKSHOP_KINDS };

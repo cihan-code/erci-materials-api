@@ -104,8 +104,15 @@ function retireWorkshopJobs(db, versionId, userId) {
   db.prepare("UPDATE outbox SET status='iptal',updated_at=? WHERE version_id=? AND kind='atolye_dosya' AND status IN ('bekliyor','manuel_bekliyor','basarisiz')").run(new Date().toISOString(), versionId);
   if (db.prepare("SELECT id FROM outbox WHERE version_id=? AND kind='atolye_dosya' AND status='tamam'").get(versionId) &&
       !db.prepare("SELECT id FROM confirmations WHERE ref_table='order_versions' AND ref_id=? AND message=?").get(versionId, `Atölyede eski sürüm (v${v.version_no}) var`)) {
-    db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('eksik_alan','order_versions',?,?)").run(versionId, `Atölyede eski sürüm (v${v.version_no}) var`);
+    db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('eski_surum','order_versions',?,?)").run(versionId, `Atölyede eski sürüm (v${v.version_no}) var`);
     audit(db, userId, 'eski_atolye_teyidi', versionId);
+  }
+}
+// A revision makes the old version's pending cost transfer obsolete; finished transfers stay (G5 updates the same record).
+function retireCostJobs(db, versionId, userId) {
+  for (const job of db.prepare("SELECT id FROM outbox WHERE version_id=? AND kind='maliyet_aktarim' AND status IN ('bekliyor','fiyat_bekliyor','manuel_bekliyor')").all(versionId)) {
+    db.prepare("UPDATE outbox SET status='iptal',updated_at=? WHERE id=?").run(new Date().toISOString(), job.id);
+    audit(db, userId, 'maliyet_iptal', job.id, { versionId });
   }
 }
 function reviseVersion(db, versionId, changes = {}, user) {
@@ -113,8 +120,13 @@ function reviseVersion(db, versionId, changes = {}, user) {
     const userId = uid(user); assertUser(db, userId);
     const old = snapshot(db, versionId);
     if (!['taslak','onay_bekliyor','onaylandi'].includes(old.status)) fail('Yalnız güncel sürüm revize edilebilir', 409);
+    // Revising an approved version reopens stock and workshop work, so it needs approval rights.
+    if (old.status === 'onaylandi') assertUser(db, userId, true);
     // Check all earlier approved ancestors as well (multiple unapproved revisions).
-    for (const v of db.prepare('SELECT id FROM order_versions WHERE order_id=?').all(old.order_id)) retireWorkshopJobs(db, v.id, userId);
+    for (const v of db.prepare('SELECT id FROM order_versions WHERE order_id=?').all(old.order_id)) {
+      retireWorkshopJobs(db, v.id, userId);
+      retireCostJobs(db, v.id, userId);
+    }
     const nextNo = db.prepare('SELECT MAX(version_no)+1 AS n FROM order_versions WHERE order_id=?').get(old.order_id).n;
     const id = Number(db.prepare("INSERT INTO order_versions(order_id,version_no,status,previous_version_id,created_by) VALUES(?,?,'onay_bekliyor',?,?)").run(old.order_id, nextNo, versionId, userId).lastInsertRowid);
     const seen = new Set();

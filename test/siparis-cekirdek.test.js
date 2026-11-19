@@ -14,6 +14,21 @@ const { approveVersion } = require('../agent/siparis/approval');
 const stock = require('../agent/siparis/stock');
 const queue = require('../agent/siparis/outbox');
 const mount = require('../agent/siparis/routes');
+const http = require('http');
+// node:http instead of the global fetch: undici in the same process as better-sqlite3 11 on Node 24 aborts natively at
+// random GCs ("RemoveEnvironmentCleanupHook ... env != nullptr"). Same call shape as fetch for these tests.
+function fetch(url, { method = 'GET', headers = {}, body } = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = http.request({ host: u.hostname, port: u.port, path: u.pathname + u.search, method, agent: false,
+      headers: { ...headers, ...(body != null ? { 'content-length': Buffer.byteLength(body) } : {}) } }, res => {
+      let text = ''; res.setEncoding('utf8'); res.on('data', c => { text += c; });
+      res.on('end', () => resolve({ status: res.statusCode, headers: { get: n => res.headers[n.toLowerCase()] ?? null },
+        json: async () => JSON.parse(text), text: async () => text }));
+    });
+    req.on('error', reject); req.end(body);
+  });
+}
 const recipes = { version: 'test-350-v1', products: { sweat: { materials: [{ key:'kumas',g_per_unit:350 }] } } };
 async function setup(t, opening = 20000) {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'siparis-core-'));
@@ -21,15 +36,18 @@ async function setup(t, opening = 20000) {
   const db=openDb(file);
   t.after(() => { if (db.open) db.close(); fs.rmSync(dir,{recursive:true,force:true}); });
   const manager=await auth.createUser(db,{name:'Yönetici',password:'test-password',role:'yonetici'});
-  const team=await auth.createUser(db,{name:'Ekip',password:'test-password',role:'ekip'});
-  stock.importLegacyFabrics(db,{fabrics:[{id:'f1',name:'Örnek kumaş',colorName:'Mavi',unit:'kg'}],movements:[{fabricId:'f1',type:'giris',qty:opening/1000}]});
+  // A restricted account keeps the role checks under test; by default every user may approve (see A13 test).
+  const team=await auth.createUser(db,{name:'Ekip',password:'test-password',role:'ekip',onayYetkisi:false});
+  stock.importLegacyFabrics(db,{fabrics:[{id:'f1',name:'Örnek kumaş',colorName:'Mavi',unit:'kg'}]});
   const itemId=db.prepare('SELECT id FROM stock_items').get().id;
+  if (opening) stock.recordCount(db,{itemId,countedMilli:opening,countKey:'acilis-test',userId:manager.id});
   let count=0;
   function make(quantity=100, extra={}) {
     const order=orders.createOrder(db,{order_no:`MRC-T${++count}`,customer_name:'Örnek Kulüp',lines:[{product_key:'sweat',fabric_item_id:itemId,quantity,...extra}]},team);
     const v=order.version;
     const f=orders.addFile(db,v.id,{kind:'onay_formu',path:`/synthetic/${v.id}.pdf`,sha256:'a'.repeat(64)},team);
-    return {order,versionId:v.id,lineId:v.lines[0].id,fileId:f.id};
+    const print=orders.addFile(db,v.id,{kind:'baski_formu',path:`/synthetic/${v.id}-baski.pdf`,sha256:'d'.repeat(64)},team);
+    return {order,versionId:v.id,lineId:v.lines[0].id,fileId:f.id,printFileId:print.id};
   }
   function approve(input, options={}) { return approveVersion(db,{...input,userId:manager.id,recipes,...options}); }
   function submit(input) { orders.submitForApproval(db,input.versionId,team); return input; }
@@ -38,7 +56,7 @@ async function setup(t, opening = 20000) {
       .run('INV-TEST',String(++count),qty,itemId).lastInsertRowid);
   }
   function revision(input, changes) {
-    const v=orders.reviseVersion(db,input.versionId,changes,team);
+    const v=orders.reviseVersion(db,input.versionId,changes,manager);
     const f=orders.addFile(db,v.id,{kind:'onay_formu',path:`/synthetic/${v.id}.pdf`,sha256:'b'.repeat(64)},team);
     return {versionId:v.id,lineId:v.lines[0].id,fileId:f.id,version:v};
   }
@@ -68,8 +86,9 @@ test('approval is atomic and idempotent; submit has no inventory or queue effect
   assert.equal(first.allocations[0].need_milli,35000);
   assert.deepEqual(summary(f.db),[20000,20000,0,15000]);
   assert.equal(f.db.prepare("SELECT count(*) n FROM stock_movements WHERE type='tahsis'").get().n,1);
-  assert.equal(first.outbox.length,3);
-  assert.equal(first.outbox.filter(j=>j.kind==='atolye_dosya').length,2);
+  // Only workshop kinds are queued: onay_formu and uretim_formu never go to the workshop.
+  assert.equal(first.outbox.length,2);
+  assert.deepEqual(first.outbox.filter(j=>j.kind==='atolye_dosya').map(j=>j.idempotency_key),[`atolye:${order.versionId}:${order.printFileId}`]);
   assert.equal(f.db.prepare('SELECT recipe_version FROM order_lines WHERE id=?').get(order.lineId).recipe_version,'test-350-v1');
 });
 
@@ -152,12 +171,14 @@ test('invalid delivery targets and partial quantity rollback the receipt',async 
   assert.equal(f.db.prepare('SELECT delivery_status FROM invoice_lines WHERE id=?').get(invoiceLineId).delivery_status,'teslim_bekliyor');
 });
 
-test('legacy import is idempotent and unsupported types roll back the entire import',async t => {
+test('legacy import is idempotent, writes no stock and an invalid fabric rolls back the entire import',async t => {
   const f=await setup(t); const input={fabrics:[{id:'f1',name:'Changed',unit:'kg'}],movements:[]};
   assert.deepEqual(stock.importLegacyFabrics(f.db,input),{imported:0});
   assert.deepEqual(summary(f.db),[20000,0,20000,0]);
-  assert.throws(()=>stock.importLegacyFabrics(f.db,{fabrics:[{id:'f2',name:'Örnek',unit:'kg'}],movements:[{fabricId:'f2',type:'unknown',qty:1}]}),/eşleme/);
-  assert.equal(f.db.prepare('SELECT count(*) n FROM stock_items').get().n,1);
+  assert.deepEqual(stock.importLegacyFabrics(f.db,{fabrics:[{id:'f2',name:'Örnek',unit:'kg'}],movements:[{fabricId:'f2',type:'giris',qty:9}]}),{imported:1});
+  assert.equal(f.db.prepare("SELECT count(*) n FROM stock_movements m JOIN stock_items s ON s.id=m.item_id WHERE s.legacy_fabric_id='f2'").get().n,0);
+  assert.throws(()=>stock.importLegacyFabrics(f.db,{fabrics:[{id:'f3',name:'Örnek',unit:'kg'},{id:'f4',name:'Örnek',unit:'ton'}]}),/CHECK/);
+  assert.equal(f.db.prepare('SELECT count(*) n FROM stock_items').get().n,2);
 });
 
 test('dimension revision is pending, cancels old workshop jobs immediately and carries stock without churn',async t => {
@@ -216,8 +237,9 @@ test('multi-line revision installs every carry before allocating extra stock',as
 });
 
 test('fabric change releases old item and allocates the new item',async t => {
-  const f=await setup(t,50000); stock.importLegacyFabrics(f.db,{fabrics:[{id:'f2',name:'İkinci kumaş',unit:'kg'}],movements:[{fabricId:'f2',type:'giris',qty:40}]});
+  const f=await setup(t,50000); stock.importLegacyFabrics(f.db,{fabrics:[{id:'f2',name:'İkinci kumaş',unit:'kg'}]});
   const item2=f.db.prepare("SELECT id FROM stock_items WHERE legacy_fabric_id='f2'").get().id;
+  stock.recordCount(f.db,{itemId:item2,countedMilli:40000,countKey:'acilis-test',userId:f.manager.id});
   const a=f.submit(f.make());f.approve(a); const b=f.revision(a,{lines:[{id:a.lineId,fabric_item_id:item2}]});f.approve(b);
   assert.deepEqual(stock.stockSummary(f.db).map(i=>i.reserved_milli),[0,35000]);
 });
@@ -228,14 +250,14 @@ test('default recipe uses 720 g, lining is conditional and unbound secondary mat
   assert.equal(result.allocations.some(a=>a.material_key==='astar'),false);
   const secondary=result.allocations.find(a=>a.material_key==='kaskorse');
   assert.equal(secondary.item_id,null);assert.equal(secondary.shortage_milli,12500);
-  assert.match(f.db.prepare('SELECT message FROM confirmations').get().message,/stok kalemi/);
+  assert.match(f.db.prepare("SELECT message FROM confirmations WHERE ref_table='order_lines'").get().message,/stok kalemi/);
   const b=f.submit(f.make(1,{lining:true,material_items:{kaskorse:f.itemId,astar:f.itemId}}));
   const r=f.approve(b,{recipes:undefined});assert.equal(r.allocations.find(a=>a.material_key==='astar').need_milli,50);
 });
 
 test('unknown recipe quantity creates a confirmation without inventing inventory needs',async t => {
   const f=await setup(t);const a=f.submit(f.make(10,{product_key:'esofman'}));const r=f.approve(a,{recipes:undefined});
-  assert.equal(r.allocations.length,1);assert.match(f.db.prepare('SELECT message FROM confirmations').get().message,/miktarı bilinmiyor/);
+  assert.equal(r.allocations.length,1);assert.match(f.db.prepare("SELECT message FROM confirmations WHERE ref_table='order_lines'").get().message,/miktarı bilinmiyor/);
 });
 
 test('adjustment privilege, negative-stock prevention and idempotent consumption',async t => {
@@ -263,12 +285,15 @@ test('automatic sending defaults off; manual completion is audited and never cal
 
 test('queue claims are exclusive; failures back off and fifth attempt opens a single confirmation',async t => {
   const f=await setup(t);f.approve(f.submit(f.make()));const other=openDb(f.file);t.after(()=>other.close());
+  t.after(queue.registerHandler('maliyet_aktarim',async()=>({providerRef:'unused'})));
+  const expected=[60,300,900,3600,21600];
   let previousDelay=0,job;
   for(let i=1;i<=5;i++) {
     job=queue.claimNext(f.db,'maliyet_aktarim');assert.equal(job.attempts,i);
     assert.equal(queue.claimNext(other,'maliyet_aktarim'),null);
     const failed=queue.markFailed(f.db,job.id,Error('test-provider-offline'),job.claim_token);
     const delay=Date.parse(failed.next_run_at)-Date.now();assert.ok(delay>previousDelay);previousDelay=delay;
+    assert.ok(Math.abs(delay/1000-expected[i-1])<5,`attempt ${i} waits ${expected[i-1]} s`);
     if(i<5) {assert.equal(failed.status,'bekliyor');assert.equal(queue.claimNext(f.db,'maliyet_aktarim'),null);f.db.prepare("UPDATE outbox SET next_run_at='2000-01-01' WHERE id=?").run(job.id);}
     else assert.equal(failed.status,'basarisiz');
   }
@@ -292,7 +317,9 @@ test('handler receives stable provider idempotency key and supports price waitin
 });
 
 test('interrupted claim requires confirmation rather than an unverified external resend',async t => {
-  const f=await setup(t);f.approve(f.submit(f.make()));const job=queue.claimNext(f.db,'maliyet_aktarim');
+  const f=await setup(t);f.approve(f.submit(f.make()));
+  t.after(queue.registerHandler('maliyet_aktarim',async()=>({providerRef:'unused'})));
+  const job=queue.claimNext(f.db,'maliyet_aktarim');
   f.db.prepare("UPDATE outbox SET next_run_at='2000-01-01' WHERE id=?").run(job.id);
   assert.equal(queue.claimNext(f.db,'maliyet_aktarim'),null);
   assert.equal(f.db.prepare('SELECT status FROM outbox WHERE id=?').get(job.id).status,'basarisiz');
@@ -355,7 +382,7 @@ test('enabled workshop adapter sends once; in-flight dispatch blocks revision',a
   const f=await setup(t);const a=f.submit(f.make());f.approve(a);
   let finish,calls=0;
   t.after(queue.registerHandler('atolye_dosya',async(payload,{idempotencyKey})=>{
-    calls++;assert.equal(payload.file.id,a.fileId);assert.equal(idempotencyKey,`atolye:${a.versionId}:onay_formu`);
+    calls++;assert.equal(payload.file.id,a.printFileId);assert.equal(idempotencyKey,`atolye:${a.versionId}:${a.printFileId}`);
     await new Promise(resolve=>{finish=resolve;});return {providerRef:'workshop-1'};
   }));
   const sending=queue.runOnce(f.db,'atolye_dosya');
@@ -368,6 +395,7 @@ test('enabled workshop adapter sends once; in-flight dispatch blocks revision',a
 test('foreign approval files and invalid revision inputs cannot leave partial mutations',async t => {
   const f=await setup(t,50000);const a=f.submit(f.make()),other=f.make();
   assert.throws(()=>f.approve({...a,fileId:other.fileId}),/bu sürüme/);
+  assert.throws(()=>f.approve({...a,fileId:a.printFileId}),e=>e.status===400&&/onay_formu/.test(e.message));
   assert.equal(f.db.prepare('SELECT count(*) n FROM approvals').get().n,0);
   f.approve(a);
   assert.throws(()=>f.revision(a,{lines:[{id:other.lineId,quantity:120}]}),/kaynak sürüme/);
@@ -382,8 +410,145 @@ test('CLI accepts stdin and environment password without printing or storing pla
   const output=execFileSync(process.execPath,[cli,'kullanici-ekle','CLI Ekip','ekip','--onay'],{env,input:'synthetic-secret\n',encoding:'utf8'});
   assert.ok(!output.includes('synthetic-secret'));
   execFileSync(process.execPath,[cli,'kullanici-ekle','CLI Yönetici','yonetici'],{env:{...env,SIPARIS_SIFRE:'second-secret'},encoding:'utf8'});
+  execFileSync(process.execPath,[cli,'kullanici-ekle','CLI Varsayılan','ekip'],{env:{...env,SIPARIS_SIFRE:'third-secret'},encoding:'utf8'});
+  execFileSync(process.execPath,[cli,'kullanici-ekle','CLI Kısıtlı','ekip','--onaysiz'],{env:{...env,SIPARIS_SIFRE:'fourth-secret'},encoding:'utf8'});
   const db=openDb(path.join(f.dir,'siparis.sqlite'));t.after(()=>db.close());
   const first=await auth.login(db,{name:'CLI Ekip',password:'synthetic-secret'});assert.equal(first.user.onay_yetkisi,1);
   const second=await auth.login(db,{name:'CLI Yönetici',password:'second-secret'});assert.equal(second.user.role,'yonetici');
-  assert.equal(db.prepare("SELECT count(*) n FROM audit_log WHERE action='kullanici_ekle'").get().n,2);
+  assert.deepEqual(db.prepare("SELECT name,onay_yetkisi o FROM users WHERE name LIKE 'CLI %' ORDER BY id").all().map(u=>[u.name,u.o]),
+    [['CLI Ekip',1],['CLI Yönetici',1],['CLI Varsayılan',1],['CLI Kısıtlı',0]]);
+  assert.equal(db.prepare("SELECT count(*) n FROM audit_log WHERE action='kullanici_ekle'").get().n,4);
+});
+
+test('A9: an older database loses UNIQUE(version_id,kind) and gains eski_surum once, keeping rows and references',async t => {
+  const Database=require('better-sqlite3');
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'siparis-migrate-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const file=path.join(dir,'old.sqlite');
+  const current=fs.readFileSync(path.resolve(__dirname,'../agent/siparis/schema.sql'),'utf8');
+  const old=current.replace(/(files \([\s\S]*?DEFAULT \(strftime\('%Y-%m-%dT%H:%M:%fZ','now'\)\))\n\);/,'$1, UNIQUE(version_id,kind)\n);')
+    .replace(",'eski_surum'",'').replace(/allocation_json TEXT,[\s\S]*?UNIQUE\(source_invoice_id/,'allocation_json TEXT, UNIQUE(source_invoice_id');
+  assert.notEqual(old,current);
+  const raw=new Database(file);raw.pragma('journal_mode = WAL');raw.exec(old);
+  raw.exec(`INSERT INTO users(id,name,password_hash,role) VALUES(1,'Eski','x','yonetici');
+    INSERT INTO orders(id,order_no) VALUES(1,'MRC-T900');INSERT INTO order_versions(id,order_id,version_no,created_by,status) VALUES(1,1,1,1,'onaylandi');
+    INSERT INTO files(id,version_id,kind,path,sha256) VALUES(7,1,'onay_formu','/synthetic/a.pdf','${'a'.repeat(64)}'),(8,1,'desen_vektor','/synthetic/v1.pdf','${'b'.repeat(64)}');
+    INSERT INTO approvals(version_id,approved_by,approved_file_id) VALUES(1,1,7);
+    INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('eksik_alan','order_versions',1,'Eski teyit');`);
+  assert.throws(()=>raw.prepare("INSERT INTO files(version_id,kind,path,sha256) VALUES(1,'desen_vektor','/synthetic/v2.pdf',?)").run('c'.repeat(64)),/UNIQUE/);
+  raw.close();
+  for (let round=0;round<2;round++) {
+    const db=openDb(file);
+    try {
+      assert.deepEqual(db.prepare('SELECT id,kind FROM files ORDER BY id').all().slice(0,2),[{id:7,kind:'onay_formu'},{id:8,kind:'desen_vektor'}]);
+      assert.equal(db.prepare('SELECT approved_file_id FROM approvals').get().approved_file_id,7);
+      assert.equal(db.prepare('SELECT message FROM confirmations').get().message,'Eski teyit');
+      assert.deepEqual(db.pragma('foreign_key_check'),[]);assert.equal(db.pragma('foreign_keys',{simple:true}),1);
+      db.prepare("INSERT INTO files(version_id,kind,path,sha256) VALUES(1,'desen_vektor',?,?)").run(`/synthetic/extra-${round}.pdf`,'c'.repeat(64));
+      db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('eski_surum','order_versions',1,?)").run(`round ${round}`);
+      assert.ok(db.prepare('PRAGMA table_info(invoice_lines)').all().some(c=>c.name==='content_hash'));
+    } finally { db.close(); }
+  }
+  const db=openDb(file);t.after(()=>db.close());
+  assert.equal(db.prepare("SELECT count(*) n FROM files WHERE kind='desen_vektor'").get().n,3);
+});
+
+test('A9: one version holds a vector per application and two product images',async t => {
+  const f=await setup(t);const a=f.make();
+  for (const [kind,n] of [['desen_vektor',1],['desen_vektor',2],['urun_gorsel',1],['urun_gorsel',2]])
+    orders.addFile(f.db,a.versionId,{kind,path:`/synthetic/${kind}-${n}.pdf`,sha256:'e'.repeat(64)},f.team);
+  const r=f.approve(f.submit(a));
+  const keys=r.outbox.filter(j=>j.kind==='atolye_dosya').map(j=>j.idempotency_key);
+  const workshop=f.db.prepare("SELECT id FROM files WHERE version_id=? AND kind IN ('baski_formu','desen_vektor') ORDER BY id").all(a.versionId);
+  assert.deepEqual(keys,workshop.map(x=>`atolye:${a.versionId}:${x.id}`));
+  assert.equal(keys.length,3);
+});
+
+test('A10: parked adapter results keep the job open; only {providerRef} completes it',async t => {
+  const f=await setup(t);f.approve(f.submit(f.make()));
+  const job=()=>f.db.prepare("SELECT * FROM outbox WHERE kind='maliyet_aktarim'").get();
+  let answer;t.after(queue.registerHandler('maliyet_aktarim',async()=>answer));
+  answer={status:'manuel_bekliyor',providerRef:'draft-1'};
+  assert.equal((await queue.runOnce(f.db,'maliyet_aktarim')).status,'manuel_bekliyor');
+  assert.equal(job().provider_ref,'draft-1');
+  assert.equal(await queue.runOnce(f.db,'maliyet_aktarim'),null,'a parked job is not claimed again');
+  assert.equal(queue.markManualSent(f.db,job().id,f.manager,'kayit-1').status,'tamam');
+  f.db.prepare("UPDATE outbox SET status='bekliyor',provider_ref=NULL,next_run_at='2000-01-01' WHERE id=?").run(job().id);
+  answer={status:'fiyat_bekliyor'};
+  assert.equal((await queue.runOnce(f.db,'maliyet_aktarim')).status,'fiyat_bekliyor');
+  queue.retry(f.db,job().id,f.manager);
+  answer=undefined;
+  const unclear=await queue.runOnce(f.db,'maliyet_aktarim');
+  assert.equal(unclear.status,'basarisiz');
+  assert.equal(f.db.prepare("SELECT count(*) n FROM confirmations WHERE kind='baglanti_hatasi' AND ref_id=?").get(job().id).n,1);
+  queue.retry(f.db,job().id,f.manager);
+  answer={providerRef:'cost-9'};
+  const done=await queue.runOnce(f.db,'maliyet_aktarim');
+  assert.deepEqual([done.status,done.provider_ref],['tamam','cost-9']);
+});
+
+test('A11: a permanent adapter error fails at once with an eksik_alan confirmation; provider refs are stored as text',async t => {
+  const f=await setup(t);f.approve(f.submit(f.make()));
+  const job=()=>f.db.prepare("SELECT * FROM outbox WHERE kind='maliyet_aktarim'").get();
+  let calls=0;
+  t.after(queue.registerHandler('maliyet_aktarim',async()=>{calls++;throw Object.assign(new Error('Karışık ürün türü: İşler kaydı belirsiz'),{permanent:true});}));
+  const failed=await queue.runOnce(f.db,'maliyet_aktarim');
+  assert.deepEqual([failed.status,failed.attempts,calls],['basarisiz',1,1]);
+  f.db.prepare("UPDATE outbox SET next_run_at='2000-01-01' WHERE id=?").run(failed.id);
+  assert.equal(await queue.runOnce(f.db,'maliyet_aktarim'),null,'no second attempt');
+  assert.deepEqual(f.db.prepare("SELECT kind,message FROM confirmations WHERE ref_table='outbox' AND ref_id=?").all(failed.id),
+    [{kind:'eksik_alan',message:'Karışık ürün türü: İşler kaydı belirsiz'}]);
+  queue.retry(f.db,failed.id,f.manager);
+  assert.equal(f.db.prepare("SELECT count(*) n FROM confirmations WHERE ref_table='outbox' AND ref_id=? AND status='acik'").get(failed.id).n,0);
+  // An ordinary error still backs off and is retried.
+  t.after(queue.registerHandler('maliyet_aktarim',async()=>{throw new Error('ağ hatası');}));
+  assert.equal((await queue.runOnce(f.db,'maliyet_aktarim')).status,'bekliyor');
+  const claimed=()=>{f.db.prepare("UPDATE outbox SET next_run_at='2000-01-01',status='bekliyor' WHERE id=?").run(job().id);return queue.claimNext(f.db,'maliyet_aktarim');};
+  let c=claimed();assert.equal(queue.markDone(f.db,c.id,null,c.claim_token).provider_ref,null);
+  c=claimed();assert.equal(queue.markDone(f.db,c.id,{id:'k-1',rev:2},c.claim_token).provider_ref,'{"id":"k-1","rev":2}');
+});
+
+test('A12: a count opens a fresh item, later corrects by the difference, is idempotent per key and closes shortages FIFO',async t => {
+  const f=await setup(t,0);
+  const count=(countedMilli,countKey,user=f.manager)=>stock.recordCount(f.db,{itemId:f.itemId,countedMilli,countKey,userId:user.id});
+  assert.equal(f.db.prepare('SELECT count(*) n FROM stock_movements').get().n,0,'import writes no opening');
+  const a=f.submit(f.make(10)),b=f.submit(f.make(10));f.approve(a);f.approve(b);
+  assert.deepEqual(summary(f.db),[0,0,0,7000]);
+  const first=count(5000,'sayim-1');
+  assert.deepEqual([first.type,first.differenceMilli,first.movement.business_key],['acilis',5000,`sayim:sayim-1:${f.itemId}`]);
+  assert.deepEqual(f.db.prepare('SELECT reserved_milli r FROM allocations ORDER BY id').all().map(x=>x.r),[3500,1500],'earliest approval first');
+  assert.deepEqual(count(5000,'sayim-1'),first);
+  assert.throws(()=>count(6000,'sayim-1'),e=>e.status===409);
+  const second=count(9000,'sayim-2');
+  assert.deepEqual([second.type,second.previousMilli,second.differenceMilli],['duzeltme',5000,4000]);
+  assert.deepEqual(summary(f.db),[9000,7000,2000,0]);
+  const same=count(9000,'sayim-3');
+  assert.deepEqual([same.differenceMilli,same.movement],[0,null]);
+  assert.equal(f.db.prepare("SELECT count(*) n FROM audit_log WHERE action='stok_sayim'").get().n,3);
+  assert.deepEqual(count(9000,'sayim-3'),same,'a zero-difference count is idempotent too');
+  assert.throws(()=>count(6999,'sayim-4'),e=>e.status===409&&/ayrılmış/.test(e.message));
+  assert.throws(()=>count(9000,'sayim-5',f.team),e=>e.status===403,'a restricted account cannot count');
+  const app=express();mount(app,{db:f.db,dataDir:f.dir,worker:false,recipes});
+  const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));
+  t.after(()=>new Promise(r=>{server.close(r);server.closeAllConnections?.();}));
+  const {token}=await auth.login(f.db,{name:f.manager.name,password:'test-password'});
+  const res=await fetch(`http://127.0.0.1:${server.address().port}/api/siparis/stok/sayim`,{method:'POST',
+    headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify({itemId:f.itemId,countedKg:9.5,countKey:'sayim-http',note:'raf sayımı'})});
+  assert.equal(res.status,200);assert.equal((await res.json()).differenceMilli,500);
+  assert.deepEqual(summary(f.db),[9500,7000,2500,0]);
+});
+
+test('A13: a default account may approve, adjust, count, retry and revise; each act is audited under that person',async t => {
+  const f=await setup(t,50000);
+  const user=await auth.createUser(f.db,{name:'Yeni Ekip',password:'test-password'});
+  assert.equal(user.onay_yetkisi,1);
+  const a=f.submit(f.make());
+  approveVersion(f.db,{versionId:a.versionId,userId:user.id,fileId:a.fileId,recipes});
+  stock.adjustStock(f.db,{itemId:f.itemId,qtyMilli:100,businessKey:'a13',note:'sayım',userId:user.id});
+  stock.recordCount(f.db,{itemId:f.itemId,countedMilli:50000,countKey:'a13',userId:user.id});
+  t.after(queue.registerHandler('maliyet_aktarim',async()=>{throw Object.assign(Error('veri hatası'),{permanent:true});}));
+  const job=await queue.runOnce(f.db,'maliyet_aktarim');queue.retry(f.db,job.id,user);
+  const v2=orders.reviseVersion(f.db,a.versionId,{},user);assert.equal(v2.status,'onay_bekliyor');
+  assert.deepEqual(f.db.prepare('SELECT DISTINCT action FROM audit_log WHERE user_id=? ORDER BY action').all(user.id).map(r=>r.action),
+    ['kullanici_ekle','kuyruk_tekrar','maliyet_iptal','revizyon','stok_duzelt','stok_sayim','surum_onayla']);
+  assert.throws(()=>orders.reviseVersion(f.db,f.approve(f.submit(f.make())).approval.version_id,{},f.team),e=>e.status===403,'restriction is still one flag away');
 });

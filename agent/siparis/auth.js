@@ -16,7 +16,8 @@ async function verifyPassword(password, encoded) {
   const actual = await scrypt(password, salt, 64);
   return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
 }
-async function createUser(db, { name, password, role = 'ekip', onayYetkisi = false }) {
+// Everyone signed in may approve by default (owner's decision); onayYetkisi:false keeps a restricted account possible.
+async function createUser(db, { name, password, role = 'ekip', onayYetkisi = true }) {
   if (typeof name !== 'string' || !name.trim()) fail('Kullanıcı adı gerekli');
   if (!['ekip', 'yonetici'].includes(role)) fail('Geçersiz rol');
   const encoded = await passwordHash(password);

@@ -109,7 +109,12 @@ function safeOriginalName(name) {
 const app = express();
 app.use(cors({ origin: CORS_ORIGIN }));
 app.use(express.json({ limit: '20mb' }));
-require('./agent/siparis/routes')(app, { dataDir: DATA_DIR });
+// Siparis modulu acilamazsa (better-sqlite3 / veritabani) panelin geri kalani calismaya devam eder; uclari 503 doner.
+try { require('./agent/siparis/routes')(app, { dataDir: DATA_DIR }); }
+catch (err) {
+  console.error('[siparis] modul acilamadi:', err && err.message);
+  app.use('/api/siparis', (req, res) => res.status(503).json({ error: 'Sipariş servisi şu an kullanılamıyor.' }));
+}
 
 function checkApiKey(req, res, next) {
   if (!API_KEY) return next(); // API_KEY ayarlanmadiysa kontrol atlanir (kurulum kolaylastirma - onerilmez)

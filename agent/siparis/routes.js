@@ -41,10 +41,26 @@ module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, r
   router.post('/surumler/:id/gonder', wrap((req,res) => res.json(orders.submitForApproval(db,Number(req.params.id),req.user))));
   router.post('/surumler/:id/onay', requireUser('onay'), wrap((req,res) => res.json(approveVersion(db,{versionId:Number(req.params.id),fileId:req.body.fileId,userId:req.user.id,recipes}))));
   router.post('/surumler/:id/revizyon', wrap((req,res) => res.status(201).json(orders.reviseVersion(db,Number(req.params.id),req.body,req.user))));
-  router.get('/stok', (req,res) => res.json(stock.stockSummary(db)));
+  router.get('/stok', (req,res) => res.json(stock.stockView(db)));
+  router.post('/stok/kalemler', wrap((req,res) => {
+    try { res.status(201).json(stock.createStockItem(db,req.body,req.user.id)); }
+    catch (err) { if (err.item) return res.status(409).json({error:err.message,item:err.item}); throw err; }
+  }));
+  router.patch('/stok/kalemler/:id', wrap((req,res) => res.json(stock.updateStockItem(db,Number(req.params.id),req.body,req.user.id))));
   router.get('/stok/hareketler', (req,res) => res.json(req.query.itemId ? db.prepare('SELECT * FROM stock_movements WHERE item_id=? ORDER BY id DESC').all(req.query.itemId) : db.prepare('SELECT * FROM stock_movements ORDER BY id DESC').all()));
   router.post('/stok/teslim', wrap((req,res) => res.json(stock.receiveDelivery(db,{...req.body,userId:req.user.id}))));
   router.post('/stok/duzelt', requireUser('onay'), wrap((req,res) => res.json(stock.adjustStock(db,{...req.body,userId:req.user.id}))));
+  router.post('/stok/sayim', requireUser('onay'), wrap((req,res) => {
+    const b = req.body || {}, item = db.prepare('SELECT * FROM stock_items WHERE id=?').get(b.itemId ?? null);
+    if (!item) fail('Stok kalemi bulunamadı',404);
+    let counted = b.countedMilli;
+    if (b.countedKg != null) {
+      if (item.unit !== 'kg' || typeof b.countedKg !== 'number' || !Number.isFinite(b.countedKg) || b.countedKg < 0) fail('countedKg yalnız kg kalemde, sıfır veya pozitif sayı olarak verilir');
+      if (counted != null && counted !== Math.round(b.countedKg*1000)) fail('countedKg ile countedMilli uyuşmuyor');
+      counted = Math.round(b.countedKg*1000);
+    }
+    res.json(stock.recordCount(db,{itemId:item.id,countedMilli:counted,countKey:b.countKey,note:b.note ?? null,userId:req.user.id}));
+  }));
   router.post('/stok/cikis', wrap((req,res) => res.json(stock.consume(db,{...req.body,userId:req.user.id}))));
   router.get('/teyitler', (req,res) => res.json(db.prepare('SELECT * FROM confirmations WHERE status=? ORDER BY id').all(req.query.status || 'acik')));
   router.post('/teyitler/:id/coz', wrap((req,res) => res.json(tx(db, () => {
