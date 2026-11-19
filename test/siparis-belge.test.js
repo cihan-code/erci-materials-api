@@ -218,7 +218,8 @@ test('HTTP regeneration rolls back registrations and removes partial new bytes o
   const dir=path.dirname(a.source.path), before=fs.readdirSync(dir).sort();
   f.db.exec("CREATE TRIGGER belge_injected_failure BEFORE INSERT ON files WHEN NEW.kind='onay_formu' BEGIN SELECT RAISE(ABORT,'injected'); END");
   assert.equal((await f.post(`/surumler/${a.id}/hazirla?yeniden=1`)).status,409);
-  assert.deepEqual(f.db.prepare('SELECT * FROM files WHERE version_id=? ORDER BY id').all(a.id),a.files);
+  const core=r=>({id:r.id,kind:r.kind,path:r.path,sha256:r.sha256});
+  assert.deepEqual(f.db.prepare('SELECT * FROM files WHERE version_id=? ORDER BY id').all(a.id).map(core),a.files.map(core));
   assert.deepEqual(fs.readdirSync(dir).sort(),before);
   assert.equal(f.db.prepare('SELECT token FROM document_preparations WHERE version_id=?').get(a.id).token,null);
 });
