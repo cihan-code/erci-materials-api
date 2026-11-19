@@ -260,6 +260,7 @@ test('A5 FIFO: stock released by a revision or a count goes to the earliest appr
   assert.deepEqual(f.alloc(A.lineIds[0]), { r: 10000, s: 15000 });
   const v2 = orders.reviseVersion(f.db, B.versionId, { lines: [{ id: B.lineIds[0], quantity: 10 }] }, f.manager);
   const file = orders.addFile(f.db, v2.id, { kind: 'onay_formu', path: '/synthetic/b2.pdf', sha256: 'c'.repeat(64) }, f.team).id;
+  orders.submitForApproval(f.db, v2.id, f.team);
   f.approve({ versionId: v2.id, fileId: file });
   assert.deepEqual(f.alloc(v2.lines[0].id), { r: 10000, s: 0 });
   assert.deepEqual(f.alloc(A.lineIds[0]), { r: 20000, s: 5000 }, 'A receives the 10 kg B released');
@@ -283,7 +284,7 @@ test('revision rights and cost jobs: approved needs approval rights (default on)
   const a2 = orders.reviseVersion(f.db, a.versionId, {}, f.team);
   orders.reviseVersion(f.db, b.versionId, {}, f.manager);
   assert.deepEqual([cost(a.versionId), cost(b.versionId)], ['iptal', 'tamam']);
-  assert.equal(orders.reviseVersion(f.db, a2.id, {}, f.restricted).status, 'onay_bekliyor', 'any account may revise a pending version');
+  assert.equal(orders.reviseVersion(f.db, a2.id, {}, f.restricted).status, 'taslak', 'any account may revise a draft version');
   for (const status of ['bekliyor', 'manuel_bekliyor']) {
     const c = f.order([{ product_key: 'sweat', fabric_item_id: item, quantity: 1 }]);
     f.db.prepare("UPDATE outbox SET status=? WHERE version_id=? AND kind='maliyet_aktarim'").run(status, c.versionId);

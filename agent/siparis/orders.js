@@ -22,9 +22,13 @@ function snapshot(db, versionId) {
 function insertApplication(db, lineId, app) {
   if (!['baski','nakis'].includes(app.kind) || typeof app.position !== 'string' || !app.position.trim()) fail('Uygulama türü ve konumu gerekli');
   for (const k of ['width_mm','height_mm']) if (app[k] != null && (!Number.isFinite(app[k]) || app[k] <= 0)) fail('Geçersiz ölçü');
-  return Number(db.prepare(`INSERT INTO applications(line_id,kind,position,width_mm,height_mm,measure_source,needs_confirmation)
+  const needsConfirmation = !app.measure_source || app.needs_confirmation;
+  const id = Number(db.prepare(`INSERT INTO applications(line_id,kind,position,width_mm,height_mm,measure_source,needs_confirmation)
     VALUES(?,?,?,?,?,?,?)`).run(lineId, app.kind, app.position, app.width_mm ?? null, app.height_mm ?? null,
-    app.measure_source ?? null, app.needs_confirmation ? 1 : 0).lastInsertRowid);
+    app.measure_source || null, needsConfirmation ? 1 : 0).lastInsertRowid);
+  if (needsConfirmation) db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('olcu','applications',?,?)")
+    .run(id, app.measure_source ? 'Uygulama ölçüsü teyit edilmeli' : 'Ölçü kaynağı yok; ekip teyidi gerekli');
+  return id;
 }
 function jsonObject(value, label) {
   let obj = value ?? {};
@@ -32,7 +36,7 @@ function jsonObject(value, label) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) fail(`${label}: nesne gerekli`);
   return obj;
 }
-function insertLine(db, versionId, line, lineKey) {
+function insertLine(db, versionId, line, lineKey, sourceApplications = []) {
   integer(line.quantity, 'quantity', 1);
   if (typeof line.product_key !== 'string' || !line.product_key.trim()) fail('Ürün anahtarı gerekli');
   const sizes = jsonObject(line.sizes_json ?? line.sizes, 'sizes');
@@ -47,7 +51,20 @@ function insertLine(db, versionId, line, lineKey) {
   const id = Number(db.prepare(`INSERT INTO order_lines(version_id,line_key,product_key,fabric_item_id,color_name,quantity,sizes_json,lining,material_items_json)
     VALUES(?,?,?,?,?,?,?,?,?)`).run(versionId, lineKey || crypto.randomUUID(), line.product_key, line.fabric_item_id ?? null,
     line.color_name ?? null, line.quantity, JSON.stringify(sizes), [true,1,'var'].includes(line.lining) ? 1 : 0, JSON.stringify(materials)).lastInsertRowid);
-  for (const a of line.applications || []) insertApplication(db, id, a);
+  for (const a of line.applications || []) {
+    const appId = insertApplication(db, id, a);
+    const source = sourceApplications.find(old => old.id === a.id &&
+      ['kind','position','width_mm','height_mm','measure_source','needs_confirmation'].every(k => old[k] === a[k]));
+    // Only unchanged measurements inherit a resolution. Missing provenance always needs a fresh check.
+    if (source?.measure_source) {
+      const confirmations = db.prepare("SELECT * FROM confirmations WHERE kind='olcu' AND ref_table='applications' AND ref_id=?").all(source.id);
+      if (confirmations.length) {
+        db.prepare("DELETE FROM confirmations WHERE kind='olcu' AND ref_table='applications' AND ref_id=?").run(appId);
+        for (const c of confirmations) db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message,status,resolved_by) VALUES('olcu','applications',?,?,?,?)")
+          .run(appId,c.message,c.status,c.resolved_by);
+      }
+    }
+  }
   return id;
 }
 function createOrder(db, input, user) {
@@ -82,8 +99,9 @@ function addApplication(db, lineId, app, user) {
 function addFile(db, versionId, file, user) {
   return tx(db, () => {
     assertUser(db, uid(user));
-    if (!['taslak','onay_bekliyor'].includes(version(db, versionId).status)) fail('Bu sürüme dosya eklenemez', 409);
+    if (version(db, versionId).status !== 'taslak') fail('Bu sürüme dosya eklenemez', 409);
     if (!file.kind || !file.path || !/^[a-f0-9]{64}$/i.test(file.sha256)) fail('Dosya türü, yolu ve SHA256 gerekli');
+    if (db.prepare('SELECT id FROM files WHERE version_id=? AND path=?').get(versionId,file.path)) fail('Dosya yolu bu sürümde zaten kayıtlı',409);
     const id = Number(db.prepare('INSERT INTO files(version_id,kind,path,sha256) VALUES(?,?,?,?)').run(versionId, file.kind, file.path, file.sha256).lastInsertRowid);
     audit(db, uid(user), 'dosya_ekle', id); return db.prepare('SELECT * FROM files WHERE id=?').get(id);
   });
@@ -128,7 +146,7 @@ function reviseVersion(db, versionId, changes = {}, user) {
       retireCostJobs(db, v.id, userId);
     }
     const nextNo = db.prepare('SELECT MAX(version_no)+1 AS n FROM order_versions WHERE order_id=?').get(old.order_id).n;
-    const id = Number(db.prepare("INSERT INTO order_versions(order_id,version_no,status,previous_version_id,created_by) VALUES(?,?,'onay_bekliyor',?,?)").run(old.order_id, nextNo, versionId, userId).lastInsertRowid);
+    const id = Number(db.prepare("INSERT INTO order_versions(order_id,version_no,status,previous_version_id,created_by) VALUES(?,?,'taslak',?,?)").run(old.order_id, nextNo, versionId, userId).lastInsertRowid);
     const seen = new Set();
     for (const change of changes.lines ?? old.lines) {
       const source = change.id != null ? old.lines.find(l => l.id === change.id) : change.line_key ? old.lines.find(l => l.line_key === change.line_key) : null;
@@ -138,7 +156,7 @@ function reviseVersion(db, versionId, changes = {}, user) {
       const merged = { ...source, ...change };
       if (Object.hasOwn(change, 'sizes')) delete merged.sizes_json;
       if (Object.hasOwn(change, 'material_items')) delete merged.material_items_json;
-      insertLine(db, id, merged, source?.line_key);
+      insertLine(db, id, merged, source?.line_key, source?.applications);
     }
     if (!db.prepare('SELECT id FROM order_lines WHERE version_id=?').get(id)) fail('En az bir satır gerekli');
     // Files must be regenerated for this version: copying an old PDF could authorize stale dimensions.

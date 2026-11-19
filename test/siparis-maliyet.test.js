@@ -84,6 +84,7 @@ async function setup(t, { jobs = [] } = {}) {
   }
   function revise(versionId, changes) {
     const v = orders.reviseVersion(db, versionId, changes, team), fileId = attach(v.id);
+    orders.submitForApproval(db, v.id, team);
     approveVersion(db, { versionId: v.id, userId: manager.id, fileId, recipes });
     return v.id;
   }
