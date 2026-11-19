@@ -58,6 +58,7 @@ async function setup(t, opening = 20000) {
   function revision(input, changes) {
     const v=orders.reviseVersion(db,input.versionId,changes,manager);
     const f=orders.addFile(db,v.id,{kind:'onay_formu',path:`/synthetic/${v.id}.pdf`,sha256:'b'.repeat(64)},team);
+    orders.submitForApproval(db,v.id,team);
     return {versionId:v.id,lineId:v.lines[0].id,fileId:f.id,version:v};
   }
   return {db,dir,file,manager,team,itemId,make,approve,submit,invoice,revision};
@@ -187,10 +188,10 @@ test('legacy import is idempotent, writes no stock and an invalid fabric rolls b
   assert.equal(f.db.prepare('SELECT count(*) n FROM stock_items').get().n,2);
 });
 
-test('dimension revision is pending, cancels old workshop jobs immediately and carries stock without churn',async t => {
+test('dimension revision starts draft, then submits, cancels old workshop jobs immediately and carries stock without churn',async t => {
   const f=await setup(t,50000); const a=f.make(100,{applications:[{kind:'baski',position:'on',width_mm:100,height_mm:200}]}); f.approve(f.submit(a));
   const revision=f.revision(a,{lines:[{id:a.lineId,applications:[{kind:'baski',position:'on',width_mm:120,height_mm:200}]}]});
-  assert.equal(revision.version.status,'onay_bekliyor');
+  assert.equal(revision.version.status,'taslak');
   assert.equal(orders.snapshot(f.db,a.versionId).status,'eski');
   assert.equal(revision.version.lines[0].applications[0].width_mm,120);
   assert.equal(revision.version.files.length,0);
@@ -553,7 +554,7 @@ test('A13: a default account may approve, adjust, count, retry and revise; each 
   stock.recordCount(f.db,{itemId:f.itemId,countedMilli:50000,countKey:'a13',userId:user.id});
   t.after(queue.registerHandler('maliyet_aktarim',async()=>{throw Object.assign(Error('veri hatası'),{permanent:true});}));
   const job=await queue.runOnce(f.db,'maliyet_aktarim');queue.retry(f.db,job.id,user);
-  const v2=orders.reviseVersion(f.db,a.versionId,{},user);assert.equal(v2.status,'onay_bekliyor');
+  const v2=orders.reviseVersion(f.db,a.versionId,{},user);assert.equal(v2.status,'taslak');
   assert.deepEqual(f.db.prepare('SELECT DISTINCT action FROM audit_log WHERE user_id=? ORDER BY action').all(user.id).map(r=>r.action),
     ['kullanici_ekle','kuyruk_tekrar','maliyet_iptal','revizyon','stok_duzelt','stok_sayim','surum_onayla']);
   assert.throws(()=>orders.reviseVersion(f.db,f.approve(f.submit(f.make())).approval.version_id,{},f.team),e=>e.status===403,'restriction is still one flag away');

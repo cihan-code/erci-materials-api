@@ -6,11 +6,14 @@ const { tx, audit, fail, integer } = require('./db');
 const { assertUser } = require('./auth');
 const orders = require('./orders');
 const flats = require('./flats');
-const { measureApplication, designBoxFromPng } = require('./measure');
+const { measureApplication, designBoxFromPng, imageSize } = require('./measure');
 const { fork } = require('node:child_process');
 const { buildWorkshopMessage, createWorkshopHandler } = require('./workshop');
 const { registerHandler } = require('./outbox');
-const UPLOAD_KINDS = ['urun_gorsel','desen_kaynak'];
+const UPLOAD_KINDS = ['urun_gorsel','desen_kaynak','desen_kaynak_vektor'];
+const SOURCE_KINDS = ['desen_kaynak','desen_kaynak_vektor'];
+const PREPARE_TIMEOUT_MS = 8*60e3;
+const PREPARE_LOCK_MS = 10*60e3;
 const GENERATED = ['uretim_formu','onay_formu','baski_formu','nakis_formu','desen_vektor'];
 const WORKSHOP = ['baski_formu','nakis_formu','desen_vektor'];
 const roots = new WeakMap();
@@ -37,10 +40,13 @@ function init(db) {
     token TEXT, started_at INTEGER, ready INTEGER NOT NULL DEFAULT 0, source_json TEXT
   );
   `);
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS document_file_path ON files(version_id,path)');
   flats.init(db);
 }
 function safeSegment(value) {
-  if (typeof value !== 'string' || !/^[\p{L}\p{N}][\p{L}\p{N} _.-]{0,119}$/u.test(value) || value.includes('..'))
+  if (typeof value === 'string' && value.includes('~')) fail('Dosya yolunda geçersiz sipariş numarası',400);
+  if (typeof value === 'string') value = value.replaceAll('/', '~2F');
+  if (typeof value !== 'string' || !/^[\p{L}\p{N}][\p{L}\p{N} _~.-]{0,359}$/u.test(value) || value.includes('..'))
     fail('Dosya yolunda geçersiz sipariş numarası', 400);
   return value;
 }
@@ -76,19 +82,16 @@ function readFile(dataDir, file) {
 }
 function validateUpload(file) {
   if (!file?.buffer?.length) fail('file alanında dosya gerekli');
+  if (file.buffer.length>25*1024*1024) fail('Dosya en çok 25 MB olabilir',413);
   const name = file.originalname;
   if (!name || name.includes('..') || /[\\/\x00]/.test(name)) fail('Geçersiz dosya adı');
   const ext = path.extname(name).toLowerCase();
   const mime = {'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.pdf':'application/pdf','.svg':'image/svg+xml'}[ext];
   if (!mime || file.mimetype !== mime) fail('Yalnız PNG/JPG/PDF/SVG kabul edilir',415);
   const b = file.buffer;
-  if (mime === 'image/png') {
-    if (b.length < 24 || !b.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) fail('Geçersiz PNG');
-    const w=b.readUInt32BE(16), h=b.readUInt32BE(20);
-    if (!w || !h || w*h>40e6) fail('PNG en çok 40 megapiksel olabilir');
-    try { require('pngjs').PNG.sync.read(b); } catch { fail('Geçersiz PNG'); }
-  } else if (mime === 'image/jpeg' && !(b[0]===255 && b[1]===216 && b[2]===255)) fail('Geçersiz JPG');
-  else if (mime === 'application/pdf' && b.subarray(0,5).toString() !== '%PDF-') fail('Geçersiz PDF');
+  if (mime === 'image/png' || mime === 'image/jpeg') {
+    try { imageSize(b,mime); } catch (e) { fail(e.message,e.status || 400); }
+  } else if (mime === 'application/pdf' && b.subarray(0,5).toString() !== '%PDF-') fail('Geçersiz PDF');
   else if (mime === 'image/svg+xml') {
     const s=b.toString('utf8');
     if (!/<svg[\s>]/i.test(s) || /<!DOCTYPE|<!ENTITY|<script|<foreignObject|\bon\w+\s*=|(?:href|url)\s*[=(]\s*['"]?\s*(?!#)[^\s'"\)]/i.test(s))
@@ -123,7 +126,8 @@ function saveFile(db, dataDir, v, kind, content, user, meta = {}, written = []) 
 }
 function upload(db, dataDir, versionId, input, file, user) {
   assertUser(db,user.id);
-  if (!UPLOAD_KINDS.includes(input.kind)) fail('Yükleme türü urun_gorsel veya desen_kaynak olmalı');
+  if (!UPLOAD_KINDS.includes(input.kind)) fail('Geçersiz kaynak dosya türü');
+  if (input.kind === 'desen_kaynak_vektor' && !['pdf','svg'].includes(file.ext)) fail('Hazır vektör PDF veya SVG olmalı');
   const written=[];
   try { return tx(db, () => {
     const v=draft(db,versionId); unlocked(db,versionId);
@@ -134,7 +138,7 @@ function upload(db, dataDir, versionId, input, file, user) {
     return saveFile(db,dataDir,v,input.kind,file.buffer,user,{...file,lineId,gorunum:input.gorunum},written);
   }); } catch (e) { for (const f of written) fs.unlinkSync(f); throw e; }
 }
-function measure(db, dataDir, input, user) {
+function measure(db, dataDir, input, user, applicationId = null) {
   assertUser(db,user.id);
   if (!input || typeof input!=='object' || Array.isArray(input)) fail('Ölçü gövdesi nesne olmalı');
   if (!['gogus','sirt','kol','ense','kapuson'].includes(input.position)) fail('Geçersiz uygulama konumu');
@@ -146,9 +150,11 @@ function measure(db, dataDir, input, user) {
     const flat=flats.get(db,input.flatId);
     reference = {refLengthPx:flat.refLengthPx,refLengthCm:flat.refLengthCm,refAciklama:flat.refAciklama,flatId:flat.id};
   }
+  if (![reference.refLengthPx,reference.refLengthCm].every(n=>Number.isFinite(n) && n>0)) fail('Pozitif referans px ve cm gerekli');
   let source, box=input.designBoxPx;
+  const automaticBox = !box && input.desenDosyaId != null;
   if (input.desenDosyaId != null) {
-    source=db.prepare("SELECT * FROM files WHERE id=? AND version_id=? AND kind='desen_kaynak'").get(integer(Number(input.desenDosyaId),'desenDosyaId',1),line.version_id);
+    source=db.prepare("SELECT * FROM files WHERE id=? AND version_id=? AND kind IN ('desen_kaynak','desen_kaynak_vektor')").get(integer(Number(input.desenDosyaId),'desenDosyaId',1),line.version_id);
     if (!source) fail('Desen dosyası bu sürüme ait değil');
     const meta=db.prepare('SELECT * FROM document_file_meta WHERE file_id=?').get(source.id);
     if (meta?.line_id && meta.line_id!==lineId) fail('Desen dosyası başka satıra ait');
@@ -160,17 +166,96 @@ function measure(db, dataDir, input, user) {
   let result;
   try { result=measureApplication({...reference,designBoxPx:box,imageKind:input.imageKind,flags:input.flags}); }
   catch (e) { fail(e.message); }
+  if (automaticBox) {
+    result.needsConfirmation=true;
+    result.reasons.push('Desen dosyasının piksel kutusu düz çizim referansıyla aynı görselden değil; ölçü teyidi gerekli');
+    result.reason=result.reasons.join(' ');
+  }
   return tx(db, () => {
     draft(db,line.version_id); unlocked(db,line.version_id);
-    const application=orders.addApplication(db,lineId,{kind:input.kind,position:input.position,
-      width_mm:result.width_mm,height_mm:result.height_mm,needs_confirmation:result.needsConfirmation,
-      measure_source:JSON.stringify({...reference,designBoxPx:box,imageKind:input.imageKind,flags:input.flags || {},desenDosyaId:source?.id,reasons:result.reasons})},user);
+    const values={kind:input.kind,position:input.position,width_mm:result.width_mm,height_mm:result.height_mm,
+      needs_confirmation:result.needsConfirmation,
+      measure_source:JSON.stringify({...reference,designBoxPx:box,imageKind:input.imageKind,flags:input.flags || {},desenDosyaId:source?.id,automaticBox,reasons:result.reasons})};
+    let application;
+    if (applicationId == null) application=orders.addApplication(db,lineId,values,user);
+    else {
+      if (!['baski','nakis'].includes(values.kind)) fail('Geçersiz uygulama türü');
+      const old=db.prepare('SELECT * FROM applications WHERE id=? AND line_id=?').get(applicationId,lineId);
+      if (!old) fail('Uygulama bulunamadı',404);
+      db.prepare('UPDATE applications SET kind=?,position=?,width_mm=?,height_mm=?,needs_confirmation=?,measure_source=? WHERE id=?')
+        .run(values.kind,values.position,values.width_mm,values.height_mm,values.needs_confirmation?1:0,values.measure_source,applicationId);
+      db.prepare("UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE ref_table='applications' AND ref_id=? AND kind='olcu' AND status='acik'").run(user.id,applicationId);
+      if (result.needsConfirmation) db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('olcu','applications',?,?)").run(applicationId,result.reason);
+      application=db.prepare('SELECT * FROM applications WHERE id=?').get(applicationId);
+      audit(db,user.id,'uygulama_yeniden_olc',applicationId);
+    }
+    db.prepare('DELETE FROM document_application_sources WHERE application_id=?').run(application.id);
     if (source) db.prepare('INSERT INTO document_application_sources(application_id,file_id) VALUES(?,?)').run(application.id,source.id);
-    let confirmationId=null;
-    if (result.needsConfirmation) confirmationId=Number(db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('olcu','applications',?,?)").run(application.id,result.reason).lastInsertRowid);
+    const confirmationId=db.prepare("SELECT id FROM confirmations WHERE kind='olcu' AND ref_table='applications' AND ref_id=? AND status='acik' ORDER BY id DESC LIMIT 1").get(application.id)?.id ?? null;
+    if (confirmationId) db.prepare('UPDATE confirmations SET message=? WHERE id=?').run(result.reason,confirmationId);
     return {...result,application,confirmationId};
   });
 }
+function editApplication(db,dataDir,applicationId,changes,user) {
+  assertUser(db,user.id);
+  return tx(db,()=> {
+    const app=db.prepare('SELECT a.*,l.version_id FROM applications a JOIN order_lines l ON l.id=a.line_id WHERE a.id=?').get(applicationId);
+    if (!app) fail('Uygulama bulunamadı',404);
+    draft(db,app.version_id); unlocked(db,app.version_id);
+    if (!changes || typeof changes!=='object' || Array.isArray(changes)) fail('Uygulama gövdesi nesne olmalı');
+    if (Object.hasOwn(changes,'lineId') && Number(changes.lineId)!==app.line_id) fail('Uygulama satırı değiştirilemez');
+    let previous={};
+    if (app.measure_source) {
+      try { previous=JSON.parse(app.measure_source); } catch { previous=null; }
+      if (!previous || typeof previous!=='object' || Array.isArray(previous)) previous={description:app.measure_source};
+    }
+    const measurementKeys=['flatId','refLengthPx','refLengthCm','designBoxPx','imageKind','flags'];
+    if (measurementKeys.some(key=>Object.hasOwn(changes,key))) {
+      const input={...previous,...changes,lineId:app.line_id,kind:changes.kind ?? app.kind,position:changes.position ?? app.position};
+      // An automatic design-file box never becomes a placement box merely by editing another field.
+      if (previous.automaticBox && !Object.hasOwn(changes,'designBoxPx')) input.designBoxPx=null;
+      return measure(db,dataDir,input,user,app.id);
+    }
+    if (changes.kind!=null && !['baski','nakis'].includes(changes.kind)) fail('Geçersiz uygulama türü');
+    if (changes.position!=null && !['gogus','sirt','kol','ense','kapuson'].includes(changes.position)) fail('Geçersiz uygulama konumu');
+    const changedDimensions=['width_mm','height_mm'].some(k=>Object.hasOwn(changes,k));
+    for (const k of ['width_mm','height_mm']) if (Object.hasOwn(changes,k) && (!Number.isSafeInteger(changes[k]) || changes[k]<=0)) fail('Geçersiz ölçü');
+    if (changes.desenDosyaId!=null) {
+      const v=orders.snapshot(db,app.version_id), source=v.files.find(f=>f.id===Number(changes.desenDosyaId) && SOURCE_KINDS.includes(f.kind));
+      const meta=source && db.prepare('SELECT line_id FROM document_file_meta WHERE file_id=?').get(source.id);
+      if (!source || (meta?.line_id && meta.line_id!==app.line_id)) fail('Desen dosyası bu satır/sürüme ait değil');
+      db.prepare('INSERT INTO document_application_sources(application_id,file_id) VALUES(?,?) ON CONFLICT(application_id) DO UPDATE SET file_id=excluded.file_id').run(app.id,source.id);
+      previous.desenDosyaId=source.id;
+    }
+    const uncertain=changedDimensions || !app.measure_source;
+    db.prepare('UPDATE applications SET kind=?,position=?,width_mm=?,height_mm=?,measure_source=?,needs_confirmation=? WHERE id=?')
+      .run(changes.kind ?? app.kind,changes.position ?? app.position,changes.width_mm ?? app.width_mm,changes.height_mm ?? app.height_mm,
+        uncertain ? null : JSON.stringify(previous),uncertain ? 1 : app.needs_confirmation,app.id);
+    if (uncertain && !db.prepare("SELECT id FROM confirmations WHERE kind='olcu' AND ref_table='applications' AND ref_id=? AND status='acik'").get(app.id))
+      db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('olcu','applications',?,'Elle değiştirilen ölçü teyit edilmeli')").run(app.id);
+    audit(db,user.id,'uygulama_duzenle',app.id);
+    return {application:db.prepare('SELECT * FROM applications WHERE id=?').get(app.id)};
+  });
+}
+function deleteApplication(db,applicationId,user) {
+  assertUser(db,user.id);
+  return tx(db,()=> {
+    const app=db.prepare('SELECT a.*,l.version_id FROM applications a JOIN order_lines l ON l.id=a.line_id WHERE a.id=?').get(applicationId);
+    if (!app) fail('Uygulama bulunamadı',404);
+    draft(db,app.version_id);unlocked(db,app.version_id);
+    db.prepare('DELETE FROM document_application_sources WHERE application_id=?').run(app.id);
+    db.prepare('UPDATE document_file_meta SET application_id=NULL WHERE application_id=?').run(app.id);
+    db.prepare("UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='olcu' AND ref_table='applications' AND ref_id=? AND status='acik'").run(user.id,app.id);
+    db.prepare('DELETE FROM applications WHERE id=?').run(app.id);
+    audit(db,user.id,'uygulama_sil',app.id);
+    return {ok:true};
+  });
+}
+function assertVectorQuality(db,v) {
+  if (db.prepare("SELECT c.id FROM confirmations c JOIN files f ON c.ref_table='files' AND c.ref_id=f.id WHERE f.version_id=? AND c.kind='vektor_kalite' AND c.status='acik'").get(v.id))
+    fail('Açık vektör kalite teyidi var; çözün veya hazır vektör yükleyip yeniden hazırlayın',409);
+}
+function documentDate(date=new Date()) { return date.toLocaleDateString('tr-TR',{timeZone:'Europe/Istanbul'}); }
 function openMeasurements(db, versionId) {
   return db.prepare(`SELECT c.* FROM confirmations c WHERE c.kind='olcu' AND c.status='acik' AND (
     (c.ref_table='order_versions' AND c.ref_id=?) OR
@@ -189,7 +274,10 @@ function assertMeasurements(db, v) {
 }
 function inputFingerprint(db,v) {
   return JSON.stringify({order:db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id),
-    lines:v.lines.map(({recipe_version,...line})=>line),files:v.files.filter(f=>!GENERATED.includes(f.kind))});
+    lines:v.lines.map(({recipe_version,...line})=>line),files:v.files.filter(f=>!GENERATED.includes(f.kind)),
+    sources:db.prepare(`SELECT s.application_id,s.file_id FROM document_application_sources s
+      JOIN applications a ON a.id=s.application_id JOIN order_lines l ON l.id=a.line_id
+      WHERE l.version_id=? ORDER BY s.application_id`).all(v.id)});
 }
 function assertFresh(db,v) {
   const state=db.prepare('SELECT * FROM document_preparations WHERE version_id=?').get(v.id);
@@ -198,11 +286,11 @@ function assertFresh(db,v) {
 }
 function sourceFor(db, v, app) {
   const explicit=db.prepare('SELECT file_id FROM document_application_sources WHERE application_id=?').get(app.id)?.file_id;
-  const candidates=v.files.filter(f=>f.kind==='desen_kaynak').filter(f=> {
+  const candidates=v.files.filter(f=>SOURCE_KINDS.includes(f.kind)).filter(f=> {
     const meta=db.prepare('SELECT line_id FROM document_file_meta WHERE file_id=?').get(f.id);
     return !meta?.line_id || meta.line_id===app.line_id;
   });
-  const source=explicit ? v.files.find(f=>f.id===explicit && f.kind==='desen_kaynak') : candidates.length===1 ? candidates[0] : null;
+  const source=explicit ? v.files.find(f=>f.id===explicit && SOURCE_KINDS.includes(f.kind)) : candidates.length===1 ? candidates[0] : null;
   if (!source) fail(`Uygulama ${app.id}: desenDosyaId ile tek bir kaynak bağlayın`,409);
   return source;
 }
@@ -211,7 +299,7 @@ function formOrder(db,dataDir,v,sourceByApp) {
   const preview = file => file && /\.(png|jpe?g)$/i.test(file.path) ? readFile(dataDir,file) : undefined;
   return {
     orderNo:order.order_no,name:order.customer_name || 'Müşteri belirtilmedi',version:v.version_no,
-    date:new Date().toLocaleDateString('tr-TR'),deliveryDate:'Teslim tarihi belirtilmedi',description:[],
+    date:documentDate(),deliveryDate:'Teslim tarihi belirtilmedi',description:[],
     lines:v.lines.map(l=> {
       const images={};
       for (const f of v.files.filter(f=>f.kind==='urun_gorsel')) {
@@ -219,14 +307,14 @@ function formOrder(db,dataDir,v,sourceByApp) {
         if (meta?.line_id===l.id) images[meta.gorunum==='on'?'front':'back']=preview(f);
       }
       const sizes=JSON.parse(l.sizes_json);
-      if (Object.values(sizes).reduce((a,b)=>a+b,0)!==l.quantity) fail(`Satır ${l.id}: PDF için adetlere eşit beden dağılımı gerekli`,409);
-      return {id:String(l.id),product:l.product_key,color:l.color_name || 'Renk belirtilmedi',fabric:l.fabric_item_id ? db.prepare('SELECT name FROM stock_items WHERE id=?').get(l.fabric_item_id).name : 'Kumaş belirtilmedi',sizes,images};
+      if (Object.keys(sizes).length && Object.values(sizes).reduce((a,b)=>a+b,0)!==l.quantity) fail(`Satır ${l.id}: PDF için adetlere eşit beden dağılımı gerekli`,409);
+      return {id:String(l.id),product:l.product_key,color:l.color_name || 'Renk belirtilmedi',fabric:l.fabric_item_id ? db.prepare('SELECT name FROM stock_items WHERE id=?').get(l.fabric_item_id).name : 'Kumaş belirtilmedi',sizes,quantity:l.quantity,images};
     }),
     applications:v.lines.flatMap(l=>l.applications.map(a=>({type:a.kind,position:a.position,width_mm:a.width_mm,height_mm:a.height_mm,lineIds:[String(l.id)],preview:preview(sourceByApp.get(a.id))}))),
   };
 }
 async function vectorInput(dataDir,file) {
-  return {buffer:readFile(dataDir,file),mime:{'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.pdf':'application/pdf','.svg':'image/svg+xml'}[path.extname(file.path).toLowerCase()]};
+  return {manualVector:file.kind==='desen_kaynak_vektor',buffer:readFile(dataDir,file),mime:{'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.pdf':'application/pdf','.svg':'image/svg+xml'}[path.extname(file.path).toLowerCase()]};
 }
 async function normalizeVectorInput({buffer,mime,...rest}) {
   if (mime==='image/svg+xml') {
@@ -254,25 +342,50 @@ async function normalizeVectorInput({buffer,mime,...rest}) {
   }
   return {...rest,buffer,mime};
 }
-function generateInChild(input) {
-  // Native raster tracing and PDF.js stay out of the SQLite process. In
-  // particular, Node 24 + better-sqlite3 11 cannot safely share their GC context.
+// One render pipeline at a time, with a deadline covering queue wait AND all children.
+// An aborted task keeps its queue slot until its worker has exited.
+function createRenderQueue({timeoutMs=PREPARE_TIMEOUT_MS,lockMs=PREPARE_LOCK_MS}={}) {
+  if (!(timeoutMs>0 && lockMs>timeoutMs)) throw new Error('Hazırlama kilit süresi toplam zaman aşımından uzun olmalı');
+  let tail=Promise.resolve();
+  return run=> {
+    const controller=new AbortController();
+    let timer;
+    const deadline=new Promise((resolve,reject)=> {
+      timer=setTimeout(()=> {
+        const error=Object.assign(new Error('Hazırlama zaman aşımı'),{status:504});
+        reject(error);controller.abort(error);
+      },timeoutMs);
+    });
+    const work=tail.catch(()=>{}).then(()=> {
+      controller.signal.throwIfAborted();return run(controller.signal);
+    });
+    tail=work.catch(()=>{});
+    return Promise.race([work,deadline]).finally(()=>clearTimeout(timer));
+  };
+}
+const renderQueue=createRenderQueue();
+function generateInChild(input,signal) {
+  signal?.throwIfAborted();
   return new Promise((resolve,reject)=> {
     const child=fork(__filename,['--vector-worker'],{serialization:'advanced',execArgv:[],stdio:['ignore','ignore','pipe','ipc']});
-    let settled=false;
-    const timer=setTimeout(()=> {child.kill();finish(new Error('Vektör üretimi zaman aşımına uğradı'));},120000);
-    timer.unref();
-    function finish(error,result) {
-      if (settled) return; settled=true; clearTimeout(timer);
-      if (error) reject(error); else resolve(result);
-    }
+    let result,error,received=false;
+    const abort=()=> {error=signal.reason;child.kill('SIGKILL');};
+    signal?.addEventListener('abort',abort,{once:true});
+    const timer=setTimeout(()=> {error=new Error('Vektör üretimi zaman aşımına uğradı');child.kill('SIGKILL');},120000);
     child.stderr.resume();
-    child.once('error',e=>finish(e));
-    child.once('exit',code=> {if (!settled) finish(new Error(`Vektör süreci tamamlanamadı (${code})`));});
-    child.once('message',message=> {
-      if (message.error) finish(new Error(message.error)); else finish(null,message.result);
+    child.once('error',e=> {error=e;});
+    child.once('exit',code=> {
+      clearTimeout(timer);signal?.removeEventListener('abort',abort);
+      if (error) reject(error);
+      else if (!received || code!==0) reject(new Error(`Vektör süreci tamamlanamadı (${code})`));
+      else resolve(result);
     });
-    child.send(input,error=> {if (error) {child.kill();finish(error);}});
+    child.once('message',message=> {
+      received=true;
+      if (message.error) error=Object.assign(new Error(message.error),{status:message.status});
+      else result=message.result;
+    });
+    child.send(input,e=> {if (e) {error=e;child.kill('SIGKILL');}});
   });
 }
 async function prepare(db,dataDir,versionId,user,regenerate=false) {
@@ -281,7 +394,7 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
   const start=tx(db,()=> {
     const v=draft(db,versionId); assertMeasurements(db,v);
     const state=db.prepare('SELECT * FROM document_preparations WHERE version_id=?').get(versionId);
-    if (state?.token && Date.now()-state.started_at<10*60e3) fail('Sürüm zaten hazırlanıyor',409);
+    if (state?.token && Date.now()-state.started_at<PREPARE_LOCK_MS) fail('Sürüm zaten hazırlanıyor',409);
     if (state?.ready && !regenerate) { assertFresh(db,v); return {existing:v.files}; }
     db.prepare(`INSERT INTO document_preparations(version_id,token,started_at) VALUES(?,?,?)
       ON CONFLICT(version_id) DO UPDATE SET token=excluded.token,started_at=excluded.started_at`).run(versionId,token,Date.now());
@@ -290,16 +403,20 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
   if (start.existing) return start.existing;
   const written=[];
   try {
-    const {v}=start, sourceByApp=new Map(), generated=[];
-    for (const a of v.lines.flatMap(l=>l.applications)) sourceByApp.set(a.id,sourceFor(db,v,a));
-    for (const source of v.files.filter(f=>f.kind==='desen_kaynak'))
-      if (![...sourceByApp.values()].some(f=>f.id===source.id)) fail(`Desen ${source.id}: ölçülü uygulama bağlantısı gerekli`,409);
-    for (const a of v.lines.flatMap(l=>l.applications)) {
-      const result=await generateInChild({type:'vector',input:{...await vectorInput(dataDir,sourceByApp.get(a.id)),targetMm:{w:a.width_mm,h:a.height_mm}}});
-      generated.push({kind:'desen_vektor',buffer:result.pdf,meta:{applicationId:a.id},report:result.report});
-    }
-    const model=formOrder(db,dataDir,v,sourceByApp);
-    generated.push(...await generateInChild({type:'forms',model}));
+    const {v}=start;
+    const generated=await renderQueue(async signal=> {
+      const sourceByApp=new Map(), generated=[];
+      for (const a of v.lines.flatMap(l=>l.applications)) sourceByApp.set(a.id,sourceFor(db,v,a));
+      for (const source of v.files.filter(f=>SOURCE_KINDS.includes(f.kind)))
+        if (!sourceByApp.size) fail(`Desen ${source.id}: ölçülü uygulama bağlantısı gerekli`,409);
+      for (const a of v.lines.flatMap(l=>l.applications)) {
+        const result=await generateInChild({type:'vector',input:{...await vectorInput(dataDir,sourceByApp.get(a.id)),targetMm:{w:a.width_mm,h:a.height_mm}}},signal);
+        generated.push({kind:'desen_vektor',buffer:result.pdf,meta:{applicationId:a.id},report:result.report});
+      }
+      const model=formOrder(db,dataDir,v,sourceByApp);
+      generated.push(...await generateInChild({type:'forms',model},signal));
+      return generated;
+    });
     return tx(db,()=> {
       const current=draft(db,versionId); assertMeasurements(db,current);
       if (JSON.stringify(current)!==start.fingerprint || inputFingerprint(db,current)!==start.sourceFingerprint || db.prepare('SELECT token FROM document_preparations WHERE version_id=?').get(versionId)?.token!==token)
@@ -351,7 +468,7 @@ function registerWorkshop(boundDb,dataDir) {
     return {providerRef:result.providerRef};
   });
 }
-module.exports={init,validateUpload,upload,measure,prepare,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+module.exports={init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,validateUpload,upload,measure,prepare,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
 if (require.main===module && process.argv[2]==='--vector-worker') {
   process.once('message',async job=> {
     try {
@@ -365,6 +482,6 @@ if (require.main===module && process.argv[2]==='--vector-worker') {
         }
       }
       process.send({result},()=>process.disconnect());
-    } catch (e) {process.send({error:e.message},()=>process.disconnect());}
+    } catch (e) {process.send({error:e.message,status:e.status},()=>process.disconnect());}
   });
 }

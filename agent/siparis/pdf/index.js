@@ -29,13 +29,18 @@ function normalize(order) {
     if (ids.has(line.id)) throw new TypeError('Satır kimlikleri benzersiz olmalıdır.');
     ids.add(line.id);
     for (const field of ['product', 'color', 'fabric']) requiredText(line[field], `line.${field}`);
-    if (!line.sizes || typeof line.sizes !== 'object' || Array.isArray(line.sizes)) throw new TypeError('line.sizes nesne olmalıdır.');
+    if (line.sizes != null && (typeof line.sizes !== 'object' || Array.isArray(line.sizes))) throw new TypeError('line.sizes nesne olmalıdır.');
     const sizes = Object.fromEntries(SIZES.map(size => [size, 0]));
-    for (const [size, qty] of Object.entries(line.sizes)) {
-      if (!SIZES.includes(size) || !Number.isSafeInteger(qty) || qty < 0) throw new RangeError(`Geçersiz beden/adet: ${size}`);
-      sizes[size] = qty;
+    for (const [size, qty] of Object.entries(line.sizes || {})) {
+      if (!size.trim() || !Number.isSafeInteger(qty) || qty < 0) throw new RangeError(`Geçersiz beden/adet: ${size}`);
+      const column = SIZES.includes(size) ? size : 'Diğer';
+      sizes[column] = (sizes[column] || 0) + qty;
     }
-    return { ...line, sizes, images: line.images || {} };
+    const distributed = Object.keys(line.sizes || {}).length > 0;
+    const sum = Object.values(sizes).reduce((a,b)=>a+b,0);
+    const quantity = line.quantity ?? sum;
+    if (!Number.isSafeInteger(quantity) || quantity < 0 || (distributed && quantity !== sum)) throw new RangeError('Geçersiz toplam adet');
+    return { ...line, sizes, quantity, distributed, images: line.images || {} };
   });
   if (!Array.isArray(order.applications)) throw new TypeError('applications dizi olmalıdır.');
   for (const app of order.applications) {
@@ -52,7 +57,7 @@ function normalize(order) {
 }
 
 function total(lines, size) {
-  const result = lines.reduce((sum, line) => sum + (size ? line.sizes[size] : Object.values(line.sizes).reduce((a, b) => a + b, 0)), 0);
+  const result = lines.reduce((sum, line) => sum + (size ? (line.sizes[size] || 0) : line.quantity), 0);
   if (!Number.isSafeInteger(result)) throw new RangeError('Toplam adet güvenli tam sayı sınırını aşıyor.');
   return result;
 }
@@ -197,10 +202,18 @@ function applicationTable(doc, apps, y) {
   return y + 25;
 }
 
+function sizeColumns(lines) { return lines.some(l=>l.distributed) ? [...SIZES,...(lines.some(l=>Object.hasOwn(l.sizes,'Diğer')) ? ['Diğer'] : [])] : []; }
+function sizeSummary(lines) { return sizeColumns(lines).map(s=>`${s}:${total(lines,s)}`).join('  '); }
+
 function sizeTable(doc, lines, y, orderTotal) {
   if (y + 160 > 1360) { page(doc); y = 65; }
-  const x = 40, widths = [160, ...SIZES.map(() => 60), 90];
-  const rows = [ ['Bedenler', ...SIZES, 'Toplam'], ['Adet', ...SIZES.map(s => String(total(lines, s))), String(total(lines))] ];
+  if (!lines.some(l=>l.distributed)) {
+    text(doc, `Toplam adet: ${total(lines)} · Sipariş toplamı: ${orderTotal}`, 40, y, 730, 18, true);
+    return;
+  }
+  const columns = sizeColumns(lines);
+  const x = 40, widths = [130, ...columns.map(() => 510/columns.length), 90];
+  const rows = [ ['Bedenler', ...columns, 'Toplam'], ['Adet', ...columns.map(s => String(total(lines, s))), String(total(lines))] ];
   for (let r = 0; r < 2; r++) {
     let cx = x;
     rows[r].forEach((value, c) => {
@@ -256,7 +269,7 @@ async function renderApprovalForm(input, options = {}) {
         band(doc, `Ürün Rengi: ${color}`, 0, 126, 525, '#92929c');
         band(doc, `Sipariş Kodu: ${order.orderNo}`, 750, 82, 690, '#464657');
         band(doc, `Tarih: ${order.date}`, 750, 126, 690, '#92929c');
-        band(doc, `Bedenler ve Adetler   ${SIZES.map(s => `${s}:${total(lines, s)}`).join('  ')}   Toplam:${total(lines)}`, 0, 171, 1440, '#464657');
+        band(doc, `Bedenler ve Adetler   ${sizeSummary(lines)}   Toplam:${total(lines)}`, 0, 171, 1440, '#464657');
         batch.forEach((line, i) => {
           const y = 260 + i * 240;
           const labelHeight = batch.length > 1 ? fittedText(doc, line.product, 30, y, 810, 30, 18, true, { align: 'center' }) + 5 : 10;
@@ -284,7 +297,7 @@ function renderWorkshop(input, options, type) {
     page(doc);
     title(doc, `${TYPES[type]} Formu`, `Ürün: ${[...new Set(lines.map(line => line.product))].join(', ')}`);
     text(doc, 'Ürün Açıklaması:', 45, 245, 720, 24, true);
-    let visualY = paragraphs(doc, [`Toplam adet: ${total(lines)}`, ...order.description.map(t => `• ${t}`)], 290) + 15;
+    let visualY = paragraphs(doc, [`Toplam adet: ${total(lines)}`, ...(sizeColumns(lines).length ? [`Bedenler ve Adetler: ${sizeSummary(lines)}`] : []), ...order.description.map(t => `• ${t}`)], 290) + 15;
     if (visualY + 400 > 1210) { page(doc); visualY = 60; }
     text(doc, 'Ürün Görseli:', 45, visualY, 720, 24, true);
     visualY += 50;

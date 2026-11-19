@@ -193,7 +193,7 @@ test('eksik ölçü, bozuk görsel, yanlış beden/adet ve kopuk satır bağlar�
     order => { order.applications[0].width_mm = null; },
     order => { order.applications[0].height_mm = 12.4; },
     order => { order.lines[0].sizes.XS = -1; },
-    order => { order.lines[0].sizes.unknown = 1; },
+    order => { order.lines[0].sizes.unknown = 'invalid'; },
     order => { order.applications[0].lineIds = ['yok']; },
     order => { order.applications[0].type = 'toString'; },
     order => { order.lines[1].id = order.lines[0].id; },
@@ -202,5 +202,16 @@ test('eksik ölçü, bozuk görsel, yanlış beden/adet ve kopuk satır bağlar�
   for (const mutate of mutations) {
     const order = makeExampleOrder(); mutate(order);
     await assert.rejects(renderProductionForm(order));
+  }
+});
+
+test('G14-8 all forms show totals without sizes and include other size quantities',async()=> {
+  for (const render of Object.values(renders)) {
+    const order=makeExampleOrder({twoColors:false});
+    order.lines[0].sizes={};order.lines[0].quantity=17;
+    const plain=await extract(await render(order));
+    assert.match(plain.text,/Toplam(?: adet)?:\s*17/);assert.doesNotMatch(plain.text,/XS/);
+    order.lines[0].sizes={'5XL':10,'7-8 yaş':7};
+    const other=await extract(await render(order));assert.match(other.text,/Diğer/);assert.match(other.text,/17/);
   }
 });

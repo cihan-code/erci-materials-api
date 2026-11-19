@@ -51,7 +51,7 @@ test('PNG -> actual paths without any image objects, target is full 280x120 mm p
   assert.equal(result.kind, 'raster'); assert.ok(Buffer.isBuffer(result.pdf));
   assert.ok(result.report.pathCount >= 1); assert.ok(result.report.colorCount >= 2);
   assert.equal(result.report.pages[0].imageCount, 0);
-  assert.equal(result.report.aspectRatioPreserved, true);
+  assert.equal(result.report.aspectRatioPreserved, false);
   const doc = await PDFDocument.load(result.pdf);
   assert.ok(!doc.context.enumerateIndirectObjects().some(([, value]) => value.dict?.get(PDFName.of('Subtype'))?.toString() === '/Image'));
   assert.ok(Math.abs(doc.getPage(0).getWidth() * 25.4 / 72 - 280) <= 0.5);
@@ -76,13 +76,13 @@ test('vector PDF keeps original bytes without target; resize keeps paths and no 
   assert.ok(Math.abs(resized.report.pages[0].widthMm - 280) < 0.5);
 });
 
-test('image-only PDF page composition traces locally, retains source physical page size', async () => {
+test('image-only PDF page composition traces locally, crops to physical artwork size', async () => {
   const doc = await PDFDocument.create(); const page = doc.addPage([200, 100]);
   page.drawImage(await doc.embedPng(png()), { x: 0, y: 0, width: 200, height: 100 });
   const result = await vectorize({ buffer: Buffer.from(await doc.save()), mime: 'application/pdf' });
   assert.equal(result.kind, 'raster'); assert.ok(result.report.pathCount > 0);
   assert.equal(result.report.pages[0].imageCount, 0);
-  assert.ok(Math.abs(result.report.pages[0].widthMm - 200 * 25.4 / 72) < 0.01);
+  assert.ok(Math.abs(result.report.pages[0].widthMm - (200*100/120) * 25.4 / 72) < 0.5);
   assert.match(result.report.rasterPdfMethod, /144 dpi/);
   const output = await PDFDocument.load(result.pdf);
   assert.ok(!output.context.enumerateIndirectObjects().some(([, value]) => value.dict?.get(PDFName.of('Subtype'))?.toString() === '/Image'));
@@ -103,7 +103,7 @@ test('thin lines, text, unknown fill detail and suspicious ratio request confirm
   assert.equal(line.report.quality, 'teyit'); assert.ok(line.report.reasons.includes('ince_cizgi'));
   const text = await vectorize({ buffer: await vectorPdf({ text: true }), mime: 'application/pdf' });
   assert.equal(text.report.quality, 'teyit'); assert.ok(text.report.reasons.includes('metin'));
-  const ratio = await vectorize({ buffer: png({ width: 600, height: 20 }), mime: 'image/png' });
+  const ratio = await vectorize({ buffer: png({ width: 600, height: 24 }), mime: 'image/png' });
   assert.ok(ratio.report.reasons.includes('supheli_oran'));
   const rasterThin = await vectorize({ buffer: png({ thin: true }), mime: 'image/png' });
   assert.ok(rasterThin.report.minLineWidth < 0.3);
@@ -162,12 +162,12 @@ test('CLI reads source only, produces PDF/JSON/PNG elsewhere; rendered bounds pr
 });
 
 test('manual always waits, including two files', async () => {
-  const handler = createWorkshopHandler({ OTOMATIK_GONDERIM: '1', WHATSAPP_MODE: 'manual' });
+  const handler = createWorkshopHandler({ NODE_ENV: 'test', OTOMATIK_GONDERIM: '1', WHATSAPP_MODE: 'manual' });
   assert.deepEqual(await handler(job()), { status: 'manuel_bekliyor' });
 });
 
 test('test delivers two files once; duplicate and concurrent jobs do not resend', async () => {
-  const provider = createTestAdapter(); const handler = createWorkshopHandler({ OTOMATIK_GONDERIM: '1' }, { mode: 'test', provider });
+  const provider = createTestAdapter(); const handler = createWorkshopHandler({ NODE_ENV: 'test', OTOMATIK_GONDERIM: '1' }, { mode: 'test', provider });
   const results = await Promise.all([handler(job()), handler(job())]);
   assert.equal(results[0].status, 'tamam'); assert.equal(results[1].status, 'tamam');
   assert.equal(provider.records.filter(x => x.status === 'gonderildi').length, 2);
@@ -176,19 +176,19 @@ test('test delivers two files once; duplicate and concurrent jobs do not resend'
 
 test('temporary retry resends only the failed file; first N failures recover', async () => {
   const provider = createTestAdapter({ failures: { 'ornek-atolye.pdf': 1 } });
-  const handler = createWorkshopHandler({ OTOMATIK_GONDERIM: '1' }, { mode: 'test', provider });
+  const handler = createWorkshopHandler({ NODE_ENV: 'test', OTOMATIK_GONDERIM: '1' }, { mode: 'test', provider });
   await assert.rejects(handler(job()), err => err.temporary);
   assert.equal((await handler(job())).status, 'tamam');
   assert.equal(provider.records.filter(x => x.status === 'gonderildi').length, 2);
   const retryProvider = createTestAdapter({ failFirst: 2 });
-  const retry = createWorkshopHandler({ OTOMATIK_GONDERIM: '1' }, { mode: 'test', provider: retryProvider });
+  const retry = createWorkshopHandler({ NODE_ENV: 'test', OTOMATIK_GONDERIM: '1' }, { mode: 'test', provider: retryProvider });
   await assert.rejects(retry(job()), err => err.temporary); await assert.rejects(retry(job()), err => err.temporary);
   assert.equal((await retry(job())).status, 'tamam');
 });
 
 test('lost response queries providerRef after restart, does not send second time', async () => {
-  const provider = createTestAdapter({ lostResponseFor: ['ornek-desen.pdf'] }); const store = createMemoryStore();
-  const options = { mode: 'test', provider, store }; const env = { OTOMATIK_GONDERIM: '1' };
+  const provider = createTestAdapter({ lostResponseFor: ['ornek-desen.pdf'] }); const store = {...createMemoryStore(),durable:true};
+  const options = { mode: 'test', provider, store }; const env = { NODE_ENV: 'test', OTOMATIK_GONDERIM: '1' };
   await assert.rejects(createWorkshopHandler(env, options)(job()), /kayboldu/);
   assert.equal((await createWorkshopHandler(env, options)(job())).status, 'tamam');
   const queried = provider.records.find(x => x.status === 'durum_sorgulandi');
@@ -198,7 +198,7 @@ test('lost response queries providerRef after restart, does not send second time
 
 test('unknown delivery and preexisting provider_ref never blindly resend', async () => {
   let sends = 0, queries = 0;
-  const handler = createWorkshopHandler({ OTOMATIK_GONDERIM: '1' }, { mode: 'test', provider: {
+  const handler = createWorkshopHandler({ NODE_ENV: 'test', OTOMATIK_GONDERIM: '1' }, { mode: 'test', provider: {
     async lookupStatus({ providerRef }) { queries++; assert.equal(providerRef, 'wamid.fake'); return { status: 'unknown' }; },
     async send() { sends++; },
   } });
@@ -216,9 +216,9 @@ test('kill switch avoids every cloud call, also when toggled after construction'
 
 test('cloud upload precedes group document send; injected fetch, env credentials only', async () => {
   const calls = [];
-  const env = { OTOMATIK_GONDERIM: '1', WHATSAPP_MODE: 'cloud', WHATSAPP_ACCESS_TOKEN: 'fake-env-token',
+  const env = { NODE_ENV: 'test', OTOMATIK_GONDERIM: '1', WHATSAPP_MODE: 'cloud', WHATSAPP_ACCESS_TOKEN: 'fake-env-token',
     WHATSAPP_PHONE_NUMBER_ID: '12345', WHATSAPP_API_VERSION: 'v24.0' };
-  const handler = createWorkshopHandler(env, { store: createMemoryStore(), fetch: async (url, request) => {
+  const handler = createWorkshopHandler(env, { store: {...createMemoryStore(),durable:true}, fetch: async (url, request) => {
     calls.push({ url, request });
     return { ok: true, json: async () => url.endsWith('/media') ? { id: 'fake-media' } : { messages: [{ id: 'wamid.fake' }] } };
   } });
@@ -232,8 +232,8 @@ test('cloud upload precedes group document send; injected fetch, env credentials
 });
 
 test('cloud network loss without provider ref needs lookup; unknown -> manual without resend', async () => {
-  let sends = 0, lookups = 0; const store = createMemoryStore();
-  const env = { OTOMATIK_GONDERIM: '1', WHATSAPP_MODE: 'cloud', WHATSAPP_ACCESS_TOKEN: 'fake',
+  let sends = 0, lookups = 0; const store = {...createMemoryStore(),durable:true};
+  const env = { NODE_ENV: 'test', OTOMATIK_GONDERIM: '1', WHATSAPP_MODE: 'cloud', WHATSAPP_ACCESS_TOKEN: 'fake',
     WHATSAPP_PHONE_NUMBER_ID: '12345', WHATSAPP_API_VERSION: 'v24.0' };
   const options = { store, lookupStatus: async ({ providerRef }) => { lookups++; assert.equal(providerRef, undefined); return { status: 'unknown' }; },
     fetch: async url => { if (url.endsWith('/media')) return { ok: true, json: async () => ({ id: 'fake-media' }) };
@@ -244,8 +244,8 @@ test('cloud network loss without provider ref needs lookup; unknown -> manual wi
 });
 
 test('cloud lost response with trustworthy injected ledger key lookup skips second send', async () => {
-  let sends = 0, lookups = 0; const store = createMemoryStore();
-  const env = { OTOMATIK_GONDERIM: '1', WHATSAPP_MODE: 'cloud', WHATSAPP_ACCESS_TOKEN: 'fake',
+  let sends = 0, lookups = 0; const store = {...createMemoryStore(),durable:true};
+  const env = { NODE_ENV: 'test', OTOMATIK_GONDERIM: '1', WHATSAPP_MODE: 'cloud', WHATSAPP_ACCESS_TOKEN: 'fake',
     WHATSAPP_PHONE_NUMBER_ID: '12345', WHATSAPP_API_VERSION: 'v24.0' };
   // A trusted external correlation is injected here, NOT a built-in Meta key lookup.
   const options = { store, lookupStatus: async ({ key, providerRef }) => {
@@ -273,4 +273,58 @@ test('workshop message includes operational allowlist, excludes price/customer c
 test('input validation does not accept invalid dimensions or unsupported MIME', async () => {
   await assert.rejects(vectorize({ buffer: png(), mime: 'image/png', targetMm: { w: 0, h: 120 } }), /targetMm/);
   await assert.rejects(vectorize({ buffer: png(), mime: 'image/gif' }), /MIME/);
+});
+
+async function artworkMm(buffer) {
+  const canvasLib=require('@napi-rs/canvas');
+  for (const key of ['DOMMatrix','ImageData','Path2D']) globalThis[key] ||= canvasLib[key];
+  const pdfjs=await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const doc=await pdfjs.getDocument({data:Uint8Array.from(buffer),verbosity:0}).promise;
+  try {
+    const page=await doc.getPage(1), scale=3, viewport=page.getViewport({scale});
+    const canvas=createCanvas(Math.ceil(viewport.width),Math.ceil(viewport.height)),ctx=canvas.getContext('2d');
+    await page.render({canvasContext:ctx,viewport}).promise;
+    const pixels=ctx.getImageData(0,0,canvas.width,canvas.height).data;
+    let left=Infinity,top=Infinity,right=-1,bottom=-1;
+    for(let y=0;y<canvas.height;y++) for(let x=0;x<canvas.width;x++) {
+      const i=(y*canvas.width+x)*4;
+      if(pixels[i+3]>32 && Math.min(...pixels.subarray(i,i+3))<200) {
+        left=Math.min(left,x);right=Math.max(right,x);top=Math.min(top,y);bottom=Math.max(bottom,y);
+      }
+    }
+    return [(right-left+1)/scale*25.4/72,(bottom-top+1)/scale*25.4/72];
+  } finally {await doc.destroy();}
+}
+test('G14-3 rendered artwork, including transparent/white margins and vector PDF, matches both target dimensions',async()=> {
+  const raster=createCanvas(400,400),ctx=raster.getContext('2d');
+  const inputs=[];
+  for (const background of ['transparent','white']) {
+    ctx.clearRect(0,0,400,400);
+    if(background==='white') {ctx.fillStyle='white';ctx.fillRect(0,0,400,400);}
+    ctx.fillStyle='#2350aa';ctx.fillRect(130,170,140,60);
+    inputs.push({buffer:raster.toBuffer('image/png'),mime:'image/png'});
+  }
+  const doc=await PDFDocument.create();doc.addPage([400,400]).drawRectangle({x:130,y:170,width:140,height:60,color:rgb(0.1,0.3,0.7)});
+  inputs.push({buffer:Buffer.from(await doc.save()),mime:'application/pdf'});
+  inputs.push({buffer:raster.toBuffer('image/jpeg'),mime:'image/jpeg'});
+  doc.getPage(0).setRotation(degrees(90));
+  inputs.push({buffer:Buffer.from(await doc.save()),mime:'application/pdf',manualVector:true});
+  const rasterPdf=await PDFDocument.create();
+  rasterPdf.addPage([400,400]).drawImage(await rasterPdf.embedPng(raster.toBuffer('image/png')),{x:0,y:0,width:400,height:400});
+  inputs.push({buffer:Buffer.from(await rasterPdf.save()),mime:'application/pdf'});
+  for(const input of inputs) {
+    const out=await vectorize({...input,targetMm:{w:280,h:120}}), [w,h]=await artworkMm(out.pdf);
+    assert.ok(Math.abs(w-280)<=1,`${input.mime}: width ${w}`);assert.ok(Math.abs(h-120)<=1,`${input.mime}: height ${h}`);
+    assert.equal(out.report.pages[0].imageCount,0);
+  }
+});
+test('G14-13 test mode cannot dispatch outside NODE_ENV=test and cloud without durable storage logs fallback',async()=> {
+  for (const NODE_ENV of [undefined,'production','development']) {
+    const provider=createTestAdapter();
+    const handler=createWorkshopHandler({NODE_ENV,OTOMATIK_GONDERIM:'1',WHATSAPP_MODE:'test'},{provider});
+    assert.equal((await handler(job())).status,'manuel_bekliyor');assert.equal(provider.records.length,0);
+  }
+  const logs=[];
+  const handler=createWorkshopHandler({OTOMATIK_GONDERIM:'1',WHATSAPP_MODE:'cloud'},{logger:{warn:m=>logs.push(m)}});
+  assert.equal((await handler(job())).status,'manuel_bekliyor');assert.match(logs.join(' '),/kalıcı|durable/i);
 });

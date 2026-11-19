@@ -94,7 +94,7 @@ test('HTTP measurement 280/56/140 gives 280 mm; PNG bounds and photo confirmatio
   const f=await fixture(t), o=await f.order(), lineId=o.version.lines[0].id;
   const file=ok(await f.upload(o.version.id),201);
   const measured=ok(await f.measure(lineId,{desenDosyaId:file.id,designBoxPx:null}),201);
-  assert.equal(measured.width_mm,280);assert.equal(measured.height_mm,120);assert.equal(measured.needsConfirmation,false);
+  assert.equal(measured.width_mm,280);assert.equal(measured.height_mm,120);assert.equal(measured.needsConfirmation,true);
   assert.equal(measured.application.width_mm,280);
   assert.equal(JSON.parse(measured.application.measure_source).desenDosyaId,file.id);
   const photo=ok(await f.measure(lineId,{imageKind:'photo'}),201);
@@ -144,6 +144,7 @@ test('HTTP submit requires approval form; unapproved package is blocked',async t
 
 test('HTTP approval package contains only workshop files, authenticated links and canonical outbox statuses',async t=> {
   const f=await fixture(t), a=await prepared(f);
+  await resolveQuality(f);
   ok(await f.post(`/surumler/${a.id}/gonder`));
   assert.equal((await f.post(`/surumler/${a.id}/hazirla?yeniden=1`)).status,409);
   assert.equal((await f.post(`/surumler/${a.id}/onay`,{fileId:a.source.id},f.managerToken)).status,409);
@@ -175,6 +176,7 @@ test('workshop adapter honors manual mode and verifies stored SHA256 before auto
   t.after(()=> {for (const [k,v] of [['OTOMATIK_GONDERIM',oldAuto],['WHATSAPP_MODE',oldMode]]) {if (v===undefined) delete process.env[k];else process.env[k]=v;}});
   process.env.OTOMATIK_GONDERIM='1';process.env.WHATSAPP_MODE='manual';
   const f=await fixture(t), a=await prepared(f,{both:false});
+  await resolveQuality(f);
   ok(await f.post(`/surumler/${a.id}/gonder`));
   ok(await f.post(`/surumler/${a.id}/onay`,{fileId:a.files.find(f=>f.kind==='onay_formu').id},f.managerToken));
   const job=await queue.runOnce(f.db,'atolye_dosya');assert.equal(job.status,'manuel_bekliyor');
@@ -191,6 +193,7 @@ test('HTTP changed draft data requires regeneration before submission',async t=>
   assert.equal((await f.post(`/surumler/${a.id}/hazirla`)).status,409);
   assert.equal((await f.post(`/surumler/${a.id}/gonder`)).status,409);
   ok(await f.post(`/surumler/${a.id}/hazirla?yeniden=1`));
+  await resolveQuality(f);
   ok(await f.post(`/surumler/${a.id}/gonder`));
 });
 
@@ -247,4 +250,162 @@ test('HTTP vector PDF and SVG sources are accepted; failed preparations leave no
   assert.equal((await f.post(`/surumler/${bad.version.id}/hazirla`)).status,500);
   assert.equal(f.db.prepare('SELECT count(*) n FROM files WHERE version_id=?').get(bad.version.id).n,1);
   assert.equal(f.db.prepare('SELECT token FROM document_preparations WHERE version_id=?').get(bad.version.id).token,null);
+});
+
+// G14 regression cases: synthetic inputs, isolated database, real HTTP boundaries.
+async function resolveQuality(f) {
+  for (const c of f.db.prepare("SELECT id FROM confirmations WHERE kind='vektor_kalite' AND status='acik'").all())
+    ok(await f.post(`/teyitler/${c.id}/coz`));
+}
+test('G14-1 JSON registration rejects generated kinds, cross-version paths, duplicates and non-drafts',async t=> {
+  const f=await fixture(t), o=await f.order(), v1=o.version.id;
+  const source=ok(await f.upload(v1),201);
+  for (const kind of ['onay_formu','uretim_formu','baski_formu','nakis_formu','desen_vektor'])
+    assert.equal((await f.post(`/surumler/${v1}/dosyalar`,{kind,path:source.path})).status,403);
+  assert.equal((await f.post(`/surumler/${v1}/dosyalar`,{kind:'desen_kaynak',path:source.path})).status,409);
+  const v2=ok(await f.post(`/surumler/${v1}/revizyon`),201);
+  assert.equal((await f.post(`/surumler/${v2.id}/dosyalar`,{kind:'desen_kaynak',path:source.path})).status,403);
+  const local=ok(await f.upload(v2.id),201), extra=path.join(path.dirname(local.path),'extra.png');fs.writeFileSync(extra,designPng());
+  ok(await f.post(`/surumler/${v2.id}/dosyalar`,{kind:'desen_kaynak',path:extra}),201);
+  f.db.prepare("UPDATE order_versions SET status='onay_bekliyor' WHERE id=?").run(v2.id);
+  assert.equal((await f.post(`/surumler/${v2.id}/dosyalar`,{kind:'desen_kaynak',path:extra})).status,409);
+});
+test('G14-2 revision is editable, carries open/resolved measurements and prepares v2 forms',async t=> {
+  const f=await fixture(t), o=await f.order(), line=o.version.lines[0];
+  const open=ok(await f.measure(line.id,{imageKind:'photo'}),201);
+  const resolved=ok(await f.measure(line.id,{imageKind:'photo'}),201);
+  ok(await f.post(`/teyitler/${resolved.confirmationId}/coz`));
+  const v2=ok(await f.post(`/surumler/${o.version.id}/revizyon`),201);
+  assert.equal(v2.status,'taslak');
+  assert.equal(f.db.prepare('SELECT status FROM order_versions WHERE id=?').get(o.version.id).status,'eski');
+  const apps=v2.lines[0].applications;
+  for (const [i,status] of ['acik','cozuldu'].entries())
+    assert.equal(f.db.prepare("SELECT status FROM confirmations WHERE kind='olcu' AND ref_table='applications' AND ref_id=?").get(apps[i].id)?.status,status);
+  assert.equal((await f.post(`/surumler/${v2.id}/hazirla`)).status,409);
+  const pending=f.db.prepare("SELECT id FROM confirmations WHERE ref_table='applications' AND ref_id=? AND status='acik'").get(apps[0].id);
+  ok(await f.post(`/teyitler/${pending.id}/coz`));ok(await f.upload(v2.id),201);
+  const files=ok(await f.post(`/surumler/${v2.id}/hazirla`));
+  assert.match(files.find(x=>x.kind==='onay_formu').path,/\/v2\//);
+});
+test('G14-4 open vector quality blocks both submit and approval until resolved',async t=> {
+  const f=await fixture(t), a=await prepared(f,{both:false});
+  assert.equal((await f.post(`/surumler/${a.id}/gonder`)).status,409);
+  const fileId=a.files.find(x=>x.kind==='onay_formu').id;
+  assert.equal((await f.post(`/surumler/${a.id}/onay`,{fileId},f.managerToken)).status,409);
+  await resolveQuality(f);ok(await f.post(`/surumler/${a.id}/gonder`));
+  const vector=a.files.find(x=>x.kind==='desen_vektor');
+  f.db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('vektor_kalite','files',?,'review')").run(vector.id);
+  assert.equal((await f.post(`/surumler/${a.id}/onay`,{fileId},f.managerToken)).status,409);
+  await resolveQuality(f);ok(await f.post(`/surumler/${a.id}/onay`,{fileId},f.managerToken));
+});
+test('G14-4 manual vector source replaces traced artwork without an automatic quality confirmation',async t=> {
+  const f=await fixture(t), a=await prepared(f,{both:false});
+  const pdf=await PDFDocument.create();pdf.addPage([300,200]).drawRectangle({x:100,y:75,width:100,height:50});
+  const source=ok(await f.upload(a.id,{kind:'desen_kaynak_vektor',name:'vectorizer.pdf',mime:'application/pdf',buffer:Buffer.from(await pdf.save())}),201);
+  const app=f.db.prepare('SELECT id FROM applications WHERE line_id=?').get(a.lineId);
+  ok(await f.request(`/uygulamalar/${app.id}`,{method:'PATCH',token:f.token,body:{desenDosyaId:source.id}}));
+  const files=ok(await f.post(`/surumler/${a.id}/hazirla?yeniden=1`));
+  assert.equal(f.db.prepare("SELECT count(*) n FROM confirmations WHERE kind='vektor_kalite' AND status='acik'").get().n,0);
+  ok(await f.post(`/surumler/${a.id}/gonder`));assert.ok(files.some(x=>x.kind==='desen_vektor'));
+});
+test('G14-5 automatic source box always needs confirmation despite a flat reference',async t=> {
+  const f=await fixture(t), o=await f.order(), source=ok(await f.upload(o.version.id),201);
+  const result=ok(await f.measure(o.version.lines[0].id,{desenDosyaId:source.id,designBoxPx:null}),201);
+  assert.equal(result.needsConfirmation,true);assert.ok(result.confirmationId);
+});
+test('G14-6 missing measure_source opens confirmation through HTTP and revision input',async t=> {
+  const f=await fixture(t), o=await f.order(), input={kind:'baski',position:'sirt',width_mm:280,height_mm:120,needs_confirmation:false};
+  const a=ok(await f.post(`/satirlar/${o.version.lines[0].id}/uygulamalar`,input),201);
+  assert.equal(a.needs_confirmation,1);
+  assert.equal(f.db.prepare("SELECT kind FROM confirmations WHERE ref_table='applications' AND ref_id=?").get(a.id)?.kind,'olcu');
+  const v2=ok(await f.post(`/surumler/${o.version.id}/revizyon`,{lines:[{id:o.version.lines[0].id,applications:[input]}]}),201);
+  assert.equal(v2.lines[0].applications[0].needs_confirmation,1);
+  assert.equal(f.db.prepare("SELECT status FROM confirmations WHERE ref_table='applications' AND ref_id=?").get(v2.lines[0].applications[0].id)?.status,'acik');
+});
+test('G14-7 missing reference does not insert; draft applications can be remeasured and deleted',async t=> {
+  const f=await fixture(t), o=await f.order(), line=o.version.lines[0];
+  assert.equal((await f.measure(line.id,{refLengthPx:null,refLengthCm:null})).status,400);
+  assert.equal(f.db.prepare('SELECT count(*) n FROM applications').get().n,0);
+  const source=ok(await f.upload(o.version.id),201);
+  const a=ok(await f.measure(line.id,{desenDosyaId:source.id,imageKind:'photo'}),201);
+  const edited=ok(await f.request(`/uygulamalar/${a.application.id}`,{method:'PATCH',token:f.token,body:{refLengthPx:280,refLengthCm:56,designBoxPx:{w:100,h:50},imageKind:'flat'}}));
+  assert.equal(edited.application.width_mm,200);assert.equal(edited.application.id,a.application.id);
+  assert.equal(f.db.prepare("SELECT count(*) n FROM confirmations WHERE kind='olcu' AND status='acik'").get().n,0);
+  ok(await f.post(`/surumler/${o.version.id}/hazirla`));
+  ok(await f.request(`/uygulamalar/${a.application.id}`,{method:'DELETE',token:f.token}));
+  assert.equal(f.db.prepare('SELECT count(*) n FROM applications').get().n,0);
+  assert.equal((await f.post(`/surumler/${o.version.id}/gonder`)).status,409);
+  assert.equal(f.db.pragma('foreign_key_check').length,0);
+  const b=ok(await f.measure(line.id),201);
+  f.db.prepare("UPDATE order_versions SET status='onay_bekliyor' WHERE id=?").run(o.version.id);
+  for (const method of ['PATCH','DELETE']) assert.equal((await f.request(`/uygulamalar/${b.application.id}`,{method,token:f.token,body:{position:'gogus'}})).status,409);
+});
+test('G14-8 preparation supports absent distribution and nonstandard sizes',async t=> {
+  const f=await fixture(t);
+  for (const sizes of [undefined,{'5XL':1,'7-8 yaş':1}]) {
+    const o=await f.order({lines:[{product_key:'tisort',quantity:2,sizes}]});
+    const files=ok(await f.post(`/surumler/${o.version.id}/hazirla`));assert.ok(files.some(x=>x.kind==='onay_formu'));
+  }
+});
+test('G14-9 PNG and JPEG header limits reject >40 MP with 413 before decoding',()=> {
+  const png=Buffer.from(designPng());png.writeUInt32BE(10000,16);png.writeUInt32BE(5000,20);
+  const jpeg=Buffer.from([255,216,255,192,0,17,8,0x13,0x88,0x27,0x10,3,1,0x11,0,2,0x11,0,3,0x11,0,255,217]);
+  for (const [buffer,originalname,mimetype] of [[png,'huge.png','image/png'],[jpeg,'huge.jpg','image/jpeg']])
+    assert.throws(()=>documents.validateUpload({buffer,originalname,mimetype}),e=>e.status===413);
+});
+test('G14-9 rendering serializes jobs, releases after failure and bounds the complete deadline below its lease',async()=> {
+  let active=0,max=0;
+  const queue=documents.createRenderQueue({timeoutMs:100,lockMs:200});
+  const run=async()=> {active++;max=Math.max(max,active);await new Promise(r=>setTimeout(r,10));active--;};
+  await Promise.all([queue(run),queue(run),queue(run)]);assert.equal(max,1);
+  await assert.rejects(queue(async()=> {throw Error('fixture');}),/fixture/);
+  await queue(run);
+  const short=documents.createRenderQueue({timeoutMs:10,lockMs:30});
+  await assert.rejects(short(signal=>new Promise(resolve=>signal.addEventListener('abort',resolve))),/zaman aşımı/);
+  await short(async()=>{});
+  assert.throws(()=>documents.createRenderQueue({timeoutMs:100,lockMs:50}),/kilit/);
+});
+test('G14-10 document date uses Istanbul at the UTC day boundary',()=> {
+  assert.equal(documents.documentDate(new Date('2026-11-18T22:30:00Z')),'19.11.2026');
+});
+test('G14-11 slash order number is safely encoded and visible number stays intact',async t=> {
+  const f=await fixture(t), o=await f.order({order_no:'MRC/2026-01'});
+  const source=ok(await f.upload(o.version.id),201);
+  assert.match(source.path,/\/files\/[^/]+\/v1\//);
+  assert.equal(f.db.prepare('SELECT order_no FROM orders WHERE id=?').get(o.id).order_no,'MRC/2026-01');
+  ok(await f.measure(o.version.lines[0].id,{desenDosyaId:source.id}),201);
+  ok(await f.post(`/surumler/${o.version.id}/hazirla`)).find(x=>x.kind==='onay_formu');
+});
+test('G14-12 approval accepts a string fileId',async t=> {
+  const f=await fixture(t), o=await f.order();
+  const files=ok(await f.post(`/surumler/${o.version.id}/hazirla`));
+  ok(await f.post(`/surumler/${o.version.id}/gonder`));
+  ok(await f.post(`/surumler/${o.version.id}/onay`,{fileId:String(files.find(x=>x.kind==='onay_formu').id)},f.managerToken));
+});
+
+test('G14-7 source changes invalidate prepared forms even for confirmed manual measurements',async t=> {
+  const f=await fixture(t), o=await f.order(), id=o.version.id, lineId=o.version.lines[0].id;
+  const first=ok(await f.upload(id),201), second=ok(await f.upload(id),201);
+  const app=ok(await f.post(`/satirlar/${lineId}/uygulamalar`,{kind:'baski',position:'sirt',width_mm:280,height_mm:120}),201);
+  const patch=body=>f.request(`/uygulamalar/${app.id}`,{method:'PATCH',token:f.token,body});
+  ok(await patch({desenDosyaId:first.id}));
+  const confirmation=f.db.prepare("SELECT id FROM confirmations WHERE kind='olcu' AND ref_id=? AND status='acik'").get(app.id);
+  ok(await f.post(`/teyitler/${confirmation.id}/coz`));
+  ok(await f.post(`/surumler/${id}/hazirla`));
+  await resolveQuality(f);
+  ok(await patch({desenDosyaId:second.id}));
+  // Resolving the manual measurement must not make the old source's forms current.
+  for (const c of f.db.prepare("SELECT id FROM confirmations WHERE kind='olcu' AND status='acik'").all())
+    ok(await f.post(`/teyitler/${c.id}/coz`));
+  assert.equal((await f.post(`/surumler/${id}/gonder`)).status,409);
+});
+
+test('G14-7 draft edits accept legacy text provenance and permit remeasurement',async t=> {
+  const f=await fixture(t), o=await f.order();
+  const app=ok(await f.post(`/satirlar/${o.version.lines[0].id}/uygulamalar`,
+    {kind:'baski',position:'sirt',width_mm:280,height_mm:120,measure_source:'ekip ölçümü'}),201);
+  ok(await f.request(`/uygulamalar/${app.id}`,{method:'PATCH',token:f.token,body:{position:'gogus'}}));
+  const result=ok(await f.request(`/uygulamalar/${app.id}`,{method:'PATCH',token:f.token,
+    body:{refLengthPx:280,refLengthCm:56,designBoxPx:{w:100,h:50},imageKind:'flat'}}));
+  assert.equal(result.application.width_mm,200);
 });

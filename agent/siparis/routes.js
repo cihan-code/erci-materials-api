@@ -33,13 +33,28 @@ module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, r
   router.post('/surumler/:id/satirlar', wrap((req,res) => res.status(201).json(orders.addLine(db,Number(req.params.id),req.body,req.user))));
   router.post('/satirlar/:id/uygulamalar', wrap((req,res) => res.status(201).json(orders.addApplication(db,Number(req.params.id),req.body,req.user))));
   router.post('/surumler/:id/dosyalar', wrap((req,res) => {
-    // HTTP callers may register only existing generated files inside the dedicated directory.
+    const documents = require('./documents');
+    const versionId = Number(req.params.id);
+    if (!documents.UPLOAD_KINDS.includes(req.body.kind)) fail('Üretilen dosyalar yalnız hazırlama ile kaydedilir',403);
+    const v = orders.snapshot(db,versionId);
+    if (v.status !== 'taslak') fail('Yalnız taslak sürüme dosya eklenebilir',409);
+    documents.unlocked(db,versionId);
     if (!dataDir || typeof req.body.path !== 'string') fail('Dosya dizini veya yolu yok');
-    const root = fs.realpathSync(path.join(dataDir,'siparis','files'));
-    const filePath = fs.realpathSync(path.resolve(root,req.body.path));
-    if (!filePath.startsWith(root+path.sep) || !fs.statSync(filePath).isFile()) fail('Dosya izin verilen dizinde değil',403);
-    const sha256=crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
-    res.status(201).json(orders.addFile(db,Number(req.params.id),{kind:req.body.kind,path:filePath,sha256},req.user));
+    const order = db.prepare('SELECT order_no FROM orders WHERE id=?').get(v.order_id);
+    const root = documents.directory(dataDir);
+    const expected = documents.directory(dataDir,documents.safeSegment(order.order_no),`v${v.version_no}`);
+    const candidate = path.resolve(root,req.body.path);
+    if (!candidate.startsWith(expected+path.sep)) fail('Dosya bu sipariş sürümünün dizininde değil',403);
+    let filePath;
+    try { filePath = documents.filePath(dataDir,{path:candidate}); }
+    catch (e) { if (e.code === 'ENOENT') fail('Dosya bulunamadı',404); throw e; }
+    const buffer = fs.readFileSync(filePath);
+    const ext = path.extname(filePath).toLowerCase();
+    const validated = documents.validateUpload({buffer,originalname:path.basename(filePath),
+      mimetype:{'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.pdf':'application/pdf','.svg':'image/svg+xml'}[ext]});
+    if (req.body.kind === 'desen_kaynak_vektor' && !['pdf','svg'].includes(validated.ext)) fail('Hazır vektör PDF veya SVG olmalı');
+    const sha256=crypto.createHash('sha256').update(buffer).digest('hex');
+    res.status(201).json(orders.addFile(db,versionId,{kind:req.body.kind,path:filePath,sha256},req.user));
   }));
   router.post('/surumler/:id/gonder', wrap((req,res) => res.json(orders.submitForApproval(db,Number(req.params.id),req.user))));
   router.post('/surumler/:id/onay', requireUser('onay'), wrap((req,res) => res.json(approveVersion(db,{versionId:Number(req.params.id),fileId:req.body.fileId,userId:req.user.id,recipes}))));
