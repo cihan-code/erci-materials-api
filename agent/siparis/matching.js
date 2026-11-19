@@ -13,6 +13,9 @@ const FABRICS = [
   { key: 'lakost', aliases: ['lakost', 'lacoste', 'lakost pike', 'lacoste pike', 'pike lakost'] },
   { key: 'kaskorse', aliases: ['kaskorse', 'kas korse'] },
   { key: 'astar', aliases: ['astar'] },
+  { key: 'polar', aliases: ['polar'] },
+  // Pike raşel is a warp knit, a different item from lakost (also a pike); "pike" alone stays open.
+  { key: 'pike_rasel', aliases: ['pike rasel', 'rasel pike'] },
 ];
 // Knit fabrics are built rather than listed: base + yarn count + stretch, e.g. supren_30_1, ribana_30_1_likrali.
 // "Penye" (combed yarn) and "örme" (knitted) only describe a knit; süprem without a yarn count stays open.
@@ -22,7 +25,7 @@ const STRETCH_WORDS = new Set(['likra', 'likrali', 'elastan', 'elastanli']);
 const FIBERS = new Set(['pamuk', 'polyester', 'poliester', 'elastan', 'likra', 'viskon', 'modal', 'lyocell', 'akrilik', 'yun', 'keten']);
 // Partial fabric names ("3 iplik", "penye" alone, "likralı" without a knit): left over they leave the type open.
 const FABRIC_HINTS = new Set(['iplik', 'sardonlu', 'sardonsuz', 'suprem', 'supren', 'ribana', 'penye', 'pike', 'interlok', 'kase',
-  'scuba', 'dalgic', 'selanik', 'jarse', 'polar', 'likra', 'likrali', 'elastan', 'elastanli']);
+  'scuba', 'dalgic', 'selanik', 'jarse', 'likra', 'likrali', 'elastan', 'elastanli']);
 const COLORS = [
   { key: 'siyah', label: 'siyah', aliases: ['siyah'] },
   { key: 'beyaz', label: 'beyaz', aliases: ['beyaz'] },
@@ -31,13 +34,15 @@ const COLORS = [
   { key: 'lacivert', label: 'lacivert', aliases: ['lacivert', 'laci'] },
   { key: 'bordo', label: 'bordo', aliases: ['bordo'] },
   { key: 'pembe', label: 'pembe', aliases: ['pembe'] },
-  { key: 'gri_melanj', label: 'gri melanj', aliases: ['gri melanj', 'melanj gri'] },
+  { key: 'gri_melanj', label: 'gri melanj', aliases: ['gri melanj', 'melanj gri', 'grimelanj'] },
   { key: 'gri', label: 'gri', aliases: ['gri'] },
   { key: 'antrasit', label: 'antrasit', aliases: ['antrasit'] },
   { key: 'kirmizi', label: 'kırmızı', aliases: ['kirmizi'] },
   { key: 'saks_mavi', label: 'saks mavi', aliases: ['saks mavi', 'saks'] },
   { key: 'bebe_mavi', label: 'bebe mavi', aliases: ['bebe mavi'] },
+  { key: 'acik_mavi', label: 'açık mavi', aliases: ['acik mavi'] },
   { key: 'mavi', label: 'mavi', aliases: ['mavi'] },
+  { key: 'nefti', label: 'nefti', aliases: ['nefti yesil', 'nefti'] },
   { key: 'yesil', label: 'yeşil', aliases: ['yesil'] },
   { key: 'haki', label: 'haki', aliases: ['haki'] },
   { key: 'sari', label: 'sarı', aliases: ['sari'] },
