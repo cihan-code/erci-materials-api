@@ -9,9 +9,10 @@ function init(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS document_flats (
     id TEXT PRIMARY KEY, ad TEXT NOT NULL, urun TEXT NOT NULL,
     gorunum TEXT NOT NULL CHECK(gorunum IN ('on','arka')), dosya TEXT NOT NULL,
-    refLengthPx REAL, refLengthCm REAL, refAciklama TEXT
+    refLengthPx REAL, refLengthCm REAL, refAciklama TEXT, refBeden TEXT
   )`);
-  if (!db.prepare('PRAGMA table_info(document_flats)').all().some(c=>c.name==='refBeden'))
+  // Older databases predate the reference size column; missing values stay null.
+  if (!db.prepare('PRAGMA table_info(document_flats)').all().some(c => c.name === 'refBeden'))
     db.exec('ALTER TABLE document_flats ADD COLUMN refBeden TEXT');
 }
 function get(db, id) {

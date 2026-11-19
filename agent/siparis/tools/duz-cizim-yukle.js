@@ -14,6 +14,9 @@ async function credentials(input=process.stdin,output=process.stdout) {
   const hidden=readline.createInterface({input,output:muted,terminal:true});
   try{return {name,password:await hidden.question('')};}finally{hidden.close();output.write('\n');}
 }
+const referenceBody=r=>({refLengthPx:r.refLengthPx,refLengthCm:r.refLengthCm,refAciklama:r.refAciklama,refBeden:r.refBeden??null});
+// "M 52 → L 54" for a record that carries its previous (M) value as backup.
+const change=r=>`${r.refLengthCmM!=null?'M '+r.refLengthCmM:'?'} → ${r.refBeden||'?'} ${r.refLengthCm}`;
 function loadRecords(json) {
   const rows=JSON.parse(fs.readFileSync(json,'utf8'));
   if(!Array.isArray(rows))throw Error('JSON bir dizi olmalı');
@@ -29,12 +32,12 @@ function loadRecords(json) {
     return {record:r,file,reason};
   });
 }
-async function upload({api,json,dry=false,getCredentials=credentials,fetchImpl=fetch,log=console.log}) {
+async function upload({api,json,dry=false,update=false,getCredentials=credentials,fetchImpl=fetch,log=console.log}) {
   const base=new URL(api);if(!['http:','https:'].includes(base.protocol)||base.username||base.password||base.search||base.hash)throw Error('Geçerli API URL gerekli');
   if(base.protocol==='http:'&&!['127.0.0.1','localhost','[::1]'].includes(base.hostname))throw Error('Uzak API için HTTPS gerekli');
   const root=base.href.replace(/\/$/,'').replace(/\/api\/siparis$/,'')+'/api/siparis';
   const entries=loadRecords(json);
-  if(dry){for(const e of entries)log(`${e.reason?'ATLA':'YÜKLENECEK'}: ${e.record.ad}${e.reason?' — '+e.reason:''}`);return {uploaded:0,skipped:entries.length,dry:true};}
+  if(dry){for(const e of entries)log(e.reason?`ATLA: ${e.record.ad} — ${e.reason}`:update?`GÜNCELLENECEK: ${e.record.ad} — ${change(e.record)}`:`YÜKLENECEK: ${e.record.ad}`);return {uploaded:0,skipped:entries.length,dry:true};}
   if(entries.every(e=>e.reason)){for(const e of entries)log(`ATLA: ${e.record.ad} — ${e.reason}`);return {uploaded:0,skipped:entries.length};}
   let token;
   const request=async(route,options={})=>{
@@ -51,21 +54,23 @@ async function upload({api,json,dry=false,getCredentials=credentials,fetchImpl=f
       if(names.has(r.ad)) {
         // A previous upload may have stopped between POST and PUT. Repair only its missing reference.
         const old=names.get(r.ad);
-        if(!(old.refLengthPx>0&&old.refLengthCm>0))await request('/duz-cizimler/'+encodeURIComponent(old.id)+'/referans',{method:'PUT',body:JSON.stringify({refLengthPx:r.refLengthPx,refLengthCm:r.refLengthCm,refAciklama:r.refAciklama})});
+        const stale=!(old.refLengthPx>0&&old.refLengthCm>0)||(update&&(old.refLengthCm!==r.refLengthCm||(old.refBeden??null)!==(r.refBeden??null)||old.refAciklama!==r.refAciklama));
+        if(stale)await request('/duz-cizimler/'+encodeURIComponent(old.id)+'/referans',{method:'PUT',body:JSON.stringify(referenceBody(r))});
+        if(update&&stale){log(`GÜNCELLENDİ: ${r.ad} — ${old.refLengthCm>0?'önceki '+old.refLengthCm+' → ':''}${r.refBeden||'?'} ${r.refLengthCm}`);uploaded++;continue;}
         log('ATLA (aynı ad): '+r.ad);skipped++;continue;
       }
       const form=new FormData();for(const key of ['ad','urun','gorunum'])form.append(key,r[key]);
       form.append('file',new Blob([fs.readFileSync(file)],{type:'image/png'}),path.basename(file));
       const created=await request('/duz-cizimler',{method:'POST',body:form});
-      await request('/duz-cizimler/'+encodeURIComponent(created.id)+'/referans',{method:'PUT',body:JSON.stringify({refLengthPx:r.refLengthPx,refLengthCm:r.refLengthCm,refAciklama:r.refAciklama})});
+      await request('/duz-cizimler/'+encodeURIComponent(created.id)+'/referans',{method:'PUT',body:JSON.stringify(referenceBody(r))});
       names.set(r.ad,created);uploaded++;log('YÜKLENDİ: '+r.ad);
     }
     return {uploaded,skipped};
   }finally{token=undefined;}
 }
 async function main(args=process.argv.slice(2)) {
-  const options={};for(let i=0;i<args.length;i++) {if(args[i]==='--kuru')options.dry=true;else if(['--api','--json'].includes(args[i])&&args[i+1])options[args[i++].slice(2)]=args[i];else throw Error('Geçersiz argüman');}
-  if(!options.api||!options.json)throw Error('Kullanım: duz-cizim-yukle.js --api <url> --json <json> [--kuru]');
+  const options={};for(let i=0;i<args.length;i++) {if(args[i]==='--kuru')options.dry=true;else if(args[i]==='--guncelle')options.update=true;else if(['--api','--json'].includes(args[i])&&args[i+1])options[args[i++].slice(2)]=args[i];else throw Error('Geçersiz argüman');}
+  if(!options.api||!options.json)throw Error('Kullanım: duz-cizim-yukle.js --api <url> --json <json> [--kuru] [--guncelle]');
   console.log(await upload(options));
 }
 if(require.main===module)main().catch(e=>{console.error(e.message);process.exitCode=1;});
