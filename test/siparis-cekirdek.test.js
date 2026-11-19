@@ -372,10 +372,12 @@ test('HTTP CRUD, confirmation resolution and file path containment',async t => {
   const order=await created.json();
   assert.equal((await request(`/siparisler/${order.id}`,'PATCH',{job_no:'JOB-TEST'})).status,200);
   assert.equal((await (await request(`/siparisler/${order.id}`)).json()).job_no,'JOB-TEST');
-  fs.mkdirSync(path.join(f.dir,'siparis','files'),{recursive:true});fs.writeFileSync(path.join(f.dir,'outside.pdf'),'synthetic');
-  const fileRes=await request(`/surumler/${order.version.id}/dosyalar`,'POST',{kind:'onay_formu',path:'../../outside.pdf'});assert.equal(fileRes.status,403);
-  fs.writeFileSync(path.join(f.dir,'siparis','files','test.pdf'),'synthetic');
-  assert.equal((await request(`/surumler/${order.version.id}/dosyalar`,'POST',{kind:'onay_formu',path:'test.pdf'})).status,201);
+  const directory=path.join(f.dir,'siparis','files','MRC-HTTP','v1');
+  fs.mkdirSync(directory,{recursive:true});fs.writeFileSync(path.join(f.dir,'outside.pdf'),'%PDF-synthetic');
+  const fileRes=await request(`/surumler/${order.version.id}/dosyalar`,'POST',{kind:'desen_kaynak',path:'../../outside.pdf'});assert.equal(fileRes.status,403);
+  fs.writeFileSync(path.join(directory,'test.pdf'),'%PDF-synthetic');
+  assert.equal((await request(`/surumler/${order.version.id}/dosyalar`,'POST',{kind:'onay_formu',path:'MRC-HTTP/v1/test.pdf'})).status,403);
+  assert.equal((await request(`/surumler/${order.version.id}/dosyalar`,'POST',{kind:'desen_kaynak',path:'MRC-HTTP/v1/test.pdf'})).status,201);
   f.db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('eksik_alan','orders',?,'Örnek teyit')").run(order.id);
   const c=(await (await request('/teyitler')).json())[0];
   assert.equal((await request(`/teyitler/${c.id}/coz`,'POST',{})).status,200);
