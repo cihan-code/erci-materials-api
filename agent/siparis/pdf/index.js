@@ -309,7 +309,7 @@ function sizeTable(doc, lines, y, orderTotal) {
     });
     cy += h;
   });
-  text(doc, 'toplam adet:', x + labelWidth + columns.length * cellWidth + 8, y + 52, 80, 9, true);
+  text(doc, `toplam adet: ${total(lines)}`, x + labelWidth + columns.length * cellWidth + 8, y + 52, 80, 9, true);
   text(doc, summary, x, cy + 14, 646, 14, true);
 }
 
@@ -470,7 +470,14 @@ function renderWorkshop(input, options, type) {
   });
 }
 
+// The swatch number is only valid while the line colour is still the stock item's colour.
+function stockColorLabel(lineColor, item) {
+  const norm = value => String(value ?? '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('tr-TR');
+  const same = item && norm(lineColor) && norm(lineColor) === norm(item.color_name);
+  return colorLabel(lineColor, same ? item.color_no : '');
+}
+
 function renderPrintForm(order, options = {}) { return renderWorkshop(order, options, 'baski'); }
 function renderEmbroideryForm(order, options = {}) { return renderWorkshop(order, options, 'nakis'); }
 
-module.exports = { renderProductionForm, renderApprovalForm, renderPrintForm, renderEmbroideryForm, parseEmphasis, colorLabel };
+module.exports = { renderProductionForm, renderApprovalForm, renderPrintForm, renderEmbroideryForm, parseEmphasis, colorLabel, stockColorLabel };

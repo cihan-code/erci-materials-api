@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const parse = require('pdf-parse');
 const { PNG } = require('pngjs');
-const { renderProductionForm, renderApprovalForm, renderPrintForm, parseEmphasis, colorLabel } = require('../agent/siparis/pdf');
+const { renderProductionForm, renderApprovalForm, renderPrintForm, parseEmphasis, colorLabel, stockColorLabel } = require('../agent/siparis/pdf');
 const { makeExampleOrder } = require('./fixtures/siparis/example-order');
 
 const PDF_DIR = path.join(__dirname, '..', 'agent', 'siparis', 'pdf');
@@ -94,4 +94,18 @@ test('atölye formu aynı vurgu ve başlık diline sahiptir, içerik korunur', a
   assert.match(pages[0], /Baskı Formu/);
   assert.match(pages[0], /KEÇE OLACAK/);
   assert.match(pages[0], /Toplam adet: 10/);
+});
+
+test('Kartela no yalnız satır rengi stok kaleminin rengiyle aynıysa eklenir', () => {
+  const item = { color_name: 'Lacivert', color_no: '14' };
+  assert.equal(stockColorLabel('Lacivert', item), 'Lacivert (Kartela 14)');
+  assert.equal(stockColorLabel('  LACİVERT ', item), 'LACİVERT (Kartela 14)');
+  assert.equal(stockColorLabel('Bordo', item), 'Bordo');
+  assert.equal(stockColorLabel('Lacivert', null), 'Lacivert');
+  assert.equal(stockColorLabel('Lacivert', { color_name: 'Lacivert', color_no: null }), 'Lacivert');
+});
+
+test('Üretim Formu sağdaki etikete toplam adedi yazar', async () => {
+  const [page] = await pagesOf(await renderProductionForm(makeExampleOrder({ twoColors: false })));
+  assert.match(page, /toplam adet: 10/);
 });
