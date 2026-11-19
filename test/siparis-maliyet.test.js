@@ -123,7 +123,7 @@ test('fiyat girilince İşler\'e tek kayıt düşer; kalemler şablondan gelir, 
   const f = await setup(t);
   const a = f.approved({ order_no: 'MRC-T001' });
   await f.run();
-  const posted = await f.http('POST', fiyat(a), f.tokens.manager, { unitPrice: 30, kdvDahil: false, bnItems: sirt });
+  const posted = await f.http('POST', fiyat(a), f.tokens.manager, { unitPrice: 30, bnItems: sirt });
   assert.equal(posted.status, 200, JSON.stringify(posted.body));
   assert.equal(posted.body.status, 'bekliyor');
   assert.equal(posted.body.unitPrice, 30);

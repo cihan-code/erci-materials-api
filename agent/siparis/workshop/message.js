@@ -9,9 +9,9 @@ function fileName(file) {
 function buildWorkshopMessage(order = {}, files = []) {
   const lines = order.lines || order.items || [];
   return [
-    `Siparis: ${order.order_no ?? order.orderNo ?? order.no ?? '-'}`,
-    `Surum: ${order.version_no ?? order.versionNo ?? order.version ?? '-'}`,
-    ...lines.map(item => `Urun: ${item.product_key ?? item.product ?? item.product_name ?? '-'} | Renk: ${item.color_name ?? item.color ?? '-'} | Adet: ${item.quantity ?? item.qty ?? '-'}`),
+    `Sipariş: ${order.order_no ?? order.orderNo ?? order.no ?? '-'}`,
+    `Sürüm: ${order.version_no ?? order.versionNo ?? order.version ?? '-'}`,
+    ...lines.map(item => `Ürün: ${item.product_key ?? item.product ?? item.product_name ?? '-'} | Renk: ${item.color_name ?? item.color ?? '-'} | Adet: ${item.quantity ?? item.qty ?? '-'}`),
     `Dosyalar: ${files.map(fileName).join(', ')}`,
   ].join('\n');
 }

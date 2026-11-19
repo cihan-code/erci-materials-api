@@ -266,7 +266,7 @@ test('workshop message includes operational allowlist, excludes price/customer c
   const order = job().payload_json.order;
   const message = buildWorkshopMessage({ ...order, lines: [{ product_key: 'Forma', color_name: 'Kirmizi', quantity: 12 }],
     price: 'SECRET-PRICE', customer: { phone: 'SECRET-PHONE' }, email: 'SECRET-EMAIL' }, files);
-  for (const expected of ['MRC-T001', 'Surum: 2', 'Forma', 'Kirmizi', '12', ...files.map(x => x.name)]) assert.ok(message.includes(expected));
+  for (const expected of ['MRC-T001', 'Sipariş: MRC-T001', 'Sürüm: 2', 'Ürün: Forma', 'Kirmizi', '12', ...files.map(x => x.name)]) assert.ok(message.includes(expected));
   assert.doesNotMatch(message, /SECRET|fiyat|price|phone|email/i);
 });
 
