@@ -270,6 +270,19 @@ test('workshop message includes operational allowlist, excludes price/customer c
   assert.doesNotMatch(message, /SECRET|fiyat|price|phone|email/i);
 });
 
+test('workshop uses recipe labels for product keys and preserves the operational allowlist', () => {
+  const recipes = require('../agent/operations/recipes').load();
+  const message = buildWorkshopMessage({ order_no: 'MRC-T018', version_no: 1,
+    lines: Object.keys(recipes.products).map(product_key => ({ product_key, color_name: 'Mavi', quantity: 3,
+      unit_price: 'SECRET-PRICE', customer_phone: 'SECRET-PHONE' })) }, files);
+  for (const { label } of Object.values(recipes.products)) assert.ok(message.includes(`Ürün: ${label} |`));
+  assert.ok(message.includes('Ürün: Polo yaka |'));
+  assert.doesNotMatch(message, /Ürün: (?:polo|sweat|tisort|esofman) \||SECRET/);
+  const custom = buildWorkshopMessage({ lines: [{ product_key: 'polo', product_name: 'Eski ad' }] }, [],
+    { products: { polo: { label: 'Örnek yaka' } } });
+  assert.match(custom, /Ürün: Örnek yaka/);
+});
+
 test('input validation does not accept invalid dimensions or unsupported MIME', async () => {
   await assert.rejects(vectorize({ buffer: png(), mime: 'image/png', targetMm: { w: 0, h: 120 } }), /targetMm/);
   await assert.rejects(vectorize({ buffer: png(), mime: 'image/gif' }), /MIME/);
