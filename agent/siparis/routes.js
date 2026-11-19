@@ -17,6 +17,7 @@ module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, r
   router.use(express.json({limit:'2mb'}));
   router.post('/giris', wrap(async (req,res) => res.json(await login(db, { name:req.body.name ?? req.body.ad, password:req.body.password ?? req.body.sifre }))));
   require('./routes-fatura')(router, { db, requireUser }); // before the user gate: intake also takes the service key
+  require('./routes-panel')(router, db); // read-only Ajan Paneli summary; own auth (service key or user token)
   router.use(requireUser());
   router.use(require('./routes-belge')({db,dataDir}));
   router.get('/siparisler', (req,res) => res.json(db.prepare('SELECT * FROM orders ORDER BY id DESC').all()));
