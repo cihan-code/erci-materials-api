@@ -152,14 +152,20 @@ test('25 kg delivery closes 15 kg shortage and duplicate invoice receipt is iner
   assert.equal(stock.stockSummary(f.db)[0].awaiting_delivery_milli,0);
 });
 
-test('deliveries allocate FIFO and explicit targets leave the rest available',async t => {
-  const f=await setup(t,0); const a=f.submit(f.make(10)),b=f.submit(f.make(10)); f.approve(a); f.approve(b);
+test('deliveries allocate FIFO; explicit targets go first and the rest closes other shortages FIFO',async t => {
+  const f=await setup(t,0); const a=f.submit(f.make(10)),b=f.submit(f.make(10)),c=f.submit(f.make(10)); f.approve(a); f.approve(b); f.approve(c);
   stock.receiveDelivery(f.db,{invoiceLineId:f.invoice(4000),itemId:f.itemId,qtyMilli:4000,userId:f.team.id});
   const amounts=()=>f.db.prepare('SELECT reserved_milli FROM allocations ORDER BY id').all().map(a=>a.reserved_milli);
-  assert.deepEqual(amounts(),[3500,500]);
-  stock.receiveDelivery(f.db,{invoiceLineId:f.invoice(4000),itemId:f.itemId,qtyMilli:4000,allocations:[{orderLineId:b.lineId,qtyMilli:1000}],userId:f.team.id});
-  assert.deepEqual(amounts(),[3500,1500]);
-  assert.equal(stock.stockSummary(f.db)[0].available_milli,3000);
+  assert.deepEqual(amounts(),[3500,500,0]);
+  const second=f.invoice(4000);
+  stock.receiveDelivery(f.db,{invoiceLineId:second,itemId:f.itemId,qtyMilli:4000,allocations:[{orderLineId:c.lineId,qtyMilli:1000}],userId:f.team.id});
+  assert.deepEqual(amounts(),[3500,3500,1000],'c gets its 1 kg first, the 3 kg left goes to b, approved before c');
+  assert.equal(stock.stockSummary(f.db)[0].available_milli,0);
+  assert.deepEqual(JSON.parse(f.db.prepare('SELECT allocation_json j FROM invoice_lines WHERE id=?').get(second).j).map(x=>[x.orderLineId,x.qtyMilli]),
+    [[c.lineId,1000],[b.lineId,3000]]);
+  stock.receiveDelivery(f.db,{invoiceLineId:f.invoice(4000),itemId:f.itemId,qtyMilli:4000,allocations:[],userId:f.team.id});
+  assert.deepEqual(amounts(),[3500,3500,3500],'an empty explicit list still leaves no shortage open beside free stock');
+  assert.equal(stock.stockSummary(f.db)[0].available_milli,1500);
 });
 
 test('invalid delivery targets and partial quantity rollback the receipt',async t => {

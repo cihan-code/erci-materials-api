@@ -144,6 +144,8 @@ test('service key: wrong or missing key is 401, the right key or a user token is
   const { token } = await auth.login(f.db, { name: 'Ekip', password: 'test-password' });
   assert.equal((await call('/fatura-satirlari', { token, body })).status, 200);
   assert.equal((await call('/fatura-satirlari', { token: SERVICE_KEY })).status, 401, 'the service key only feeds lines');
+  process.env.SIPARIS_SERVIS_ANAHTARI = 'kisa-anahtar';
+  assert.equal((await call('/fatura-satirlari', { token: 'kisa-anahtar', body })).status, 401, 'a key under 16 characters never matches');
   process.env.SIPARIS_SERVIS_ANAHTARI = '';
   t.after(() => { process.env.SIPARIS_SERVIS_ANAHTARI = SERVICE_KEY; });
   assert.equal((await call('/fatura-satirlari', { token: SERVICE_KEY, body })).status, 401, 'no configured key, no service access');

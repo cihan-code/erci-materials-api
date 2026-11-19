@@ -17,8 +17,10 @@ async function setup(t) {
   process.env.SIPARIS_SERVIS_ANAHTARI = KEY;
   t.after(() => { delete process.env.SIPARIS_SERVIS_ANAHTARI; if (db.open) db.close(); fs.rmSync(dir, { recursive: true, force: true }); });
   const team = await auth.createUser(db, { name: 'Ekip', password: 'test-password' });
-  stock.importLegacyFabrics(db, { fabrics: [{ id: 'f1', name: 'Örnek kumaş', colorName: 'Mavi', unit: 'kg' }], movements: [{ fabricId: 'f1', type: 'giris', qty: 12.5 }] });
+  // The legacy import carries master data only (opening stock is a count), and a readable name opens no eksik_alan teyit.
+  stock.importLegacyFabrics(db, { fabrics: [{ id: 'f1', name: 'Şardonlu 3 iplik', colorName: 'Mavi', unit: 'kg' }] });
   const itemId = db.prepare('SELECT id FROM stock_items').get().id;
+  stock.recordCount(db, { itemId, countedMilli: 12500, countKey: 'acilis', userId: team.id });
   const order = orders.createOrder(db, { order_no: 'MRC-P1', customer_name: 'Örnek Kulüp', lines: [{ product_key: 'sweat', fabric_item_id: itemId, quantity: 10 }] }, team);
   orders.submitForApproval(db, order.version.id, team);
   db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('olcu','x',1,'m'),('olcu','x',2,'m'),('fatura_eslesme','x',3,'m')").run();
@@ -48,7 +50,7 @@ test('panel-veri: service key returns Turkish summary without prices and writes 
   assert.deepEqual(d.onay_bekleyen.map(x => [x.siparis_no, x.surum, x.musteri]), [['MRC-P1', 1, 'Örnek Kulüp']]);
   assert.ok(d.onay_bekleyen[0].gonderildi);
   assert.deepEqual(d.teyitler, { toplam: 3, turlere_gore: { olcu: 2, fatura_eslesme: 1 } });
-  assert.deepEqual(d.tedarik_bekleyen, [{ kalem: 'Örnek kumaş', renk: 'Mavi', kg: 3 }]);
+  assert.deepEqual(d.tedarik_bekleyen, [{ kalem: 'Şardonlu 3 iplik', renk: 'Mavi', kg: 3 }]);
   assert.deepEqual(d.atolye, { elle_bekleyen: 1, basarisiz: 1 });
   assert.deepEqual(d.maliyet, { fiyat_bekleyen: [{ siparis_no: 'MRC-P1', surum: 1 }], basarisiz: 0 });
   assert.deepEqual(d.stok_ozet, { kalem_sayisi: 1, kullanilabilir_kg_toplam: 10.5 });
@@ -59,6 +61,8 @@ test('panel-veri: a user session token is accepted, unset service key never matc
   const f = await setup(t);
   const login = await auth.login(f.db, { name: 'Ekip', password: 'test-password' });
   assert.equal((await fetch(f.base + '/panel-veri', { headers: { authorization: `Bearer ${login.token}` } })).status, 200);
+  process.env.SIPARIS_SERVIS_ANAHTARI = 'kisa-anahtar';
+  assert.equal((await fetch(f.base + '/panel-veri', { headers: { authorization: 'Bearer kisa-anahtar' } })).status, 401, 'a key under 16 characters never matches');
   delete process.env.SIPARIS_SERVIS_ANAHTARI;
   assert.equal((await fetch(f.base + '/panel-veri', { headers: { authorization: 'Bearer undefined' } })).status, 401);
 });
