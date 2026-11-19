@@ -90,9 +90,9 @@ async function setup(t, { jobs = [] } = {}) {
   const run = () => queue.runOnce(db, 'maliyet_aktarim');
   const row = versionId => db.prepare('SELECT * FROM cost_transfers WHERE version_id=?').get(versionId);
   const audits = action => db.prepare('SELECT * FROM audit_log WHERE action=?').all(action);
-  // A failed job retries after a back-off; park it so the next run claims the next scenario deterministically.
-  const park = job => db.prepare("UPDATE outbox SET status='iptal' WHERE id=?").run(job.id);
-  return { db, dir, manager, team, tokens, http, approved, revise, run, row, audits, park, pdfPath };
+  // A permanent data error closes the job as basarisiz with an open eksik_alan teyit; it is never retried on its own.
+  const teyit = job => db.prepare("SELECT message FROM confirmations WHERE kind='eksik_alan' AND ref_table='outbox' AND ref_id=? AND status='acik'").get(job.id)?.message;
+  return { db, dir, manager, team, tokens, http, approved, revise, run, row, audits, teyit, pdfPath };
 }
 
 test('fiyat yokken fiyat_bekliyor: maliyet mevcut şablondan hesaplanır, İşler\'e kayıt düşmez, model çağrılmaz', async t => {
@@ -165,6 +165,9 @@ test('aynı iş tekrar çalışınca ikinci kayıt oluşmaz: tekrar çağrı, ç
   const first = await f.run();
   assert.equal(first.status, 'tamam');
   assert.equal(panelJobs().length, 2);
+  // Patron: prices are excluding VAT; an entry without kdvDahil is stored and noted that way.
+  assert.equal(f.row(a.versionId).kdv_dahil, 0);
+  assert.match(panelJobs().find(x => x.job_no === 'MRC-T001').note, /KDV hariç/);
   const payload = JSON.parse(first.payload_json), context = { db: f.db, idempotencyKey: first.idempotency_key, job: first };
   assert.deepEqual(await cost.transfer(payload, context, { dataDir: DATA, recipes }), { providerRef: first.provider_ref });
   assert.equal(panelJobs().length, 2);
@@ -222,34 +225,37 @@ test('revizyonda aynı İşler kaydı güncellenir; eski sürümün fiyatı yeni
   assert.equal(f.db.prepare('SELECT job_no FROM orders WHERE id=?').get(a.orderId).job_no, 'MRC-T001');
 });
 
-test('eski sürümün bekleyen aktarımı İşler\'e yazmaz', async t => {
+test('revizyon eski sürümün bekleyen maliyet işini iptal eder; yedek yol eski sürümü İşler\'e yazmaz', async t => {
   const f = await setup(t);
   const a = f.approved({ order_no: 'MRC-T001' });
   const waiting = await f.run();
   assert.equal(waiting.status, 'fiyat_bekliyor');
   orders.reviseVersion(f.db, a.versionId, {}, f.team);
+  assert.equal(f.db.prepare('SELECT status FROM outbox WHERE id=?').get(waiting.id).status, 'iptal');
+  assert.equal(await f.run(), null);
   assert.equal((await f.http('POST', fiyat(a), f.tokens.manager, { unitPrice: 30 })).status, 409);
-  queue.retry(f.db, waiting.id, f.manager);
-  const skipped = await f.run();
-  assert.equal(skipped.status, 'tamam');
-  assert.equal(skipped.provider_ref, cost.STALE_REF);
+  assert.throws(() => queue.retry(f.db, waiting.id, f.manager), /tekrar denenemez/);
+  // Fallback: a stale job that still reaches the adapter is closed without touching İşler.
+  const context = { db: f.db, idempotencyKey: waiting.idempotency_key, job: waiting };
+  assert.deepEqual(await cost.transfer(JSON.parse(waiting.payload_json), context, { dataDir: DATA, recipes }), { providerRef: cost.STALE_REF });
   assert.deepEqual(panelJobs(), []);
   assert.equal(f.audits('maliyet_atlandi').length, 1);
   assert.equal(f.db.prepare('SELECT job_no FROM orders WHERE id=?').get(a.orderId).job_no, null);
 });
 
-test('yetkisiz fiyat girişi 403 döner ve iz bırakmaz; onay yetkili ekip üyesi girebilir', async t => {
+test('onay yetkisi kapalı (--onaysiz) kullanıcının fiyat girişi 403 döner ve iz bırakmaz; varsayılan ekip üyesi girebilir', async t => {
   const f = await setup(t);
   const a = f.approved({ order_no: 'MRC-T001' });
   await f.run();
-  assert.equal((await f.http('POST', fiyat(a), f.tokens.team, { unitPrice: 30 })).status, 403);
-  assert.throws(() => cost.setPrice(f.db, a.orderId, { unitPrice: 30 }, f.team), e => e.status === 403);
+  const intern = await auth.createUser(f.db, { name: 'Stajyer', password: 'test-password', onayYetkisi: false });
+  const { token } = await auth.login(f.db, { name: 'Stajyer', password: 'test-password' });
+  assert.equal((await f.http('POST', fiyat(a), token, { unitPrice: 30 })).status, 403);
+  assert.throws(() => cost.setPrice(f.db, a.orderId, { unitPrice: 30 }, intern), e => e.status === 403);
   assert.equal(f.row(a.versionId).unit_price, null);
   assert.equal(f.audits('maliyet_fiyat').length, 0);
   assert.equal(f.db.prepare("SELECT status FROM outbox WHERE version_id=? AND kind='maliyet_aktarim'").get(a.versionId).status, 'fiyat_bekliyor');
-  await auth.createUser(f.db, { name: 'Yetkili ekip', password: 'test-password', onayYetkisi: true });
-  const { token } = await auth.login(f.db, { name: 'Yetkili ekip', password: 'test-password' });
-  assert.equal((await f.http('POST', fiyat(a), token, { unitPrice: 30 })).status, 200);
+  assert.equal((await f.http('POST', fiyat(a), f.tokens.team, { unitPrice: 30 })).status, 200);
+  assert.equal(f.audits('maliyet_fiyat')[0].user_id, f.team.id);
 });
 
 test('fiyat girdisi doğrulanır; olmayan sipariş 404, onaysız sipariş 409', async t => {
@@ -282,43 +288,53 @@ test('belirsiz İşler eşleşmesinde kayıt açılmaz ve hiçbir kayıt güncel
     await f.http('POST', fiyat(a), f.tokens.manager, { unitPrice: 30, bnItems: sirt });
     const failed = await f.run();
     assert.equal(failed.version_id, a.versionId);
-    assert.equal(failed.status, 'bekliyor');
+    assert.equal(failed.status, 'basarisiz');
+    assert.equal(failed.attempts, 1);
     assert.match(failed.last_error, error);
+    assert.match(f.teyit(failed), error);
     assert.match((await f.http('GET', maliyet(a), f.tokens.team)).body.lastError, error);
-    f.park(failed);
   }
   assert.deepEqual(panelJobs(), before);
   assert.equal(f.db.prepare("SELECT job_no FROM orders WHERE order_no='MRC-T001'").get().job_no, null);
 });
 
-test('eksik ya da bozuk girdi aktarımı durdurur: şablon, baskı adedi, çoklu ürün, SHA, veri klasörü', async t => {
+test('fiyat varken eksik ya da bozuk veri kalıcı hata olur: şablon, baskı adedi, çoklu ürün, SHA, veri klasörü', async t => {
   const f = await setup(t);
+  const permanent = async (a, error) => {
+    const failed = await f.run();
+    assert.equal(failed.version_id, a.versionId);
+    assert.equal(failed.status, 'basarisiz');
+    assert.match(failed.last_error, error);
+    assert.match(f.teyit(failed), error);
+    return failed;
+  };
   const noTemplate = f.approved({ order_no: 'MRC-T010', lines: [line({ product_key: 'tisort', applications: [] })] });
   await f.http('POST', fiyat(noTemplate), f.tokens.manager, { unitPrice: 20 });
-  assert.equal((await f.run()).status, 'fiyat_bekliyor');
+  await permanent(noTemplate, /şablonuyla eşleşmedi/);
   assert.ok((await f.http('GET', maliyet(noTemplate), f.tokens.team)).body.missing.some(m => /şablonuyla eşleşmedi/.test(m)));
+  // A missing print size is fixed through the fiyat endpoint, which requeues the failed job.
   const twoPrints = f.approved({ order_no: 'MRC-T011', lines: [line({ applications: [{ kind: 'baski', position: 'sirt' }, { kind: 'baski', position: 'sırt' }] })] });
   await f.http('POST', fiyat(twoPrints), f.tokens.manager, { unitPrice: 30, bnItems: sirt });
-  assert.equal((await f.run()).status, 'fiyat_bekliyor');
-  assert.ok((await f.http('GET', maliyet(twoPrints), f.tokens.team)).body.missing.includes('Baskı adedi siparişle tutmuyor: "sırt" siparişte 40, seçimde 20'));
+  const short = await permanent(twoPrints, /Baskı adedi siparişle tutmuyor: "sırt" siparişte 40, seçimde 20/);
+  const fixed = await f.http('POST', fiyat(twoPrints), f.tokens.manager, { unitPrice: 30,
+    bnItems: [...sirt, { type: 'baski', area: 'sirt', size: 'Küçük Boyut', label: 'yazı' }] });
+  assert.equal(fixed.body.status, 'bekliyor');
+  assert.equal(f.teyit(short), undefined);
+  assert.equal((await f.run()).status, 'tamam');
+  assert.deepEqual(panelJobs()[0].cost_items.slice(-2), [{ category: 'Baskı (sırt - Orta Boyut, 20 adet)', amount: 40 },
+    { category: 'Baskı (yazı - Küçük Boyut, 20 adet)', amount: 20 }]);
   const mixed = f.approved({ order_no: 'MRC-T012', lines: [line({ applications: [] }), line({ product_key: 'tisort', applications: [] })] });
   await f.http('POST', fiyat(mixed), f.tokens.manager, { unitPrice: 30 });
-  const mixedRun = await f.run();
-  assert.equal(mixedRun.version_id, mixed.versionId);
-  assert.match(mixedRun.last_error, /Birden çok ürün tipi \(sweat, tisort\)/);
-  f.park(mixedRun);
+  await permanent(mixed, /Birden çok ürün tipi \(sweat, tisort\)/);
   const tampered = f.approved({ order_no: 'MRC-T013' });
   await f.http('POST', fiyat(tampered), f.tokens.manager, { unitPrice: 30, bnItems: sirt });
   fs.appendFileSync(f.pdfPath(tampered.versionId), 'değişti');
-  const tamperedRun = await f.run();
-  assert.equal(tamperedRun.version_id, tampered.versionId);
-  assert.match(tamperedRun.last_error, /SHA256/);
-  f.park(tamperedRun);
+  await permanent(tampered, /SHA256/);
   const elsewhere = f.approved({ order_no: 'MRC-T014', lines: [line({ applications: [] })] });
   await f.http('POST', fiyat(elsewhere), f.tokens.manager, { unitPrice: 30 });
   const job = f.db.prepare("SELECT * FROM outbox WHERE version_id=? AND kind='maliyet_aktarim'").get(elsewhere.versionId);
-  await assert.rejects(cost.transfer(JSON.parse(job.payload_json), { db: f.db }, { dataDir: f.dir, recipes }), /veri klasörü/);
-  assert.deepEqual(panelJobs(), []);
+  await assert.rejects(cost.transfer(JSON.parse(job.payload_json), { db: f.db }, { dataDir: f.dir, recipes }), e => e.permanent === true && /veri klasörü/.test(e.message));
+  assert.equal(panelJobs().length, 1);
   assert.equal(docs.listDocuments({}).length, 2);
 });
 
