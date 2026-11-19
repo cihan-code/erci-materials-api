@@ -340,7 +340,8 @@ function formOrder(db,dataDir,v,sourceByApp) {
       }
       const sizes=JSON.parse(l.sizes_json);
       if (Object.keys(sizes).length && Object.values(sizes).reduce((a,b)=>a+b,0)!==l.quantity) fail(`Satır ${l.id}: PDF için adetlere eşit beden dağılımı gerekli`,409);
-      return {id:String(l.id),product:l.product_key,color:l.color_name || 'Renk belirtilmedi',fabric:l.fabric_item_id ? db.prepare('SELECT name FROM stock_items WHERE id=?').get(l.fabric_item_id).name : 'Kumaş belirtilmedi',sizes,quantity:l.quantity,images};
+      const item=l.fabric_item_id ? db.prepare('SELECT name,color_no FROM stock_items WHERE id=?').get(l.fabric_item_id) : null;
+      return {id:String(l.id),product:l.product_key,color:l.color_name ? require('./pdf').colorLabel(l.color_name,item?.color_no) : 'Renk belirtilmedi',fabric:item ? item.name : 'Kumaş belirtilmedi',sizes,quantity:l.quantity,images};
     }),
     applications:v.lines.flatMap(l=>l.applications.map(a=>({type:a.kind,position:a.position,width_mm:a.width_mm,height_mm:a.height_mm,lineIds:[String(l.id)],preview:preview(sourceByApp.get(a.id))}))),
   };

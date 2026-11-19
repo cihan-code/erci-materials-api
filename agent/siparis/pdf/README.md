@@ -36,8 +36,8 @@ const order = {
 // DATA_DIR'e erişim çağırandadır; modül gerçek marka dosyalarını kendisi aramaz.
 const options = {
   brand: {
-    logo: logoPngBuffer,      // İsteğe bağlı PNG/JPEG Buffer
-    termsText: 'Şartlar…',    // İsteğe bağlı metin; \n ile paragraflar
+    logo: logoPngBuffer,      // İsteğe bağlı PNG/JPEG Buffer; yoksa assets/mercico-logo.png
+    termsText: 'Şartlar…',    // İsteğe bağlı metin; yoksa sartlar.txt. \n ile satırlar, "1. " ile başlayan satır kalın başlık
   },
 };
 const pdf = await renderProductionForm(order, options); // Buffer
@@ -79,6 +79,8 @@ npm run siparis:ornek-pdf
 
 Örnek komut tamamen uydurma `test/fixtures/siparis/example-order.js` verisini ve kodla çizilmiş görselleri kullanarak `test/tmp/{uretim,onay,baski,nakis}.pdf` dosyalarını yazar. Bu klasör git tarafından dışlanır. Gerçek müşteri dosyası içermez.
 
-`fonts/Montserrat-Regular.ttf` ve `fonts/Montserrat-Bold.ttf`, [Montserrat resmi deposundan](https://github.com/JulietaUla/Montserrat/tree/master/fonts/ttf) alınmıştır. SIL Open Font License 1.1 metni `fonts/OFL.txt` içindedir ([Google Fonts lisans kopyası](https://github.com/google/fonts/blob/main/ofl/montserrat/OFL.txt)). Türkçe metinler için font PDF'e gömülür. `assets/placeholder-logo.png` bu iş için çizilmiş uydurma geometrik logodur; gerçek marka veya şartlar metni değildir. `options.brand` sağlanmazsa bu logo ve açıkça yer tutucu olduğunu söyleyen bir şartlar metni kullanılır.
+`fonts/Montserrat-Regular.ttf` ve `fonts/Montserrat-Bold.ttf`, [Montserrat resmi deposundan](https://github.com/JulietaUla/Montserrat/tree/master/fonts/ttf) alınmıştır. SIL Open Font License 1.1 metni `fonts/OFL.txt` içindedir ([Google Fonts lisans kopyası](https://github.com/google/fonts/blob/main/ofl/montserrat/OFL.txt)). Türkçe metinler için font PDF'e gömülür. `assets/mercico-logo.png` gerçek MerciCo logosunun beyaz boşluğu kırpılmış hâlidir; `sartlar.txt` gerçek sipariş onay şartlarıdır (10 madde). `options.brand` sağlanmazsa bu ikisi varsayılandır. Şartlar sayfası yazıyı küçülterek tek sayfaya sığdırır; yalnız aşırı uzun özel metin devam sayfasına akar.
 
-Görsel referanslar yalnız geçici klasörde görüntülenmiştir; repoya kopyalanmamıştır. Başlık yerleri, beyaz zemin, mavi üretim tabloları ve koyu gri onay bantları korunmuştur. Bilinen farklar: Montserrat yazı metrikleri, uydurma ürün/desen/logolar, eklenen cm ölçüleri ve alt bilgi; üretim beden tablosundaki elle kesim takibi yerine siparişin gerçek adetleri gösterilir. Yatay nakış görsel referansları, istenen iki sayfalı atölye formu için baskı formuyla aynı dikey düzene uyarlanmıştır.
+**Açıklama biçimi:** `description` maddeleri kırmızı kare imle basılır. Madde içinde `*…*` ile sarılan kısım kırmızı basılır (`Kapüşon *astarı ve kordon* olacak`); eşi olmayan yıldız olduğu gibi kalır. Ürün Formu'nda dolu özellik hücresine "+" ve altına küçük cm ölçüsü yazılır. Renk adı `(Kartela N)` ile biter; belge servisi bunu kumaş kaleminin `color_no` alanından üretir (`colorLabel`).
+
+Görsel referanslar yalnız geçici klasörde görüntülenmiştir; repoya kopyalanmamıştır. Üretim Formu ve Onay Formu, Canva şablon görsellerinden ölçülen konum, renk ve yuvarlatılmış bant biçimine göre çizilir; atölye formları aynı başlık ve madde diline çekilmiştir. Üretim Formu'nda yalnız ön ya da arka görsel varsa ortada tek büyük görsel, ikisi de varsa yan yana basılır. Beden tablosu yalnız beden dağılımı varsa çizilir. Bilinen farklar: Montserrat yazı metrikleri, uydurma ürün/desen/logolar, eklenen cm ölçüleri ve alt bilgi; üretim beden tablosundaki elle kesim takibi yerine siparişin gerçek adetleri gösterilir. Yatay nakış görsel referansları, istenen iki sayfalı atölye formu için baskı formuyla aynı dikey düzene uyarlanmıştır.

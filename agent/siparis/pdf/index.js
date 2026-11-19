@@ -10,7 +10,12 @@ const SIZES = ['XS', 'S', 'M', 'L', 'XL', 'XXL', '3XL', '4XL'];
 const POSITIONS = { gogus: 'Göğüs', sirt: 'Sırt', kol: 'Kol', ense: 'Ense', kapuson: 'Kapüşon' };
 const TYPES = { baski: 'Baskı', nakis: 'Nakış' };
 const FONT = path.join(__dirname, 'fonts');
-const PLACEHOLDER_TERMS = 'Bu metin bir yer tutucudur. Gerçek şartlar ve koşullar marka tarafından sağlanacaktır. Ölçü, renk, adet ve teslim bilgileri sipariş onayında kontrol edilmelidir.';
+const TERMS_TITLE = 'SİPARİŞ ONAY FORMU – ŞARTLAR VE KOŞULLAR';
+const RED = '#ff3333';
+const LOGO_FILE = path.join(__dirname, 'assets', 'mercico-logo.png');
+const TERMS_FILE = path.join(__dirname, 'sartlar.txt');
+let defaultLogo;
+let defaultTerms;
 
 function requiredText(value, name) {
   if (typeof value !== 'string' || !value.trim()) throw new TypeError(`${name} dolu bir metin olmalıdır.`);
@@ -104,7 +109,8 @@ function image(doc, buffer, x, y, w, h, label = 'Görsel sağlanmadı') {
 }
 
 function logo(doc, brand, x, y, w, h) {
-  image(doc, brand.logo || fs.readFileSync(path.join(__dirname, 'assets', 'placeholder-logo.png')), x, y, w, h);
+  defaultLogo ||= fs.readFileSync(LOGO_FILE);
+  image(doc, brand.logo || defaultLogo, x, y, w, h);
 }
 
 function build(order, options, draw) {
@@ -118,12 +124,14 @@ function build(order, options, draw) {
     try {
       doc.registerFont('Regular', path.join(FONT, 'Montserrat-Regular.ttf'));
       doc.registerFont('Bold', path.join(FONT, 'Montserrat-Bold.ttf'));
+      doc.pageTags = new Map();
       draw(doc, options.brand || {});
       const pages = doc.bufferedPageRange();
       for (let i = pages.start; i < pages.start + pages.count; i++) {
         doc.switchToPage(i);
-        fittedText(doc, `${order.orderNo} · sürüm ${order.version}`, 65, doc.page.height - 34, doc.page.width - 130, 20, 12, false, { align: 'center' });
-        text(doc, `${i + 1}`, doc.page.width - 65, doc.page.height - 34, 30, 12, false, { align: 'right' });
+        const tag = doc.pageTags.get(i);
+        fittedText(doc, `${order.orderNo} · sürüm ${order.version}${tag ? ` · ${tag}` : ''}`, 65, doc.page.height - 34, doc.page.width - 130, 20, 12, false, { align: 'center' });
+        text(doc, `${i + 1}`, doc.page.width - 75, doc.page.height - 36, 30, 15, true, { align: 'right' });
       }
       doc.end();
     } catch (error) {
@@ -136,8 +144,8 @@ function build(order, options, draw) {
 function page(doc, size = PORTRAIT) { doc.addPage({ size, margin: 0 }); }
 
 function title(doc, heading, subtitle) {
-  text(doc, heading, 35, 42, 740, 66, true, { align: 'center' });
-  if (subtitle) fittedText(doc, subtitle, 40, 150, 730, 70, 28, true, { align: 'center' });
+  fittedText(doc, heading, 35, 46, 740, 90, 66, true, { align: 'center' });
+  if (subtitle) fittedText(doc, subtitle, 40, 209, 730, 70, 30, true, { align: 'center' });
 }
 
 // Free text flows onto continuation pages. It is never shortened or clipped.
@@ -164,65 +172,145 @@ function paragraphs(doc, items, y, { size = PORTRAIT, x = 45, width = size[0] - 
   return y;
 }
 
-function productPair(doc, line, y, { x = 40, width = 730, height = 380 } = {}) {
+// "*vurgu*" prints red; an unpaired asterisk stays literal.
+function parseEmphasis(value) {
+  const segments = [];
+  String(value).split(/\*([^*\n]+)\*/).forEach((part, i) => {
+    if (part) segments.push({ text: part, red: i % 2 === 1 });
+  });
+  return segments;
+}
+
+// Word wrap that keeps colour runs together, so a line is one text item per colour.
+function richLines(doc, segments, width, size) {
+  doc.font('Regular').fontSize(size);
+  const lines = [[]];
+  let used = 0;
+  let carry = '';
+  for (const segment of segments) {
+    const tokens = segment.text.match(/\s*\S+/g) || [];
+    for (const [index, token] of tokens.entries()) {
+      let word = index === 0 && carry && !/^\s/.test(token) ? carry + token : token;
+      carry = '';
+      const first = used === 0;
+      if (first) word = word.trimStart();
+      if (!first && used + doc.widthOfString(word) > width) { lines.push([]); used = 0; word = word.trimStart(); }
+      const line = lines[lines.length - 1];
+      const last = line[line.length - 1];
+      if (last && last.red === segment.red) last.text += word; else line.push({ text: word, red: segment.red });
+      used += doc.widthOfString(word);
+    }
+    carry = /\s$/.test(segment.text) ? ' ' : '';
+  }
+  return lines;
+}
+
+function bulletList(doc, items, y, { size = PORTRAIT, x = 61, fontSize = 18, bottom = size[1] - 110 } = {}) {
+  const width = size[0] - x - 45;
+  const step = fontSize * 1.35;
+  for (const item of items) {
+    const lines = richLines(doc, parseEmphasis(item), width, fontSize);
+    const height = lines.length * step;
+    if (y + height > bottom) { page(doc, size); y = 60; }
+    doc.save().rect(x - 15, y + step / 2 - 4.5, 7, 7).fill(RED).restore();
+    for (const line of lines) {
+      let cx = x;
+      for (const run of line) {
+        doc.font('Regular').fontSize(fontSize).fillColor(run.red ? RED : '#111111');
+        doc.text(run.text, cx, y, { lineBreak: false });
+        cx += doc.widthOfString(run.text);
+      }
+      y += step;
+    }
+    y += 6;
+  }
+  return y;
+}
+
+function productPair(doc, line, y, { x = 40, width = 730, height = 380, labelSize = 22, bold = true } = {}) {
   const half = width / 2;
   image(doc, line.images.front, x, y, half - 12, height);
   image(doc, line.images.back, x + half + 12, y, half - 12, height);
-  text(doc, 'ÖN', x, y + height + 10, half, 22, true, { align: 'center' });
-  text(doc, 'ARKA', x + half, y + height + 10, half, 22, true, { align: 'center' });
+  text(doc, 'ÖN', x, y + height + 10, half, labelSize, bold, { align: 'center' });
+  text(doc, 'ARKA', x + half, y + height + 10, half, labelSize, bold, { align: 'center' });
 }
 
+// Centered single-line label inside a table cell.
+function cellText(doc, value, x, y, w, h, size, bold, align = 'center') {
+  text(doc, value, x + 4, y + (h - size * 1.25) / 2, w - 8, size, bold, { align });
+}
+
+const HEAD_DARK = '#8ea9db';
+const HEAD_LIGHT = '#bdd7ee';
+const SIZE_BLUE = '#b4c6e7';
+
 function applicationTable(doc, apps, y) {
-  const x = 40, labelWidth = 120, cellWidth = 122;
+  const x = 82, labelWidth = 188, cellWidth = 92, headHeight = 36;
   const positions = Object.keys(POSITIONS);
-  const contents = ['baski', 'nakis'].map(type => positions.map(position =>
-    apps.filter(app => app.type === type && app.position === position).map(dimensions).join('\n') || '-'));
-  const heights = contents.map(row => Math.max(40, ...row.map(value => doc.font('Regular').fontSize(15).heightOfString(value, { width: cellWidth - 8, lineGap: 3 }) + 16)));
-  const height = 38 + heights[0] + heights[1];
+  const cells = ['baski', 'nakis'].map(type => positions.map(position =>
+    apps.filter(app => app.type === type && app.position === position).map(dimensions)));
+  const heights = cells.map(row => Math.max(36, ...row.map(list => list.length
+    ? 40 + doc.font('Regular').fontSize(9).heightOfString(list.join('\n'), { width: cellWidth - 6, lineGap: 2 }) : 0)));
+  const height = headHeight + heights[0] + heights[1];
   if (height > 1120) throw new RangeError('Tek konumda sayfaya sığmayacak kadar çok uygulama var.');
   if (y + height > 1230) { page(doc); y = 65; }
   const headers = ['Özellikler', ...Object.values(POSITIONS)];
   let cx = x;
   for (let i = 0; i < headers.length; i++) {
     const width = i ? cellWidth : labelWidth;
-    box(doc, cx, y, width, 38, i ? '#bed7eb' : '#92acd4');
-    text(doc, headers[i], cx + 3, y + 9, width - 6, 16, true, { align: 'center' });
+    box(doc, cx, y, width, headHeight, i ? HEAD_LIGHT : HEAD_DARK);
+    cellText(doc, headers[i], cx, y, width, headHeight, 13, true);
     cx += width;
   }
-  y += 38;
+  y += headHeight;
   for (let r = 0; r < 2; r++) {
     box(doc, x, y, labelWidth, heights[r]);
-    text(doc, TYPES[['baski', 'nakis'][r]], x + 8, y + 10, labelWidth - 16, 16);
+    text(doc, TYPES[['baski', 'nakis'][r]], x + 8, y + 10, labelWidth - 16, 14);
     for (let c = 0; c < positions.length; c++) {
-      box(doc, x + labelWidth + c * cellWidth, y, cellWidth, heights[r]);
-      text(doc, contents[r][c], x + labelWidth + c * cellWidth + 4, y + 8, cellWidth - 8, 15, false, { align: 'center' });
+      const cellX = x + labelWidth + c * cellWidth;
+      box(doc, cellX, y, cellWidth, heights[r]);
+      if (cells[r][c].length) {
+        text(doc, '+', cellX, y + 3, cellWidth, 26, true, { align: 'center' });
+        text(doc, cells[r][c].join('\n'), cellX + 3, y + 34, cellWidth - 6, 9, false, { align: 'center', lineGap: 2 });
+      }
     }
     y += heights[r];
   }
-  return y + 25;
+  return y + 31;
 }
 
 function sizeColumns(lines) { return lines.some(l=>l.distributed) ? [...SIZES,...(lines.some(l=>Object.hasOwn(l.sizes,'Diğer')) ? ['Diğer'] : [])] : []; }
 function sizeSummary(lines) { return sizeColumns(lines).map(s=>`${s}:${total(lines,s)}`).join('  '); }
 
 function sizeTable(doc, lines, y, orderTotal) {
-  if (y + 160 > 1360) { page(doc); y = 65; }
-  if (!lines.some(l=>l.distributed)) {
-    text(doc, `Toplam adet: ${total(lines)} · Sipariş toplamı: ${orderTotal}`, 40, y, 730, 18, true);
+  const columns = sizeColumns(lines);
+  const tableHeight = columns.length ? 34 + 3 * 37 : 0;
+  if (y + tableHeight + 60 > 1330) { page(doc); y = 65; }
+  const summary = `Toplam adet: ${total(lines)} · Sipariş toplamı: ${orderTotal}`;
+  if (!columns.length) {
+    text(doc, summary, 82, y, 646, 18, true);
     return;
   }
-  const columns = sizeColumns(lines);
-  const x = 40, widths = [130, ...columns.map(() => 510/columns.length), 90];
-  const rows = [ ['Bedenler', ...columns, 'Toplam'], ['Adet', ...columns.map(s => String(total(lines, s))), String(total(lines))] ];
-  for (let r = 0; r < 2; r++) {
-    let cx = x;
-    rows[r].forEach((value, c) => {
-      box(doc, cx, y + r * 42, widths[c], 42, r === 0 || c === 0 ? '#b5c7e3' : '#ffffff');
-      text(doc, value, cx + 4, y + r * 42 + 11, widths[c] - 8, 16, true, { align: c ? 'center' : 'left' });
-      cx += widths[c];
+  const x = 86, labelWidth = 202, cellWidth = Math.min(50, 400 / columns.length);
+  const rows = [
+    ['Bedenler', columns.map(c => c), 34],
+    ['Kesilmesi Gerekenler', columns.map(c => String(total(lines, c))), 37],
+    ['Kesilen Adet', columns.map(() => ''), 37],
+    ['', columns.map(() => ''), 37],
+  ];
+  let cy = y;
+  rows.forEach(([label, values, h], r) => {
+    box(doc, x, cy, labelWidth, h, SIZE_BLUE);
+    if (label) cellText(doc, label, x + 4, cy, labelWidth - 4, h, 14, true, 'left');
+    values.forEach((value, c) => {
+      const cx = x + labelWidth + c * cellWidth;
+      box(doc, cx, cy, cellWidth, h, r === 0 ? '#d3dff2' : '#ffffff');
+      if (value) cellText(doc, value, cx, cy, cellWidth, h, columns.length > 8 ? 11 : 13, false);
     });
-  }
-  text(doc, `Toplam adet: ${total(lines)} · Sipariş toplamı: ${orderTotal}`, x, y + 102, 730, 18, true);
+    cy += h;
+  });
+  text(doc, 'toplam adet:', x + labelWidth + columns.length * cellWidth + 8, y + 52, 80, 9, true);
+  text(doc, summary, x, cy + 14, 646, 14, true);
 }
 
 async function renderProductionForm(input, options = {}) {
@@ -231,27 +319,71 @@ async function renderProductionForm(input, options = {}) {
     for (const line of order.lines) {
       page(doc);
       title(doc, 'Üretim Formu');
-      fittedText(doc, `Sipariş No: ${order.orderNo}`, 40, 147, 730, 60, 42, true, { align: 'center' });
-      let y = 215;
-      y += fittedText(doc, `Sipariş Adı: ${order.name}`, 40, y, 730, 75, 28, true, { align: 'center' }) + 16;
-      box(doc, 180, y, 180, 42, '#b5c7e3'); box(doc, 360, y, 270, 42);
-      text(doc, 'Teslim Tarihi', 185, y + 10, 170, 18, true, { align: 'center' });
-      fittedText(doc, order.deliveryDate, 365, y + 10, 260, 28, 18, true, { align: 'center', color: '#ff3333' });
-      y += 70;
-      text(doc, 'Ürün Açıklaması:', 45, y, 720, 23, true);
-      y = paragraphs(doc, [`${line.product} · ${line.color} · ${line.fabric}`, ...order.description.map(t => `• ${t}`)], y + 38);
-      if (y + 440 > 1120) { page(doc); y = 60; }
-      text(doc, 'Ürün Görseli:', 40, y + 8, 730, 23, true);
-      productPair(doc, line, y + 55, { height: 350 });
-      y = applicationTable(doc, appsFor(order, [line]), y + 460);
+      fittedText(doc, `Sipariş No: ${order.orderNo}`, 40, 140, 730, 60, 40, true, { align: 'center' });
+      let y = 209;
+      y += fittedText(doc, `Sipariş Adı: ${order.name}`, 40, y, 730, 75, 30, true, { align: 'center' }) + 20;
+      y = Math.max(y, 266);
+      box(doc, 182, y, 176, 40, SIZE_BLUE); box(doc, 358, y, 267, 40);
+      cellText(doc, 'Teslim Tarihi', 182, y, 176, 40, 16, true);
+      fittedText(doc, order.deliveryDate, 363, y + 9, 257, 28, 17, true, { align: 'center', color: RED });
+      y += 62;
+      text(doc, 'Ürün Açıklaması:', 54, y, 700, 24, true);
+      y = bulletList(doc, [`${line.product} · ${line.color} · ${line.fabric}`, ...order.description], y + 34);
+      const appsList = appsFor(order, [line]);
+      const tableHeight = 36 * 3 + 40 * appsList.length;
+      const fixed = 30 + 13 + Math.min(tableHeight, 200) + 31 + (line.distributed ? 150 + 40 : 40);
+      y = Math.max(y + 12, 497);
+      let imageHeight = Math.min(411, 1345 - y - fixed);
+      if (imageHeight < 220) { page(doc); y = 60; imageHeight = 411; }
+      text(doc, 'Ürün Görseli:', 28, y, 700, 24, true);
+      const both = line.images.front != null && line.images.back != null;
+      if (both) productPair(doc, line, y + 34, { x: 82, width: 648, height: imageHeight - 30, labelSize: 14 });
+      else image(doc, line.images.front ?? line.images.back, 182, y + 34, 452, imageHeight);
+      y = applicationTable(doc, appsList, y + 34 + imageHeight + 13) ;
       sizeTable(doc, [line], y, total(order.lines));
     }
   });
 }
 
-function band(doc, value, x, y, width, color) {
-  doc.rect(x, y, width, 36).fill(color);
-  fittedText(doc, value, x + 15, y + 7, width - 30, 24, 18, false, { color: '#ffffff' });
+function band(doc, label, value, x, y, width, color, valueX) {
+  doc.roundedRect(x, y, width, 36, 8).fill(color);
+  text(doc, label, x < 0 ? 16 : x + 16, y + 8, 160, 16, false, { color: '#ffffff' });
+  fittedText(doc, `: ${value}`, valueX, y + 8, x + width - valueX - 20, 24, 17, false, { color: '#ffffff' });
+}
+
+function wholeBand(doc, value, y, color) {
+  doc.rect(0, y, 1440, 36).fill(color);
+  fittedText(doc, value, 31, y + 8, 1380, 24, 17, false, { color: '#ffffff' });
+}
+
+function termsEntries(source) {
+  const rows = source.split('\n').map(row => row.trim());
+  while (rows.length && (!rows[0] || rows[0].toLocaleUpperCase('tr-TR') === TERMS_TITLE)) rows.shift();
+  const entries = [];
+  for (const row of rows) {
+    if (!row) { if (entries.length) entries[entries.length - 1].gap = 6; continue; }
+    entries.push({ value: row, head: /^\d+\.\s/.test(row), gap: 0 });
+  }
+  return entries;
+}
+
+// The terms always fit one page by shrinking the type; only an extreme custom text continues.
+function termsPage(doc, source) {
+  page(doc, LANDSCAPE);
+  doc.pageTags.set(doc.bufferedPageRange().count - 1, 'Şartlar ve Koşullar');
+  text(doc, TERMS_TITLE, 50, 38, 1340, 22, true, { align: 'center', color: RED });
+  const entries = termsEntries(source);
+  const measure = size => entries.reduce((sum, entry) =>
+    sum + doc.font(entry.head ? 'Bold' : 'Regular').fontSize(size).heightOfString(entry.value, { width: 1340, lineGap: 3 }) + entry.gap + (entry.head ? 2 : 0), 0);
+  let size = 18;
+  while (size > 11 && 82 + measure(size) > 755) size--;
+  let y = 82;
+  for (const entry of entries) {
+    const height = doc.font(entry.head ? 'Bold' : 'Regular').fontSize(size).heightOfString(entry.value, { width: 1340, lineGap: 3 });
+    if (y + height > 755) { page(doc, LANDSCAPE); y = 50; }
+    text(doc, entry.value, 50, y, 1340, size, entry.head, { align: 'center' });
+    y += height + entry.gap + (entry.head ? 2 : 0);
+  }
 }
 
 async function renderApprovalForm(input, options = {}) {
@@ -264,28 +396,38 @@ async function renderApprovalForm(input, options = {}) {
       for (let offset = 0; offset < lines.length; offset += 2) {
         const batch = lines.slice(offset, offset + 2);
         page(doc, LANDSCAPE);
-        text(doc, 'Onay Formu', 40, 6, 1360, 66, true, { align: 'center' });
-        band(doc, `Ürün Modeli: ${[...new Set(batch.map(line => line.product))].join(', ')}`, 0, 82, 525, '#464657');
-        band(doc, `Ürün Rengi: ${color}`, 0, 126, 525, '#92929c');
-        band(doc, `Sipariş Kodu: ${order.orderNo}`, 750, 82, 690, '#464657');
-        band(doc, `Tarih: ${order.date}`, 750, 126, 690, '#92929c');
-        band(doc, `Bedenler ve Adetler   ${sizeSummary(lines)}   Toplam:${total(lines)}`, 0, 171, 1440, '#464657');
+        fittedText(doc, 'Onay Formu', 40, 6, 1360, 80, 62, true, { align: 'center' });
+        band(doc, 'Ürün Modeli', [...new Set(batch.map(line => line.product))].join(', '), -30, 90, 570, '#454655', 206);
+        band(doc, 'Ürün Rengi', color, -30, 126, 570, '#8f8f99', 206);
+        band(doc, 'Sipariş Kodu', order.orderNo, 750, 81, 720, '#454655', 941);
+        band(doc, 'Tarih', order.date, 750, 126, 720, '#8f8f99', 941);
+        wholeBand(doc, `Bedenler ve Adetler : ${sizeSummary(lines)}   Toplam:${total(lines)}`, 171, '#454655');
         batch.forEach((line, i) => {
-          const y = 260 + i * 240;
-          const labelHeight = batch.length > 1 ? fittedText(doc, line.product, 30, y, 810, 30, 18, true, { align: 'center' }) + 5 : 10;
-          productPair(doc, line, y + labelHeight, { x: 30, width: 810, height: batch.length > 1 ? 155 : 355 });
+          const y = 250 + i * 270;
+          const labelHeight = batch.length > 1 ? fittedText(doc, line.product, 10, y, 760, 30, 16, true, { align: 'center' }) + 5 : 0;
+          const height = batch.length > 1 ? 190 : 340;
+          productPair(doc, line, y + labelHeight + (batch.length > 1 ? 0 : 84), { x: 10, width: 760, height, labelSize: batch.length > 1 ? 18 : 28, bold: false });
         });
-        logo(doc, brand, 1000, 285, 250, 180);
+        logo(doc, brand, 940, 335, 320, 290);
         const apps = appsFor(order, batch);
-        paragraphs(doc, apps.map(app => `${TYPES[app.type]} · ${POSITIONS[app.position]}: ${dimensions(app)}`), 510,
-          { size: LANDSCAPE, x: 900, width: 500, fontSize: 20, bottom: 750 });
+        paragraphs(doc, apps.map(app => `${TYPES[app.type]} · ${POSITIONS[app.position]}: ${dimensions(app)}`), 650,
+          { size: LANDSCAPE, x: 900, width: 500, fontSize: 18, bottom: 750 });
       }
     }
-    page(doc, LANDSCAPE);
-    text(doc, 'Sipariş Onay Formu · Şartlar ve Koşullar', 50, 50, 1340, 24, false, { align: 'center', color: '#ff3333' });
-    const terms = brand.termsText === undefined ? PLACEHOLDER_TERMS : requiredText(brand.termsText, 'brand.termsText');
-    paragraphs(doc, terms.split('\n'), 100, { size: LANDSCAPE, fontSize: 16, bottom: 730, align: 'center' });
+    termsPage(doc, brand.termsText === undefined ? loadDefaultTerms() : requiredText(brand.termsText, 'brand.termsText'));
   });
+}
+
+function loadDefaultTerms() {
+  defaultTerms ||= fs.readFileSync(TERMS_FILE, 'utf8');
+  return defaultTerms;
+}
+
+// Stock items with a swatch number print as "Lacivert (Kartela 14)".
+function colorLabel(name, colorNo) {
+  const color = String(name ?? '').trim();
+  const no = String(colorNo ?? '').trim();
+  return color && no ? `${color} (Kartela ${no})` : color;
 }
 
 function renderWorkshop(input, options, type) {
@@ -296,10 +438,10 @@ function renderWorkshop(input, options, type) {
     const lines = order.lines.filter(line => apps.some(app => !app.lineIds || app.lineIds.includes(line.id)));
     page(doc);
     title(doc, `${TYPES[type]} Formu`, `Ürün: ${[...new Set(lines.map(line => line.product))].join(', ')}`);
-    text(doc, 'Ürün Açıklaması:', 45, 245, 720, 24, true);
-    let visualY = paragraphs(doc, [`Toplam adet: ${total(lines)}`, ...(sizeColumns(lines).length ? [`Bedenler ve Adetler: ${sizeSummary(lines)}`] : []), ...order.description.map(t => `• ${t}`)], 290) + 15;
+    text(doc, 'Ürün Açıklaması:', 54, 270, 700, 24, true);
+    let visualY = bulletList(doc, [`Toplam adet: ${total(lines)}`, ...(sizeColumns(lines).length ? [`Bedenler ve Adetler: ${sizeSummary(lines)}`] : []), ...order.description], 304) + 15;
     if (visualY + 400 > 1210) { page(doc); visualY = 60; }
-    text(doc, 'Ürün Görseli:', 45, visualY, 720, 24, true);
+    text(doc, 'Ürün Görseli:', 28, visualY, 720, 24, true);
     visualY += 50;
     for (let i = 0; i < lines.length;) {
       const count = Math.min(2, lines.length - i);
@@ -331,4 +473,4 @@ function renderWorkshop(input, options, type) {
 function renderPrintForm(order, options = {}) { return renderWorkshop(order, options, 'baski'); }
 function renderEmbroideryForm(order, options = {}) { return renderWorkshop(order, options, 'nakis'); }
 
-module.exports = { renderProductionForm, renderApprovalForm, renderPrintForm, renderEmbroideryForm };
+module.exports = { renderProductionForm, renderApprovalForm, renderPrintForm, renderEmbroideryForm, parseEmphasis, colorLabel };
