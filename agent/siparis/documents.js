@@ -7,10 +7,12 @@ const { assertUser } = require('./auth');
 const orders = require('./orders');
 const flats = require('./flats');
 const { measureApplication, designBoxFromPng, imageSize } = require('./measure');
+const { viewForPosition } = require('./autoMeasure');
 const childProcess = require('node:child_process');
 const { buildWorkshopMessage, createWorkshopHandler } = require('./workshop');
 const { registerHandler } = require('./outbox');
 const UPLOAD_KINDS = ['urun_gorsel','desen_kaynak','desen_kaynak_vektor'];
+const POSITIONS = ['gogus','sol_gogus','sag_gogus','kol','sol_kol','sag_kol','sirt','ense','kapusan','kapuson'];
 const SOURCE_KINDS = ['desen_kaynak','desen_kaynak_vektor'];
 const PREPARE_TIMEOUT_MS = 8*60e3;
 const PREPARE_LOCK_MS = 10*60e3;
@@ -124,24 +126,32 @@ function saveFile(db, dataDir, v, kind, content, user, meta = {}, written = []) 
     .run(file.id,meta.lineId ?? null,meta.applicationId ?? null,meta.gorunum ?? null,meta.mime || 'application/pdf');
   return file;
 }
-function upload(db, dataDir, versionId, input, file, user) {
+async function upload(db, dataDir, versionId, input, file, user) {
   assertUser(db,user.id);
   if (!UPLOAD_KINDS.includes(input.kind)) fail('Geçersiz kaynak dosya türü');
   if (input.kind === 'desen_kaynak_vektor' && !['pdf','svg'].includes(file.ext)) fail('Hazır vektör PDF veya SVG olmalı');
   const written=[];
-  try { return tx(db, () => {
+  let saved;
+  try { saved=tx(db, () => {
     const v=draft(db,versionId); unlocked(db,versionId);
     const lineId=input.lineId == null ? null : integer(Number(input.lineId),'lineId',1);
     if (lineId && !v.lines.some(l=>l.id===lineId)) fail('Satır bu sürüme ait değil');
     if (input.gorunum != null && !['on','arka'].includes(input.gorunum)) fail('gorunum on/arka olmalı');
     if (input.kind==='urun_gorsel' && (!lineId || !input.gorunum)) fail('Ürün görseli için lineId ve gorunum gerekli');
-    return saveFile(db,dataDir,v,input.kind,file.buffer,user,{...file,lineId,gorunum:input.gorunum},written);
+    const applicationId=input.applicationId==null?null:integer(Number(input.applicationId),'applicationId',1);
+    const app=applicationId==null?null:v.lines.flatMap(l=>l.applications).find(a=>a.id===applicationId);
+    if(applicationId!=null && (!app || (lineId && app.line_id!==lineId))) fail('Uygulama bu satır/sürüme ait değil');
+    const saved=saveFile(db,dataDir,v,input.kind,file.buffer,user,{...file,lineId:lineId??app?.line_id,applicationId,gorunum:input.gorunum},written);
+    if(app && input.kind==='desen_kaynak') db.prepare('INSERT INTO document_application_sources(application_id,file_id) VALUES(?,?) ON CONFLICT(application_id) DO UPDATE SET file_id=excluded.file_id').run(app.id,saved.id);
+    return saved;
   }); } catch (e) { for (const f of written) fs.unlinkSync(f); throw e; }
+  await automaticMeasure(db,dataDir,versionId,user,false,true);
+  return saved;
 }
 function measure(db, dataDir, input, user, applicationId = null) {
   assertUser(db,user.id);
   if (!input || typeof input!=='object' || Array.isArray(input)) fail('Ölçü gövdesi nesne olmalı');
-  if (!['gogus','sirt','kol','ense','kapuson'].includes(input.position)) fail('Geçersiz uygulama konumu');
+  if (!POSITIONS.includes(input.position)) fail('Geçersiz uygulama konumu');
   const lineId=integer(Number(input.lineId),'lineId',1);
   const line=db.prepare('SELECT * FROM order_lines WHERE id=?').get(lineId);
   if (!line) fail('Sipariş satırı bulunamadı',404);
@@ -175,7 +185,7 @@ function measure(db, dataDir, input, user, applicationId = null) {
     draft(db,line.version_id); unlocked(db,line.version_id);
     const values={kind:input.kind,position:input.position,width_mm:result.width_mm,height_mm:result.height_mm,
       needs_confirmation:result.needsConfirmation,
-      measure_source:JSON.stringify({...reference,designBoxPx:box,imageKind:input.imageKind,flags:input.flags || {},desenDosyaId:source?.id,automaticBox,reasons:result.reasons})};
+      measure_source:JSON.stringify({...reference,method:'elle',designBoxPx:box,imageKind:input.imageKind,flags:input.flags || {},desenDosyaId:source?.id,automaticBox,reasons:result.reasons})};
     let application;
     if (applicationId == null) application=orders.addApplication(db,lineId,values,user);
     else {
@@ -196,9 +206,9 @@ function measure(db, dataDir, input, user, applicationId = null) {
     return {...result,application,confirmationId};
   });
 }
-function editApplication(db,dataDir,applicationId,changes,user) {
+async function editApplication(db,dataDir,applicationId,changes,user) {
   assertUser(db,user.id);
-  return tx(db,()=> {
+  const result=tx(db,()=> {
     const app=db.prepare('SELECT a.*,l.version_id FROM applications a JOIN order_lines l ON l.id=a.line_id WHERE a.id=?').get(applicationId);
     if (!app) fail('Uygulama bulunamadı',404);
     draft(db,app.version_id); unlocked(db,app.version_id);
@@ -217,7 +227,7 @@ function editApplication(db,dataDir,applicationId,changes,user) {
       return measure(db,dataDir,input,user,app.id);
     }
     if (changes.kind!=null && !['baski','nakis'].includes(changes.kind)) fail('Geçersiz uygulama türü');
-    if (changes.position!=null && !['gogus','sirt','kol','ense','kapuson'].includes(changes.position)) fail('Geçersiz uygulama konumu');
+    if (changes.position!=null && !POSITIONS.includes(changes.position)) fail('Geçersiz uygulama konumu');
     const changedDimensions=['width_mm','height_mm'].some(k=>Object.hasOwn(changes,k));
     for (const k of ['width_mm','height_mm']) if (Object.hasOwn(changes,k) && (!Number.isSafeInteger(changes[k]) || changes[k]<=0)) fail('Geçersiz ölçü');
     if (changes.desenDosyaId!=null) {
@@ -230,12 +240,16 @@ function editApplication(db,dataDir,applicationId,changes,user) {
     const uncertain=changedDimensions || !app.measure_source;
     db.prepare('UPDATE applications SET kind=?,position=?,width_mm=?,height_mm=?,measure_source=?,needs_confirmation=? WHERE id=?')
       .run(changes.kind ?? app.kind,changes.position ?? app.position,changes.width_mm ?? app.width_mm,changes.height_mm ?? app.height_mm,
-        uncertain ? null : JSON.stringify(previous),uncertain ? 1 : app.needs_confirmation,app.id);
+        JSON.stringify(changedDimensions?{...previous,method:'elle'}:previous),uncertain ? 1 : app.needs_confirmation,app.id);
     if (uncertain && !db.prepare("SELECT id FROM confirmations WHERE kind='olcu' AND ref_table='applications' AND ref_id=? AND status='acik'").get(app.id))
       db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('olcu','applications',?,'Elle değiştirilen ölçü teyit edilmeli')").run(app.id);
     audit(db,user.id,'uygulama_duzenle',app.id);
     return {application:db.prepare('SELECT * FROM applications WHERE id=?').get(app.id)};
   });
+  const line=db.prepare('SELECT version_id FROM order_lines WHERE id=?').get(result.application.line_id);
+  await automaticMeasure(db,dataDir,line.version_id,user);
+  result.application=db.prepare('SELECT * FROM applications WHERE id=?').get(applicationId);
+  return result;
 }
 function deleteApplication(db,applicationId,user) {
   assertUser(db,user.id);
@@ -367,6 +381,97 @@ function createRenderQueue({timeoutMs=PREPARE_TIMEOUT_MS,lockMs=PREPARE_LOCK_MS}
   };
 }
 const renderQueue=createRenderQueue();
+function provenance(app) {
+  try {return JSON.parse(app.measure_source)||{};} catch {return {};}
+}
+function manuallyMeasured(app) {
+  const source=provenance(app);
+  return source.method==='elle' || (source.method!=='otomatik' && (app.width_mm!=null || app.height_mm!=null));
+}
+function autoInputs(db,v,line,app) {
+  const view=viewForPosition(app.position);
+  const images=v.files.filter(f=>f.kind==='urun_gorsel' && f.line_id===line.id && (view==='teyit'||f.gorunum===view));
+  // A replacement upload supersedes the previous immutable file in this view.
+  const image=images.at(-1);
+  const sourceId=db.prepare('SELECT file_id FROM document_application_sources WHERE application_id=?').get(app.id)?.file_id;
+  const design=v.files.find(f=>f.id===sourceId && f.kind==='desen_kaynak');
+  const meta=design && db.prepare('SELECT line_id FROM document_file_meta WHERE file_id=?').get(design.id);
+  if(!image || !design || (meta?.line_id && meta.line_id!==line.id))return null;
+  const productFlats=flats.list(db).filter(f=>f.urun===line.product_key);
+  const viewFlats=productFlats.filter(f=>f.gorunum===(view==='teyit'?image.gorunum:view));
+  // A front library drawing also supplies the same garment's back chest width.
+  const candidates=viewFlats.length?viewFlats:productFlats;
+  const requested=provenance(app).flatId;
+  const flat=requested ? productFlats.find(f=>f.id===requested)??null : candidates.length===1?candidates[0]:null;
+  return {image,design,flat,product:line.product_key,position:app.position};
+}
+function autoFingerprint(app,input) {return JSON.stringify({app,input});}
+function flatRasterInput(dataDir,flat) {
+  if(!flat)return undefined;
+  const root=path.join(fs.realpathSync(dataDir),'siparis','flats'),file=path.resolve(flat.dosya);
+  if(!file.startsWith(root+path.sep) || fs.realpathSync(root)!==root || fs.realpathSync(file)!==file)fail('Kalıp görseli güvenli kütüphane dizininde değil',403);
+  return {buffer:fs.readFileSync(file),mime:path.extname(file).toLowerCase()==='.png'?'image/png':'image/jpeg'};
+}
+async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,changedOnly=false) {
+  assertUser(db,user.id);draft(db,versionId);unlocked(db,versionId);
+  return renderQueue(async signal=> {
+    const v=draft(db,versionId);unlocked(db,versionId);
+    const results=[];
+    for(const line of v.lines) for(const original of line.applications) {
+      signal.throwIfAborted();
+      const app=db.prepare('SELECT * FROM applications WHERE id=?').get(original.id);
+      if(!app || (!regenerate && manuallyMeasured(app)))continue;
+      const input=autoInputs(db,v,line,app);
+      if(!input)continue;
+      const previous=provenance(app);
+      if(changedOnly && previous.method==='otomatik' && previous.gorselFileId===input.image.id && previous.desenFileId===input.design.id &&
+        previous.flatId===(input.flat?.id??null) && previous.refCm===(input.flat?.refLengthCm??null) && previous.refBeden===(input.flat?.refBeden??null))continue;
+      const fingerprint=autoFingerprint(app,input);
+      let result;
+      try {
+        const image={...input.image,...await vectorInput(dataDir,input.image)};
+        const design={...input.design,...await vectorInput(dataDir,input.design)};
+        result=await generateInChild({type:'autoMeasure',input:{...input,image,design,flatImage:flatRasterInput(dataDir,input.flat)}},signal,{timeoutMs:15000});
+      } catch(e) {
+        if(signal.aborted)throw e;
+        result={width_mm:null,height_mm:null,needs_confirmation:true,reason:`Otomatik ölçü tamamlanamadı: ${e.message}`,
+          measure_source:{method:'otomatik',flatId:input.flat?.id??null,flatAd:input.flat?.ad??null,refBeden:input.flat?.refBeden??null,refCm:input.flat?.refLengthCm??null,chestPx:null,designBoxPx:null,scale:null,confidence:0,gorselFileId:input.image.id,desenFileId:input.design.id}};
+      }
+      signal.throwIfAborted();
+      tx(db,()=> {
+        const current=draft(db,versionId);unlocked(db,versionId);
+        const currentLine=current.lines.find(l=>l.id===line.id),currentApp=currentLine?.applications.find(a=>a.id===app.id);
+        // A manual edit, source replacement or reference change during rendering
+        // invalidates this result. The subsequent save/upload queues fresh work.
+        if(!currentApp || autoFingerprint(currentApp,autoInputs(db,current,currentLine,currentApp))!==fingerprint)return;
+        db.prepare('UPDATE applications SET width_mm=?,height_mm=?,measure_source=?,needs_confirmation=? WHERE id=?')
+          .run(result.width_mm,result.height_mm,JSON.stringify(result.measure_source),result.needs_confirmation?1:0,app.id);
+        db.prepare("UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='olcu' AND ref_table='applications' AND ref_id=? AND status='acik'").run(user.id,app.id);
+        if(result.needs_confirmation)db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('olcu','applications',?,?)").run(app.id,result.reason);
+        audit(db,user.id,'uygulama_otomatik_olc',app.id,{width_mm:result.width_mm,height_mm:result.height_mm,reason:result.reason});
+        results.push({applicationId:app.id,...result});
+      });
+    }
+    return {results};
+  });
+}
+async function addApplication(db,dataDir,lineId,input,user) {
+  const app=tx(db,()=> {
+    const line=db.prepare('SELECT * FROM order_lines WHERE id=?').get(lineId);
+    if(!line)fail('Satır bulunamadı',404);
+    draft(db,line.version_id);unlocked(db,line.version_id);
+    const manual=input.width_mm!=null||input.height_mm!=null;
+    const app=orders.addApplication(db,lineId,{...input,measure_source:manual?JSON.stringify({method:'elle',flatId:input.flatId??null}):JSON.stringify({flatId:input.flatId??null}),needs_confirmation:true},user);
+    if(input.desenDosyaId!=null) {
+      const source=db.prepare("SELECT f.* FROM files f LEFT JOIN document_file_meta m ON m.file_id=f.id WHERE f.id=? AND f.version_id=? AND f.kind IN ('desen_kaynak','desen_kaynak_vektor') AND (m.line_id IS NULL OR m.line_id=?)").get(integer(Number(input.desenDosyaId),'desenDosyaId',1),line.version_id,lineId);
+      if(!source)fail('Desen bu satır/sürüme ait değil');
+      db.prepare('INSERT INTO document_application_sources(application_id,file_id) VALUES(?,?)').run(app.id,source.id);
+    }
+    return {...app,version_id:line.version_id};
+  });
+  await automaticMeasure(db,dataDir,app.version_id,user);
+  return db.prepare('SELECT * FROM applications WHERE id=?').get(app.id);
+}
 function generateInChild(input,signal,{timeoutMs=120000}={}) {
   if (!(Number.isFinite(timeoutMs) && timeoutMs>0)) throw new TypeError('Geçerli render süresi gerekli');
   signal?.throwIfAborted();
@@ -489,7 +594,7 @@ function registerWorkshop(boundDb,dataDir) {
     return {providerRef:result.providerRef};
   });
 }
-module.exports={init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+module.exports={init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,addApplication,automaticMeasure,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
 if (require.main===module && process.argv[2]==='--vector-worker') {
   // A one-shot worker must not depend on PDF/native-library handles becoming
   // idle. Flush the entire IPC response before exiting; close drains it in the parent.
@@ -498,7 +603,8 @@ if (require.main===module && process.argv[2]==='--vector-worker') {
   process.once('message',async job=> {
     try {
       let result;
-      if (job.type==='vector') result=await require('./vector').vectorize(await normalizeVectorInput(job.input));
+      if (job.type==='autoMeasure') result=await require('./autoMeasure').autoMeasure(job.input);
+      else if (job.type==='vector') result=await require('./vector').vectorize(await normalizeVectorInput(job.input));
       else {
         const forms=require('./pdf'); result=[];
         for (const [kind,render] of [['uretim_formu',forms.renderProductionForm],['onay_formu',forms.renderApprovalForm],['baski_formu',forms.renderPrintForm],['nakis_formu',forms.renderEmbroideryForm]]) {

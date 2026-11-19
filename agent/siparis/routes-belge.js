@@ -25,7 +25,7 @@ module.exports = function documentRouter({db,dataDir}) {
     // Preserve the existing core interface for registered generated paths.
     if (!req.is('multipart/form-data')) return next('route');
     next();
-  },receive,wrap((req,res)=>res.status(201).json(documents.upload(db,dataDir,id(req),req.body,documents.validateUpload(req.file),req.user))));
+  },receive,wrap(async(req,res)=>res.status(201).json(await documents.upload(db,dataDir,id(req),req.body,documents.validateUpload(req.file),req.user))));
   router.get('/dosyalar/:id',wrap((req,res)=> {
     const file=db.prepare('SELECT * FROM files WHERE id=?').get(id(req));
     if (!file) fail('Dosya bulunamadı',404);
@@ -40,9 +40,11 @@ module.exports = function documentRouter({db,dataDir}) {
   router.post('/duz-cizimler',receive,wrap((req,res)=>res.status(201).json(flats.upload(db,dataDir,req.body,documents.validateUpload(req.file),req.user))));
   router.put('/duz-cizimler/:id/referans',requireUser('onay'),wrap((req,res)=>res.json(flats.saveReference(db,req.params.id,req.body,req.user))));
   router.post('/uygulamalar/olc',wrap((req,res)=>res.status(201).json(documents.measure(db,dataDir,req.body,req.user))));
-  router.patch('/uygulamalar/:id',wrap((req,res)=>res.json(documents.editApplication(db,dataDir,id(req),req.body,req.user))));
+  router.post('/satirlar/:id/uygulamalar',wrap(async(req,res)=>res.status(201).json(await documents.addApplication(db,dataDir,id(req),req.body,req.user))));
+  router.patch('/uygulamalar/:id',wrap(async(req,res)=>res.json(await documents.editApplication(db,dataDir,id(req),req.body,req.user))));
   router.delete('/uygulamalar/:id',wrap((req,res)=>res.json(documents.deleteApplication(db,id(req),req.user))));
   router.post('/surumler/:id/hazirla',wrap(async(req,res)=>res.json(await documents.prepare(db,dataDir,id(req),req.user,req.query.yeniden==='1'))));
+  router.post('/surumler/:id/otomatik-olc',wrap(async(req,res)=>res.json(await documents.automaticMeasure(db,dataDir,id(req),req.user,req.query.yeniden==='1'))));
   router.post('/surumler/:id/gonder',wrap((req,res,next)=> {
     const v=orders.snapshot(db,id(req));
     documents.unlocked(db,v.id);

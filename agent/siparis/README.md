@@ -199,3 +199,46 @@ kodu yoktur; ekranda en-boy oranı kilidi doğrulanamamıştır.
 Test: `node --test test/siparis-duz-cizim-araclari.test.js`. Çizimler ve ayarlar
 uydurmadır; geçici DATA_DIR ve 127.0.0.1 API üzerinde yükleme, tekrar yükleme ve
 göğüs okunun yarısı genişliğinde desenin 26 cm ölçülmesi denetlenir.
+
+## G24 — Ürün görselinden otomatik ölçü
+
+PNG/JPG ve PDF'nin ilk sayfası en çok 1600 px uzun kenarla işlenir; raster dosyalarda 40 MP sınırı çözmeden önce denetlenir. Kenarların çoğunluk rengi (saydam fonda alfa), küçük açıklıkları kapatma, en büyük bağlı bileşen ve delik doldurma ürün maskesini verir. Göğüs için orta gövdenin satır profili ve dikey yan çizgileri; şort/eşofman için paça ayrımından önceki kesintisiz basen bandı kullanılır. Desenin saydam olmayan içerik kutusu, gri ton + kenar NCC ile %3–%95 referans genişliği aralığında aranır; önce küçük görselde, sonra yüksek çözünürlükte konum/ölçek iyileştirilir. Düşük güvende ürün renginden farklı en büyük iç bölge yalnız teyitli öneri olur.
+
+`width_mm = round(designBoxPx.w / chestPx * refLengthCm * 10)`; boy, desen içerik oranından hesaplanır. `measure_source.scale` cm/px değeridir. `refBeden` boşsa cm referansı kullanılır, kaynakta `null` tutulur; L dışındaki açık referans teyit ister. Her uygulamanın desen bağlantısı açık olmalıdır: kaynak yüklemesinde `applicationId`, uygulama kaydında/düzenlemesinde `desenDosyaId`. Yalnız aynı satırın doğru görünümü kullanılır; o görünümün son yüklemesi öncekini geçersiz kılar. Ürünün tek ön kalıbı, arka görünüm için de aynı göğüs referansını verebilir. Birden fazla ürün kalıbı varsa `flatId` seçilmeden tahmin yapılmaz.
+
+Görünüm sözleşmesi: `gogus/sol_gogus/sag_gogus/kol/sol_kol/sag_kol → on`; `sirt/ense/kapusan → arka`; diğerleri `teyit`. Eski `kapuson` yazımı elle ölçüde korunur fakat otomatik görünümde `teyit` olur.
+
+Yükleme ve uygulama kaydından sonra aynı render kuyruğunda alt süreç çalışır. Dosya yükleme tetiklemesi `documents.upload` içinde tek satırdır. Alt süreç sınırı 15 sn; kuyruğun toplam zaman aşımı mevcut belge kuyruğuyla ortaktır. Kaynak, referans veya uygulama işlem sırasında değişirse eski sonuç yazılmaz. Değişmeyen kaynaklı uygulamalar sonraki dosya yüklemesinde yeniden hesaplanmaz. `POST /api/siparis/surumler/:id/otomatik-olc` taslak sürümü ölçer ve `{results:[{applicationId,width_mm,height_mm,measure_source,needs_confirmation,reasons,reason}]}` döndürür. Elle ölçüler (`method: elle`, eski kayıtlarda ölçülü fakat otomatik kaynaksız değerler dahil) korunur; yalnız `?yeniden=1` bu korumayı kaldırır. Yeniden ölçüm açık `olcu` teyidini kapatır ve gerekiyorsa güncel gerekçeyle bir tane açar.
+
+Teyit eşikleri:
+
+- NCC güveni < 0,78 veya iki farklı yerleşim adayı arasındaki fark < 0,045.
+- Maske sol/sağ simetrisi < 0,88 veya sınır gradyanı < 18 (0–255 piksel parlaklığı ölçeği).
+- Göğüs/sırt baskı eni < 30 veya > 350 mm; sol/sağ göğüs, kol, ense ve kapusan eni < 15 veya > 200 mm. Her konumda boy < 10 veya > 500 mm.
+- Kalıp görselinde aynı algoritmayla bulunan referansın kayıtlı `refLengthPx` değerinden sapması > %4. Bu kontrol çalışma sırasında da yapılır; uyuşmazlıkta öneri mutlaka teyitlidir.
+- Kalıp/ürün/referans/desen bulunamaması, desteklenmeyen görünüm/dosya, L dışındaki belirtilmiş beden veya okuma/render hatası. Hesaplanamayan ölçü `null` olur; uydurulmaz.
+
+### G24 yerel doğrulama — 19 Kasım 2026
+
+Masaüstü `duz-cizimler.json` dosyasında 9 yerine 10 kayıt bulundu; tamamı aynı algoritmayla okundu. Fark `(bulunan / kayıtlı - 1) × 100`. **±%4 hedefi yalnız 2/10 kayıtta karşılandı; genel hedef henüz sağlanmadı.** Bu yüzden eşik dışındaki gerçek kalıplar çalışma sırasında teyit ister. Bu kontrol referans uçlarını algoritmaya vermez veya ölçüyü kayıtlı piksele zorlamaz.
+
+| Kalıp | Bulunan px | Kayıtlı px | Fark | ±%4 |
+|---|---:|---:|---:|:---:|
+| CEKET | 355 | 328 | +%8,23 | Hayır |
+| EŞOFMAN REÇME PAÇA | 231 | 215 | +%7,44 | Hayır |
+| Oversize Tişört | 309 | 330 | −%6,36 | Hayır |
+| OWERSİZE SWEAT | 271 | 262 | +%3,44 | Evet |
+| POLO | 293 | 274 | +%6,93 | Hayır |
+| Polar | 293 | 280 | +%4,64 | Hayır |
+| SWEAT | 268 | 257 | +%4,28 | Hayır |
+| ŞORT | 471 | 433 | +%8,78 | Hayır |
+| TİŞÖRT | 315 | 304 | +%3,62 | Evet |
+| ZIP | 302 | 290 | +%4,14 | Hayır |
+
+Tekrar: `node test/fixtures/siparis/oto-oz-denetim.js '/yerel/duz-cizim'`. Yerel çizimler ve mockup'lar repoya kopyalanmaz. Referans çizimlerindeki kesik dış hatlar, kollar ve kayıtlı referansın gövde yan çizgileriyle uyuşmaması genel otomatik kabul için çözümlenmesi gereken sınırlamadır; bu tablo hangi kaynağın hatalı olduğunu tek başına kanıtlamaz.
+
+Gerçek deneme: Masaüstü `Desenler/ITU_TEKNOFEST_TISORT_BASKI/ITU_TEKNOFEST_TISORT_1/TEKNOFEST_TSHIRT_1_MOCKUP.jpg` ve yanındaki `TSHIRT_1_KOL_BASKI.pdf`, yerel TİŞÖRT L=54 cm kaydıyla gerçek alt süreçte işlendi: **921 ms**, güven 0, en/boy `null`, `needs_confirmation: true`; gerekçe: ürün maskesi veya göğüs/basen genişliği bulunamadı. Görselde yan yana ön/arka fotoğraf mockup'ı bulunduğundan güvenilir otomatik sonuç alınamadı. Render Starter'ın 0,5 CPU ortamında süre ayrıca ölçülmedi; yerel süre üretim garantisi değildir.
+
+Sentetik testler: ön/arka yerleşim ±5 mm; farklı ölçek ve saydam içerik oranı; perspektif, kayıp/tekrarlanan desen, PDF/JPG, 40 MP, L dışı/eksik referans, kalıp öz denetimi, iki satır/iki görünüm, açık kaynak bağlantısı, ön kalıptan arka referans, basen, saydam fonda beyaz ürün, elle düzeltme ve alt süreç sürerken elle düzeltme koruması.
+
+Son kodla kabul koşuları: `node --test test/siparis-*.test.js` iki kez **186/186 geçti** (26,77 sn ve 26,71 sn). Bunun 13'ü yeni G24 testidir. ±%4 öz denetim hedefi ve gerçek fotoğrafta güvenilir otomatik ölçü elde edilmesi bu yeşil test sonucundan ayrı, yukarıda açık kalan sınırlamalardır.
