@@ -32,6 +32,14 @@ const jobKey = value => String(value || '').trim().toLowerCase();
 // Patron: every unit sale price is excluding VAT; a VAT-inclusive entry is refused, never converted.
 const KDV_NOTE = 'KDV hariç';
 const techLabel = type => type === 'baski' ? 'Baskı' : 'Nakış';
+// Display labels only; application keys and costing inputs keep their existing values.
+const AREA_LABELS = { 'göğüs': 'Göğüs', 'sırt': 'Sırt', kol: 'Kol', ense: 'Ense', 'kapüşon': 'Kapüşon',
+  'sol göğüs': 'Sol göğüs', 'sağ göğüs': 'Sağ göğüs', 'sol kol': 'Sol kol', 'sağ kol': 'Sağ kol', yaka: 'Yaka', 'ön': 'Ön' };
+const areaLabel = area => AREA_LABELS[normArea(area)] || area;
+function missingLabel(message) {
+  return String(message).replace(/((?:Baskı|Nakış) boyutu seçilmeli: ")([^"]+)(")/g,
+    (_, prefix, area, suffix) => prefix + areaLabel(area) + suffix).trim().replace(/[.,;:!?]+$/, '');
+}
 // Bad or ambiguous data fails the same way on every attempt; the core parks it as basarisiz with an eksik_alan teyit.
 function dataError(message) { const err = new Error(message); err.permanent = true; return err; }
 
@@ -87,7 +95,7 @@ function orderFacts(db, v, recipes) {
   if (!lines.length) throw dataError('Sürümde sipariş satırı yok');
   const products = [...new Set(lines.map(l => l.product_key))];
   // One İşler record carries one product type and one cost template.
-  if (products.length !== 1) throw dataError(`Birden çok ürün tipi (${products.join(', ')}) tek İşler kaydına aktarılamaz; maliyeti elle girin`);
+  if (products.length !== 1) throw dataError(`Birden çok ürün tipi (${products.map(key => recipes?.products?.[key]?.label || 'Bilinmeyen ürün').join(', ')}) tek İşler kaydına aktarılamaz; maliyeti elle girin`);
   const label = recipes?.products?.[products[0]]?.label || products[0];
   const total = lines.reduce((s, l) => s + l.quantity, 0);
   const sizeList = lines.map(l => JSON.parse(l.sizes_json));
@@ -121,7 +129,7 @@ function validBnItems(items, apps) {
     if (typeof it.area !== 'string' || !it.area.trim() || typeof it.size !== 'string' || !it.size.trim()) fail('bnItems: bölge ve boyut gerekli');
     if (it.qty != null && (!Number.isSafeInteger(it.qty) || it.qty <= 0)) fail('bnItems.qty: pozitif tam sayı olmalı');
     if (it.label != null && typeof it.label !== 'string') fail('bnItems.label: metin olmalı');
-    if (!apps.some(a => a.type === it.type && a.area === normArea(it.area))) fail(`Bu sürümde ${techLabel(it.type).toLocaleLowerCase('tr')} bölgesi yok: ${it.area}`);
+    if (!apps.some(a => a.type === it.type && a.area === normArea(it.area))) fail(`Bu sürümde ${techLabel(it.type).toLocaleLowerCase('tr')} bölgesi yok: ${areaLabel(it.area)}`);
     return { type: it.type, area: it.area.trim(), size: it.size.trim(),
       ...(it.qty != null ? { qty: it.qty } : {}), ...(it.label?.trim() ? { label: it.label.trim().slice(0, 80) } : {}) };
   });
@@ -138,11 +146,11 @@ function missingInputs(cm, apps, bnSupplied, price) {
     for (const it of cm.baskiNakisItems || []) if (it.size) provided.set(`${it.type}:${it.area}`, (provided.get(`${it.type}:${it.area}`) || 0) + it.qty);
     for (const a of apps) {
       const got = provided.get(`${a.type}:${a.area}`) || 0;
-      if (got !== a.units) missing.push(`${techLabel(a.type)} adedi siparişle tutmuyor: "${a.area}" siparişte ${a.units}, seçimde ${got}`);
+      if (got !== a.units) missing.push(`${techLabel(a.type)} adedi siparişle tutmuyor: "${areaLabel(a.area)}" siparişte ${a.units}, seçimde ${got}`);
     }
   }
   if (price == null) missing.push('Birim satış fiyatı girilmeli');
-  return [...new Set(missing)];
+  return [...new Set(missing.map(missingLabel))];
 }
 
 // Picks the İşler record to update, or null for a new one. Ambiguity throws instead of choosing.
@@ -236,7 +244,7 @@ async function transfer(payload, context, { dataDir, recipes } = {}) {
   // Without a price the job parks until the fiyat endpoint requeues it; with a price, anything still missing is a data error.
   // The queue re-tests the wait inside its parking transaction, so a price saved meanwhile requeues the job instead.
   if (row?.unit_price == null) return { status: 'fiyat_bekliyor', stillWaiting: d => getRow(d, v.id)?.unit_price == null };
-  if (missing.length) throw dataError(`Maliyet aktarımı için eksik: ${missing.join('; ')}`);
+  if (missing.length) throw dataError(`Maliyet aktarımı için eksik alanlar:\n${missing.map(message => `• ${message}`).join('\n')}`);
   if (row.kdv_dahil === 1) throw dataError('Birim fiyat KDV dahil kaydedilmiş; fiyat KDV hariç yeniden girilmeli');
 
   // 4. işle: commitDocument, using its "update" choice whenever an İşler record already exists.

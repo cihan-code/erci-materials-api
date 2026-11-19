@@ -369,7 +369,7 @@ test('fiyat varken eksik ya da bozuk veri kalıcı hata olur: şablon, baskı ad
   // A missing print size is fixed through the fiyat endpoint, which requeues the failed job.
   const twoPrints = f.approved({ order_no: 'MRC-T011', lines: [line({ applications: [{ kind: 'baski', position: 'sirt' }, { kind: 'baski', position: 'sırt' }] })] });
   await f.http('POST', fiyat(twoPrints), f.tokens.manager, { unitPrice: 30, bnItems: sirt });
-  const short = await permanent(twoPrints, /Baskı adedi siparişle tutmuyor: "sırt" siparişte 40, seçimde 20/);
+  const short = await permanent(twoPrints, /Baskı adedi siparişle tutmuyor: "Sırt" siparişte 40, seçimde 20/);
   const fixed = await f.http('POST', fiyat(twoPrints), f.tokens.manager, { unitPrice: 30,
     bnItems: [...sirt, { type: 'baski', area: 'sirt', size: 'Küçük Boyut', label: 'yazı' }] });
   assert.equal(fixed.body.status, 'bekliyor');
@@ -379,7 +379,7 @@ test('fiyat varken eksik ya da bozuk veri kalıcı hata olur: şablon, baskı ad
     { category: 'Baskı (yazı - Küçük Boyut, 20 adet)', amount: 20 }]);
   const mixed = f.approved({ order_no: 'MRC-T012', lines: [line({ applications: [] }), line({ product_key: 'tisort', applications: [] })] });
   await f.http('POST', fiyat(mixed), f.tokens.manager, { unitPrice: 30 });
-  await permanent(mixed, /Birden çok ürün tipi \(sweat, tisort\)/);
+  await permanent(mixed, /Birden çok ürün tipi \(Sweatshirt, Tişört\)/);
   const tampered = f.approved({ order_no: 'MRC-T013' });
   await f.http('POST', fiyat(tampered), f.tokens.manager, { unitPrice: 30, bnItems: sirt });
   fs.appendFileSync(f.pdfPath(tampered.versionId), 'değişti');
@@ -390,6 +390,29 @@ test('fiyat varken eksik ya da bozuk veri kalıcı hata olur: şablon, baskı ad
   await assert.rejects(cost.transfer(JSON.parse(job.payload_json), { db: f.db }, { dataDir: f.dir, recipes }), e => e.permanent === true && /veri klasörü/.test(e.message));
   assert.equal(panelJobs().length, 1);
   assert.equal(docs.listDocuments({}).length, 2);
+});
+
+test('eksik alanlar Türkçe konum adlarıyla noktalamasız kalemler ve ayrı mesaj maddeleri olur', async t => {
+  const f = await setup(t);
+  const a = f.approved({ order_no: 'MRC-T018', lines: [line({ applications: [
+    { kind: 'baski', position: 'gogus' }, { kind: 'nakis', position: 'kapuson' },
+  ] })] });
+  assert.equal((await f.run()).status, 'fiyat_bekliyor');
+  const waiting = (await f.http('GET', maliyet(a), f.tokens.team)).body;
+  assert.deepEqual(waiting.missing, [
+    'Baskı boyutu seçilmeli: "Göğüs" (20 adet)',
+    'Nakış boyutu seçilmeli: "Kapüşon" (20 adet)',
+    'Birim satış fiyatı girilmeli',
+  ]);
+  assert.doesNotMatch(waiting.missing.join(', '), /[.;],|gogus|kapuson/);
+  await f.http('POST', fiyat(a), f.tokens.manager, { unitPrice: 30 });
+  const failed = await f.run();
+  assert.equal(failed.status, 'basarisiz');
+  assert.equal(failed.last_error, 'Maliyet aktarımı için eksik alanlar:\n' +
+    '• Baskı boyutu seçilmeli: "Göğüs" (20 adet)\n' +
+    '• Nakış boyutu seçilmeli: "Kapüşon" (20 adet)');
+  assert.equal(f.teyit(failed), failed.last_error);
+  assert.deepEqual(panelJobs(), []);
 });
 
 test('yalnız bazı satırlarda olan uygulama gerçek adediyle maliyetlenir; eksik beden dağılımı bilinmiyor kalır', async t => {
