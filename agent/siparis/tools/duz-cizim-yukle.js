@@ -14,7 +14,7 @@ async function credentials(input=process.stdin,output=process.stdout) {
   const hidden=readline.createInterface({input,output:muted,terminal:true});
   try{return {name,password:await hidden.question('')};}finally{hidden.close();output.write('\n');}
 }
-const referenceBody=r=>({refLengthPx:r.refLengthPx,refLengthCm:r.refLengthCm,refAciklama:r.refAciklama,refBeden:r.refBeden??null});
+const referenceBody=r=>({refLengthPx:r.refLengthPx,refLengthCm:r.refLengthCm,refAciklama:r.refAciklama,refBeden:r.refBeden??null,...(r.olculerL?{olculerL:r.olculerL}:{})});
 // "M 52 → L 54" for a record that carries its previous (M) value as backup.
 const change=r=>`${r.refLengthCmM!=null?'M '+r.refLengthCmM:'?'} → ${r.refBeden||'?'} ${r.refLengthCm}`;
 function loadRecords(json) {
@@ -54,7 +54,7 @@ async function upload({api,json,dry=false,update=false,getCredentials=credential
       if(names.has(r.ad)) {
         // A previous upload may have stopped between POST and PUT. Repair only its missing reference.
         const old=names.get(r.ad);
-        const stale=!(old.refLengthPx>0&&old.refLengthCm>0)||(update&&(old.refLengthCm!==r.refLengthCm||(old.refBeden??null)!==(r.refBeden??null)||old.refAciklama!==r.refAciklama));
+        const stale=!(old.refLengthPx>0&&old.refLengthCm>0)||(update&&(old.refLengthPx!==r.refLengthPx||old.refLengthCm!==r.refLengthCm||(old.refBeden??null)!==(r.refBeden??null)||old.refAciklama!==r.refAciklama||(Object.hasOwn(r,'olculerL')&&JSON.stringify(old.olculerL??null)!==JSON.stringify(r.olculerL))));
         if(stale)await request('/duz-cizimler/'+encodeURIComponent(old.id)+'/referans',{method:'PUT',body:JSON.stringify(referenceBody(r))});
         if(update&&stale){log(`GÜNCELLENDİ: ${r.ad} — ${old.refLengthCm>0?'önceki '+old.refLengthCm+' → ':''}${r.refBeden||'?'} ${r.refLengthCm}`);uploaded++;continue;}
         log('ATLA (aynı ad): '+r.ad);skipped++;continue;

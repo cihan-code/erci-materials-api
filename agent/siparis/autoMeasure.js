@@ -9,36 +9,41 @@ const viewForPosition = position => VIEW[position] || 'teyit';
 const median = a => a.slice().sort((x,y)=>x-y)[Math.floor(a.length/2)];
 const distance = (a,b) => Math.max(...a.map((v,i)=>Math.abs(v-b[i])));
 
-async function raster({buffer,mime}, maxEdge=MAX_EDGE) {
+async function rasterPages({buffer,mime}, maxEdge=1000, selectedPages=null) {
   canvasLib ||= require('@napi-rs/canvas');
-  let source, doc;
   if (mime==='application/pdf') {
     for (const k of ['DOMMatrix','ImageData','Path2D']) globalThis[k] ||= canvasLib[k];
     class CanvasFactory {
-      create(w,h) { const canvas=canvasLib.createCanvas(Math.ceil(w),Math.ceil(h)); return {canvas,context:canvas.getContext('2d')}; }
+      create(w,h) {const canvas=canvasLib.createCanvas(Math.ceil(w),Math.ceil(h));return {canvas,context:canvas.getContext('2d')};}
       reset(p,w,h) {p.canvas.width=w;p.canvas.height=h;}
       destroy(p) {p.canvas.width=p.canvas.height=0;}
     }
     const pdf=await import('pdfjs-dist/legacy/build/pdf.mjs');
     const task=pdf.getDocument({data:Uint8Array.from(buffer),isEvalSupported:false,useSystemFonts:true,CanvasFactory,verbosity:0});
+    let doc;
     try {
-      doc=await task.promise;
-      const page=await doc.getPage(1), raw=page.getViewport({scale:1});
-      if (raw.width*raw.height>40e6) throw new Error('PDF sayfası 40 MP sınırını aşıyor.');
-      const viewport=page.getViewport({scale:Math.min(2,maxEdge/Math.max(raw.width,raw.height))});
-      source=canvasLib.createCanvas(Math.ceil(viewport.width),Math.ceil(viewport.height));
-      await page.render({canvasContext:source.getContext('2d'),viewport,canvasFactory:new CanvasFactory()}).promise;
-    } finally {if(doc) await doc.destroy(); else await task.destroy();}
-  } else {
-    if (!['image/png','image/jpeg'].includes(mime)) throw new Error('Otomatik ölçü için PNG, JPG veya PDF gerekli.');
-    imageSize(buffer,mime); // Reject oversized input BEFORE native decoding.
-    source=await canvasLib.loadImage(buffer);
+      doc=await task.promise; const pages=[];
+      // Every page is inspected, including product pages after covers and notes.
+      for(let n=1;n<=doc.numPages;n++) {
+        if(selectedPages && !selectedPages.includes(n))continue;
+        const page=await doc.getPage(n),raw=page.getViewport({scale:1});
+        if(raw.width*raw.height>40e6)throw new Error('PDF sayfası 40 MP sınırını aşıyor.');
+        const viewport=page.getViewport({scale:Math.min(2,maxEdge/Math.max(raw.width,raw.height))});
+        const canvas=canvasLib.createCanvas(Math.ceil(viewport.width),Math.ceil(viewport.height));
+        await page.render({canvasContext:canvas.getContext('2d'),viewport,canvasFactory:new CanvasFactory()}).promise;
+        pages.push(canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height));page.cleanup();
+      }
+      return pages;
+    } finally {if(doc)await doc.destroy();else await task.destroy();}
   }
-  const scale=Math.min(1,maxEdge/Math.max(source.width,source.height));
+  if(!['image/png','image/jpeg'].includes(mime))throw new Error('Otomatik ölçü için PNG, JPG veya PDF gerekli.');
+  imageSize(buffer,mime);
+  const source=await canvasLib.loadImage(buffer),scale=Math.min(1,maxEdge/Math.max(source.width,source.height));
   const c=canvasLib.createCanvas(Math.max(1,Math.round(source.width*scale)),Math.max(1,Math.round(source.height*scale)));
   c.getContext('2d').drawImage(source,0,0,c.width,c.height);
-  return c.getContext('2d').getImageData(0,0,c.width,c.height);
+  return [c.getContext('2d').getImageData(0,0,c.width,c.height)];
 }
+async function raster(input,maxEdge=MAX_EDGE) {return (await rasterPages(input,maxEdge))[0];}
 
 function bounds(mask,w,h) {
   let x0=w,y0=h,x1=-1,y1=-1;
@@ -67,7 +72,7 @@ function fillHoles(mask,w,h) {
 }
 function closeMask(mask,w,h) {
   // Small breaks in flat drawing outlines must close before filling their interiors.
-  const r=5;
+  const r=2;
   function pass(input,horizontal,dilate) {
     const out=new Uint8Array(input.length);
     for(let y=0;y<h;y++)for(let x=0;x<w;x++) {
@@ -93,59 +98,16 @@ function productMask(p) {
   const {width:w,height:h,data}=p,edges=[];
   for(let x=0;x<w;x++){edges.push(x,(h-1)*w+x);}for(let y=0;y<h;y++)edges.push(y*w,y*w+w-1);
   const bg=dominant(p,edges),raw=new Uint8Array(w*h),alphaBackground=edges.filter(i=>data[i*4+3]<64).length>edges.length*.7;
-  for(let i=0;i<raw.length;i++)raw[i]=data[i*4+3]>64 && (alphaBackground || distance([data[i*4],data[i*4+1],data[i*4+2]],bg)>35) ? 1:0;
+  for(let i=0;i<raw.length;i++) {
+    const delta=distance([data[i*4],data[i*4+1],data[i*4+2]],bg),x=i%w,y=Math.floor(i/w);
+    const lum=j=>(data[j*4]+data[j*4+1]+data[j*4+2])/3;
+    const edge=x>0&&x<w-1&&y>0&&y<h-1?Math.max(Math.abs(lum(i+1)-lum(i-1)),Math.abs(lum(i+w)-lum(i-w))):0;
+    // Smooth light shadows stay outside; a pale garment's sharp outline can
+    // close and fill even when its interior is close to the edge background.
+    raw[i]=data[i*4+3]>64&&(alphaBackground||delta>(Math.min(...bg)>240?16:35)||(delta>6&&edge>24))?1:0;
+  }
   const mask=fillHoles(largest(closeMask(raw,w,h),w,h),w,h);
-  return {mask,box:bounds(mask,w,h)};
-}
-function referencePixels(p,product='') {
-  const {width:w,height:h}=p,{mask,box}=productMask(p);
-  if(!box || box.w<20 || box.h<20) return {chestPx:null,mask,box,symmetry:0,sharpness:0};
-  const cx=box.x+Math.floor(box.w/2), rows=[];
-  for(let y=box.y;y<box.y+box.h;y++) {
-    let l=cx,r=cx;
-    if(mask[y*w+cx]) {while(l>0&&mask[y*w+l-1])l--;while(r<w-1&&mask[y*w+r+1])r++;}
-    rows.push({y,l,r,width:mask[y*w+cx]?r-l+1:0});
-  }
-  let chestPx;
-  if(['sort','esofman'].includes(product)) {
-    // Last continuous body band before the crotch splits into two legs.
-    let split=rows.findIndex((r,i)=>i>box.h*.22 && !r.width);
-    if(split<0)split=Math.floor(box.h*.7);
-    chestPx=Math.max(...rows.slice(Math.floor(box.h*.22),split).map(r=>r.width));
-  } else {
-    const band=rows.slice(Math.floor(box.h*.42),Math.floor(box.h*.76)).filter(r=>r.width>box.w*.27);
-    chestPx=band.length ? median(band.map(r=>r.width)) : null;
-    // Hanging sleeves remain connected at chest height. Torso seams are nearly
-    // vertical through the middle band; sleeve edges move outwards down the arm.
-    const support=new Float64Array(w);
-    const y0=box.y+Math.floor(box.h*.38),y1=box.y+Math.floor(box.h*.68);
-    const lum=i=>(p.data[i*4]+p.data[i*4+1]+p.data[i*4+2])/3;
-    for(let y=y0;y<y1;y++)for(let x=box.x+2;x<box.x+box.w-2;x++) {
-      const i=y*w+x, dark=Math.max(0,(lum(i-2)+lum(i+2))/2-lum(i));
-      support[x]+=Math.min(90,dark);
-    }
-    const side=(left)=> {
-      const lo=Math.max(2,Math.round(cx+(left?-.36:.13)*box.w)),hi=Math.min(w-3,Math.round(cx+(left?-.13:.36)*box.w));
-      let best=lo;for(let x=lo;x<=hi;x++)if(support[x]>support[best])best=x;
-      return support[best]/Math.max(1,y1-y0)>9 ? best:null;
-    };
-    const left=side(true),right=side(false);
-    if(left!=null&&right!=null)chestPx=right-left;
-
-  }
-  let mismatch=0,total=0,gradient=0,n=0;
-  for(let y=box.y;y<box.y+box.h;y++)for(let dx=0;dx<box.w/2;dx++) {
-    const l=y*w+box.x+dx,r=y*w+box.x+box.w-1-dx;
-    mismatch+=mask[l]!==mask[r]?1:0;total+=mask[l]||mask[r]?1:0;
-  }
-  for(let y=box.y+1;y<box.y+box.h-1;y++)for(let x=box.x+1;x<box.x+box.w-1;x++) {
-    const i=y*w+x;
-    if(mask[i] && (!mask[i-1]||!mask[i+1]||!mask[i-w]||!mask[i+w])) {
-      const lum=j=>(p.data[j*4]+p.data[j*4+1]+p.data[j*4+2])/3;
-      gradient+=Math.max(Math.abs(lum(i+1)-lum(i-1)),Math.abs(lum(i+w)-lum(i-w)));n++;
-    }
-  }
-  return {chestPx,mask,box,rows,symmetry:1-mismatch/Math.max(1,total),sharpness:gradient/Math.max(1,n)};
+  return {mask,raw,background:bg,box:bounds(mask,w,h)};
 }
 
 function designContent(p) {
@@ -158,42 +120,63 @@ function resize(p,w,h) {
   const a=canvasLib.createCanvas(p.width,p.height);a.getContext('2d').putImageData(new canvasLib.ImageData(new Uint8ClampedArray(p.data),p.width,p.height),0,0);
   const b=canvasLib.createCanvas(w,h);b.getContext('2d').drawImage(a,0,0,w,h);return b.getContext('2d').getImageData(0,0,w,h);
 }
-function matchDesign(image,design,reference,initial=null) {
+function matchDesign(image,design,reference,refine=true,initial=null) {
+  const b=reference.box,pad=8,x0=Math.max(0,b.x-pad),y0=Math.max(0,b.y-pad),w=Math.min(image.width-x0,b.w+pad*2),h=Math.min(image.height-y0,b.h+pad*2);
+  const data=new Uint8ClampedArray(w*h*4),mask=new Uint8Array(w*h);
+  for(let y=0;y<h;y++) {data.set(image.data.subarray(((y+y0)*image.width+x0)*4,((y+y0)*image.width+x0+w)*4),y*w*4);mask.set(reference.mask.subarray((y+y0)*image.width+x0,(y+y0)*image.width+x0+w),y*w);}
+  const result=matchDesignLocal({width:w,height:h,data},design,{...reference,mask,box:{...b,x:b.x-x0,y:b.y-y0}},initial?{...initial,box:{...initial.box,x:initial.box.x-x0,y:initial.box.y-y0}}:null,refine);
+  if(result.box){result.box.x+=x0;result.box.y+=y0;}
+  return result;
+}
+function matchDesignLocal(image,design,reference,initial=null,allowFine=true) {
   const content=designContent(design);
   if(!content.box)return {box:null,confidence:0,ambiguous:false,content};
-  const factor=Math.min(1,(initial?640:240)/Math.max(image.width,image.height)),small=resize(image,Math.round(image.width*factor),Math.round(image.height*factor));
+  const factor=Math.min(1,(initial?720:allowFine?320:160)/Math.max(image.width,image.height)),small=resize(image,Math.round(image.width*factor),Math.round(image.height*factor));
   const w=small.width,h=small.height,mask=new Uint8Array(w*h);
   for(let y=0;y<h;y++)for(let x=0;x<w;x++)mask[y*w+x]=reference.mask[Math.min(image.height-1,Math.floor(y/factor))*image.width+Math.min(image.width-1,Math.floor(x/factor))];
   const garment=dominant(small,Array.from(mask.keys()).filter(i=>mask[i])),bg=garment.reduce((s,v)=>s+v,0)/3;
   const gray=Float32Array.from(mask,(_,i)=>(small.data[i*4]+small.data[i*4+1]+small.data[i*4+2])/3);
+  const ink=Float32Array.from(mask,(_,i)=>distance([small.data[i*4],small.data[i*4+1],small.data[i*4+2]],garment));
   const edges=new Float32Array(w*h);
   for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){const i=y*w+x;edges[i]=Math.abs(gray[i+1]-gray[i-1])+Math.abs(gray[i+w]-gray[i-w]);}
+  const stride=w+1,integralMask=new Int32Array((w+1)*(h+1)),integralInk=new Float64Array((w+1)*(h+1)),integralInk2=new Float64Array((w+1)*(h+1));
+  for(let y=0;y<h;y++){let m=0,k=0,k2=0;for(let x=0;x<w;x++){const i=y*w+x,j=(y+1)*stride+x+1;m+=mask[i];k+=ink[i];k2+=ink[i]*ink[i];integralMask[j]=integralMask[j-stride]+m;integralInk[j]=integralInk[j-stride]+k;integralInk2[j]=integralInk2[j-stride]+k2;}}
+  const rect=(a,x0,y0,x1,y1)=>a[y1*stride+x1]-a[y0*stride+x1]-a[y1*stride+x0]+a[y0*stride+x0];
   const cb=content.box,ratio=cb.h/cb.w, candidates=[];
   function template(width) {
-    const height=width*ratio,pad=Math.max(1,width*.10),step=Math.max(1,width/(initial?18:9)),samples=[];
+    const height=width*ratio,pad=Math.max(1,width*.10),step=Math.max(1,width/(initial?22:allowFine?11:8)),samples=[];
     for(let yy=-pad;yy<height+pad;yy+=step)for(let xx=-pad;xx<width+pad;xx+=step) {
       const sx=cb.x+Math.floor(xx/width*cb.w),sy=cb.y+Math.floor(yy/height*cb.h);
       const at=(x,y)=> {if(x<cb.x||y<cb.y||x>=cb.x+cb.w||y>=cb.y+cb.h)return bg;const j=y*design.width+x,a=content.mask[j]?design.data[j*4+3]/255:0;return a*(design.data[j*4]+design.data[j*4+1]+design.data[j*4+2])/3+(1-a)*bg;};
       const v=at(sx,sy),d=Math.max(1,Math.round(cb.w/width));
-      samples.push({x:Math.round(xx),y:Math.round(yy),v,e:Math.abs(at(sx+d,sy)-at(sx-d,sy))+Math.abs(at(sx,sy+d)-at(sx,sy-d))});
+      const a=sx>=cb.x&&sy>=cb.y&&sx<cb.x+cb.w&&sy<cb.y+cb.h?content.mask[sy*design.width+sx]:0;
+      samples.push({x:Math.round(xx),y:Math.round(yy),v,a,e:Math.abs(at(sx+d,sy)-at(sx-d,sy))+Math.abs(at(sx,sy+d)-at(sx,sy-d))});
     }
     const mean=samples.reduce((s,a)=>s+a.v,0)/samples.length,em=samples.reduce((s,a)=>s+a.e,0)/samples.length;
-    let variance=0,ev=0;for(const a of samples){a.v-=mean;a.e-=em;variance+=a.v*a.v;ev+=a.e*a.e;}
-    return {samples,variance,ev,height,pad};
+    const am=samples.reduce((s,a)=>s+a.a,0)/samples.length;
+    let variance=0,ev=0,av=0;for(const a of samples){a.v-=mean;a.e-=em;a.a-=am;variance+=a.v*a.v;ev+=a.e*a.e;av+=a.a*a.a;}
+    return {samples,variance,ev,av,width,height,pad};
   }
   function score(x,y,t) {
-    let sum=0,sq=0,cross=0,es=0,esq=0,ec=0,inside=0;
-    for(const a of t.samples){const xx=x+a.x,yy=y+a.y;if(xx<0||xx>=w||yy<0||yy>=h)return -1;const i=yy*w+xx,v=gray[i],e=edges[i];sum+=v;sq+=v*v;cross+=a.v*v;es+=e;esq+=e*e;ec+=a.e*e;inside+=mask[i];}
+    const x0=Math.floor(x-t.pad),y0=Math.floor(y-t.pad),x1=Math.ceil(x+t.width+t.pad),y1=Math.ceil(y+t.height+t.pad);
+    if(x0<0||y0<0||x1>w||y1>h)return -1;
+    const area=(x1-x0)*(y1-y0);
+    if(rect(integralMask,x0,y0,x1,y1)<area*.96)return -1;
+    const inkSum=rect(integralInk,x0,y0,x1,y1);
+    if(rect(integralInk2,x0,y0,x1,y1)-inkSum*inkSum/area<area*4)return -1;
+    let sum=0,sq=0,cross=0,es=0,esq=0,ec=0,inside=0,ks=0,ksq=0,kc=0;
+    for(const a of t.samples){const xx=x+a.x,yy=y+a.y;if(xx<0||xx>=w||yy<0||yy>=h)return -1;const i=yy*w+xx,v=gray[i],e=edges[i];sum+=v;sq+=v*v;cross+=a.v*v;es+=e;esq+=e*e;ec+=a.e*e;inside+=mask[i];const k=ink[i];ks+=k;ksq+=k*k;kc+=a.a*k;}
     if(inside<t.samples.length*.96)return -1;
     const n=t.samples.length,v=sq-sum*sum/n,ev=esq-es*es/n;
     if(v<1||t.variance<1)return -1;
     const ncc=cross/Math.sqrt(t.variance*v),edge=ev>1&&t.ev>1?ec/Math.sqrt(t.ev*ev):0;
-    return .8*ncc+.2*Math.max(0,edge);
+    const kv=ksq-ks*ks/n,shape=kv>1&&t.av>1?kc/Math.sqrt(t.av*kv):0;
+    return .8*Math.max(Math.abs(ncc),shape)+.2*Math.max(0,edge);
   }
-  const rb=reference.box,min=Math.max(3,Math.round(reference.chestPx*factor*.03)),max=Math.min(w-4,Math.round(reference.chestPx*factor*.95));
+  const rb=reference.box,min=Math.max(8,Math.ceil(8/ratio),Math.round(reference.chestPx*factor*.03)),max=Math.min(w-4,Math.round(reference.box.w*factor*.98));
   if(initial)candidates.push({x:Math.round(initial.box.x*factor),y:Math.round(initial.box.y*factor),width:Math.round(initial.box.w*factor),score:-1});
   else for(let width=min;width<=max;width=Math.max(width+1,Math.round(width*1.08))) {
-    const t=template(width),step=Math.max(2,Math.floor(width/8));
+    const t=template(width),step=Math.max(allowFine?1:2,Math.min(allowFine?3:4,Math.floor(width/12)));
     for(let y=Math.max(1,Math.floor(rb.y*factor));y<Math.min(h-t.height-1,(rb.y+rb.h)*factor);y+=step)for(let x=Math.max(1,Math.floor(rb.x*factor));x<Math.min(w-width-1,(rb.x+rb.w)*factor);x+=step) {
       const s=score(x,y,t);if(s>.45)candidates.push({x,y,width,score:s});
     }
@@ -204,8 +187,9 @@ function matchDesign(image,design,reference,initial=null) {
   const seeds=[];
   for(const c of candidates){if(seeds.every(a=>Math.hypot(c.x-a.x,c.y-a.y)>Math.min(c.width,a.width)*.35))seeds.push(c);if(seeds.length===6)break;}
   for(const seed of seeds) {
+    if(!allowFine && !initial){refined.push(seed);continue;}
     let best=seed;
-    const r=initial?5:Math.max(3,Math.ceil(seed.width/8));
+    const r=initial?6:4;
     for(let width=Math.max(min,seed.width-Math.ceil(seed.width*.12));width<=Math.min(max,seed.width+Math.ceil(seed.width*.12));width++) {
       const t=template(width);
       for(let y=seed.y-r;y<=seed.y+r;y++)for(let x=seed.x-r;x<=seed.x+r;x++) {const s=score(x,y,t);if(s>best.score)best={x,y,width,score:s};}
@@ -215,62 +199,146 @@ function matchDesign(image,design,reference,initial=null) {
   refined.sort((a,b)=>b.score-a.score);
   const best=refined[0],second=best && refined.find(a=>Math.hypot(a.x-best.x,a.y-best.y)>best.width*.4);
   if(!best)return {box:null,confidence:0,ambiguous:false,content,garment};
-  const result={box:{x:Math.round(best.x/factor),y:Math.round(best.y/factor),w:Math.round(best.width/factor),h:Math.round(best.width*ratio/factor)},confidence:best.score,ambiguous:!!second&&best.score-second.score<.045,content,garment};
-  if(!initial && result.confidence>.65) {
-    const fine=matchDesign(image,design,reference,result);
+  const result={box:{x:Math.round(best.x/factor),y:Math.round(best.y/factor),w:best.width/factor,h:best.width*ratio/factor},confidence:best.score,ambiguous:!!second&&best.score-second.score<.045,content,garment};
+  if(allowFine && !initial && result.confidence>.65) {
+    const fine=matchDesignLocal(image,design,reference,result);
     fine.ambiguous ||= result.ambiguous;
     return fine;
   }
   if(initial)result.ambiguous=initial.ambiguous;
   return result;
 }
-function fallbackRegion(p,ref,garment) {
-  garment ||= dominant(p,Array.from(ref.mask.keys()).filter(i=>ref.mask[i]));
-  const mask=ref.mask.map((v,i)=>v&&distance([p.data[i*4],p.data[i*4+1],p.data[i*4+2]],garment)>65?1:0);
-  // Erode away the garment silhouette before looking for ink.
-  const margin=Math.max(2,Math.round(ref.chestPx*.025));
-  for(let y=0;y<p.height;y++)for(let x=0;x<p.width;x++)if(mask[y*p.width+x]) {
-    for(const [dx,dy] of [[margin,0],[-margin,0],[0,margin],[0,-margin]])if(x+dx<0||x+dx>=p.width||y+dy<0||y+dy>=p.height||!ref.mask[(y+dy)*p.width+x+dx]) {mask[y*p.width+x]=0;break;}
+
+function silhouette(p) {
+  const {mask,raw,background,box}=productMask(p),w=p.width,h=p.height;
+  if(!box || box.w<w*.16 || box.h<h*.3 || box.w*box.h<w*h*.10)return null;
+  let area=0;for(const bit of mask)area+=bit;
+  // Small logos and page typography have no substantial filled garment body.
+  if(area<box.w*box.h*.3 || area>w*h*.94)return null;
+  const cx=Math.round(box.x+box.w/2),rows=[];
+  for(let y=box.y;y<box.y+box.h;y++) {
+    let l=cx,r=cx;
+    if(mask[y*w+cx]) {while(l>box.x&&mask[y*w+l-1])l--;while(r<box.x+box.w-1&&mask[y*w+r+1])r++;}
+    rows.push({y,l,r,width:mask[y*w+cx]?r-l+1:0});
   }
-  const box=bounds(largest(mask,p.width,p.height),p.width,p.height);
-  return box && box.w*box.h>Math.max(100,ref.chestPx*ref.chestPx*.002) && Math.min(box.w,box.h)>ref.chestPx*.035 ? box : null;
+  const occupied=rows.filter(r=>r.width),hemY=occupied.at(-1)?.y;
+  if(hemY==null)return null;
+  const band=rows.filter(r=>r.y>=hemY-box.h*.10 && r.y<=hemY-box.h*.025 && r.width>box.w*.2);
+  let hemWidthPx=band.length?median(band.map(r=>r.width)):null;
+  const bodyColor=dominant(p,Array.from(mask.keys()).filter(i=>mask[i]));
+  if(distance(bodyColor,background)>18) {
+    // Closing may bridge a cuff-to-body gap. The original foreground evidence
+    // in the hem band keeps hanging sleeves out of the central torso width.
+    const widths=[];
+    for(const row of band) {
+      if(!raw[row.y*w+cx])continue;
+      const side=direction=> {let gap=0,last=cx;for(let x=cx;x>=row.l&&x<=row.r;x+=direction){if(raw[row.y*w+x]){gap=0;last=x;}else if(++gap>=2)break;}return last;};
+      const width=side(1)-side(-1)+1;
+      if(width>box.w*.22)widths.push(width);
+    }
+    if(widths.length>=band.length*.5)hemWidthPx=median(widths);
+  }
+  if(!hemWidthPx || hemWidthPx<box.w*.35)return null;
+  // The first broad central body row excludes a narrow neck or raised hood.
+  // A short moving window rejects isolated pixels at a sloping shoulder edge.
+  const broadTop=rows.slice(0,4).every(r=>r.width>=hemWidthPx*.6),shoulderThreshold=broadTop?.6:.82;
+  const shoulder=rows.find((r,i)=>i<box.h*.45 && r.width>=hemWidthPx*shoulderThreshold && rows.slice(i,i+4).every(q=>q.width>=hemWidthPx*(shoulderThreshold-.02)));
+  if(!shoulder)return null;
+  let mismatch=0,total=0,soft=0,edgeN=0,texture=0,interior=0;
+  const lum=i=>(p.data[i*4]+p.data[i*4+1]+p.data[i*4+2])/3;
+  const garment=dominant(p,Array.from(mask.keys()).filter(i=>mask[i]));
+  for(let y=box.y+1;y<box.y+box.h-1;y++)for(let x=box.x+1;x<box.x+box.w-1;x++) {
+    const i=y*w+x,mirror=y*w+box.x+box.w-1-(x-box.x);
+    if(x<cx){mismatch+=mask[i]!==mask[mirror]?1:0;total+=mask[i]||mask[mirror]?1:0;}
+    if(!mask[i])continue;
+    if(!mask[i-1]||!mask[i+1]||!mask[i-w]||!mask[i+w]) {edgeN++;if(Math.max(Math.abs(lum(i+1)-lum(i-1)),Math.abs(lum(i+w)-lum(i-w)))<Math.min(18,Math.max(4,distance(garment,background)*.3)))soft++;}
+    else if(y>shoulder.y+box.h*.12 && y<hemY-box.h*.06) {
+      interior++;const delta=distance([p.data[i*4],p.data[i*4+1],p.data[i*4+2]],garment);
+      if(delta>18&&delta<85)texture++;
+    }
+  }
+  const symmetry=1-mismatch/Math.max(1,total);
+  if(symmetry<.75 || Math.max(...rows.slice(0,Math.ceil(rows.length*.5)).map(r=>r.width))<hemWidthPx*1.05)return null;
+  return {mask,box,rows,hemWidthPx,chestPx:hemWidthPx,hemY,shoulderY:shoulder.y,shoulderMethod:'merkez gövdenin hızlı genişlediği ilk sürekli omuz satırı',bodyHeightPx:hemY-shoulder.y+1,symmetry,softEdgeFraction:soft/Math.max(1,edgeN),textureFraction:texture/Math.max(1,interior)};
 }
-async function autoMeasure({image,design,flat,flatImage,product,position}) {
-  const reasons=[],source={method:'otomatik',flatId:flat?.id??null,flatAd:flat?.ad??null,refBeden:flat?.refBeden??null,refCm:flat?.refLengthCm??null,chestPx:null,designBoxPx:null,scale:null,confidence:0,gorselFileId:image?.id??null,desenFileId:design?.id??null};
+function wrinkleFraction(p,ref,printBox) {
+  const w=p.width,cx=ref.box.x+ref.box.w/2,lum=i=>(p.data[i*4]+p.data[i*4+1]+p.data[i*4+2])/3;
+  let textured=0,total=0;
+  for(let y=Math.ceil(ref.shoulderY+ref.bodyHeightPx*.18);y<ref.hemY-ref.bodyHeightPx*.08;y+=2)for(let x=Math.ceil(cx-ref.hemWidthPx*.4);x<cx+ref.hemWidthPx*.4;x+=2) {
+    if(printBox && x>=printBox.x-6&&x<=printBox.x+printBox.w+6&&y>=printBox.y-6&&y<=printBox.y+printBox.h+6)continue;
+    const i=y*w+x;
+    if(!ref.mask[i]||!ref.mask[i-3]||!ref.mask[i+3]||!ref.mask[i-3*w]||!ref.mask[i+3*w])continue;
+    total++;if(Math.max(Math.abs(lum(i+3)-lum(i-3)),Math.abs(lum(i+3*w)-lum(i-3*w)))>4)textured++;
+  }
+  return textured/Math.max(1,total);
+}
+
+async function autoMeasure({image,design,flat,product,position}) {
+  const started=performance.now(),timings={},reasons=[],source={method:'otomatik',flatId:flat?.id??null,flatAd:flat?.ad??null,refBeden:flat?.refBeden??null,refCm:flat?.refLengthCm??null,olculerL:flat?.olculerL??null,chestPx:null,designBoxPx:null,scale:null,mmPerPx:null,confidence:0,gorselFileId:image?.id??null,desenFileId:design?.id??null};
   let width=null,height=null;
-  const validReference=Number.isFinite(flat?.refLengthCm) && flat.refLengthCm>0;
-  if(!validReference)reasons.push('Ürün için tek ve geçerli bir kalıp referansı bulunamadı.');
-  if(flat?.refBeden && flat.refBeden!=='L')reasons.push('Kalıp referansı L beden değil; L ölçüsü teyit edilmeli.');
+  const positive=n=>Number.isFinite(n)&&n>0;
+  const measurements=flat?.refBeden==='L' && flat?.olculerL && typeof flat.olculerL==='object' ? flat.olculerL : {};
+  if(flat?.refBeden!=='L')reasons.push('Kalıp referansı L beden değil veya belirtilmemiş; L ölçüsü teyit edilmeli.');
+  if(!positive(measurements.omuzdan_boy)&&!positive(measurements.etek))reasons.push('Ürün için geçerli L beden kalıp ölçüleri bulunamadı.');
   if(viewForPosition(position)==='teyit')reasons.push('Uygulama konumu için görünüm eşlemesi bulunamadı.');
   try {
-    if(flatImage && Number.isFinite(flat?.refLengthPx) && flat.refLengthPx>0) {
-      const check=referencePixels(await raster(flatImage),product);
-      if(!check.chestPx || Math.abs(check.chestPx/flat.refLengthPx-1)>.04)
-        reasons.push('Kalıp öz denetimi kayıtlı piksel referansından %4 üzerinde farklı; ölçü teyit edilmeli.');
+    const pages=await rasterPages(image,image.mime==='application/pdf'?320:1000),designs=await rasterPages(design),candidates=[];
+    source.pageCount=pages.length;source.designPageCount=designs.length;timings.raster=performance.now()-started;
+    for(let i=0;i<pages.length;i++) {
+      const ref=silhouette(pages[i]);if(!ref)continue;
+      for(let j=0;j<designs.length;j++) {
+        const match=matchDesign(pages[i],designs[j],ref,false);
+        if(match.box)candidates.push({p:pages[i],ref,match,page:i+1,designPage:j+1});
+      }
     }
-    const p=await raster(image),d=await raster(design),ref=referencePixels(p,product);
-    source.chestPx=ref.chestPx;
-    if(!ref.chestPx)reasons.push('Ürün maskesi veya göğüs/basen genişliği bulunamadı.');
+    candidates.sort((a,b)=>b.match.confidence-a.match.confidence);
+    // All pages receive a coarse search; only the strongest hypotheses need
+    // the expensive subpixel/scale refinement. This is not a page-count cap.
+    source.pageCandidates=candidates.slice(0,5).map(c=>({page:c.page,designPage:c.designPage,confidence:Math.round(c.match.confidence*1000)/1000}));
+    timings.scan=performance.now()-started-timings.raster;
+    let finalists=candidates.slice(0,3);
+    if(image.mime==='application/pdf' && finalists.length) {
+      const numbers=[...new Set(finalists.map(c=>c.page))].sort((a,b)=>a-b),high=await rasterPages(image,640,numbers);
+      finalists=finalists.map(candidate=>{const p=high[numbers.indexOf(candidate.page)];const sx=p.width/candidate.p.width,sy=p.height/candidate.p.height;return {...candidate,p,ref:silhouette(p),match:{...candidate.match,box:{x:candidate.match.box.x*sx,y:candidate.match.box.y*sy,w:candidate.match.box.w*sx,h:candidate.match.box.h*sy}}};}).filter(c=>c.ref);
+    }
+    const refined=finalists.map(candidate=>({...candidate,match:matchDesign(candidate.p,designs[candidate.designPage-1],candidate.ref,true,candidate.match)}));
+    timings.refine=performance.now()-started-timings.raster-timings.scan;
+    refined.sort((a,b)=>b.match.confidence-a.match.confidence);
+    const chosen=refined[0];
+    if(!chosen)reasons.push('Ürün maskesi veya görselde desen bulunamadı.');
     else {
-      if(ref.symmetry<.88 || ref.sharpness<18)reasons.push('Görsel perspektifli, fotoğraf veya kenarları bulanık; ölçü teyit edilmeli.');
-      const match=matchDesign(p,d,ref);
+      const {ref,match,page,designPage}=chosen;
+      source.wrinkleFraction=wrinkleFraction(chosen.p,ref,match.box);
+      Object.assign(source,{selectedPage:page,selectedDesignPage:designPage,chestPx:ref.hemWidthPx,hemWidthPx:ref.hemWidthPx,bodyHeightPx:ref.bodyHeightPx,shoulderY:ref.shoulderY,hemY:ref.hemY,shoulderMethod:ref.shoulderMethod,productBoxPx:ref.box,symmetry:ref.symmetry,textureFraction:ref.textureFraction,softEdgeFraction:ref.softEdgeFraction});
       source.confidence=Math.round(Math.max(0,Math.min(1,match.confidence))*1000)/1000;
-      let box=match.box;
-      if(!box || match.confidence<.78) {reasons.push('Desen eşleştirme güveni düşük; farklı renk bölgesi yedek ölçümü teyit edilmeli.');box=fallbackRegion(p,ref,match.garment);}
-      if(match.ambiguous)reasons.push('Birden fazla desen adayı birbirine yakın; yerleşim teyit edilmeli.');
-      if(!box)reasons.push('Görselde desen bulunamadı.');
-      source.designBoxPx=box;
-      if(box && validReference && match.content.box) {
-        source.scale=flat.refLengthCm/ref.chestPx;
-        width=Math.round(box.w*source.scale*10);height=Math.round(width*match.content.box.h/match.content.box.w);
-        const small=['sol_gogus','sag_gogus','kol','sol_kol','sag_kol','ense','kapusan'].includes(position);
-        if(width<(small?15:30)||width>(small?200:350)||height<10||height>500||width<=0)reasons.push('Ölçü olağandışı; baskı en ve boyu teyit edilmeli.');
-        if(!Number.isSafeInteger(width)||!Number.isSafeInteger(height)||width<=0||height<=0) {
-          reasons.push('Hesaplanan ölçü güvenli tam sayı sınırında değil.');width=height=null;
+      source.candidateBoxPx=match.box;
+      source.designAspectRatio=match.content.box?match.content.box.w/match.content.box.h:null;
+      source.aspectRatioError=match.box&&source.designAspectRatio?Math.abs(match.box.w/match.box.h/source.designAspectRatio-1):null;
+      if(ref.symmetry<.95 || ref.softEdgeFraction>.35 || ref.textureFraction>.16 || source.wrinkleFraction>.06)reasons.push('Görsel perspektifli, kırışık veya fotoğraf özellikleri taşıyor; ölçü teyit edilmeli.');
+      if(match.ambiguous || (refined[1] && refined[1].page!==page && match.confidence-refined[1].match.confidence<.045))reasons.push('Birden fazla desen veya ürün sayfası adayı birbirine yakın; yerleşim teyit edilmeli.');
+      const vertical=positive(measurements.omuzdan_boy)?measurements.omuzdan_boy*10/ref.bodyHeightPx:null;
+      const horizontal=positive(measurements.etek)?measurements.etek*10/ref.hemWidthPx:null;
+      source.verticalMmPerPx=vertical;source.horizontalMmPerPx=horizontal;
+      source.scaleDifference=vertical&&horizontal?Math.abs(vertical-horizontal)/((vertical+horizontal)/2):null;
+      if(vertical&&horizontal&&source.scaleDifference>.08)reasons.push('Dikey ve yatay L ölçekleri %8 üzerinde ayrışıyor; ölçü teyit edilmeli.');
+      if((vertical&&!horizontal)||(!vertical&&horizontal))reasons.push('Tek L ölçeği bulundu; güven düşük, ikinci eksen teyit edilmeli.');
+      source.scaleMethod=vertical&&horizontal?'omuzdan_boy ve etek ortalaması':vertical?'yalnız omuzdan_boy':horizontal?'yalnız etek':null;
+      source.mmPerPx=vertical&&horizontal?(source.scaleDifference<=.08?(vertical+horizontal)/2:null):vertical||horizontal;
+      if(vertical&&horizontal&&source.scaleDifference>.08)source.scaleMethod='çelişen L ölçekleri; ölçü yok';
+      source.scale=source.mmPerPx?source.mmPerPx/10:null;
+      if(source.aspectRatioError>.01)reasons.push('Desen kutusunun en-boy oranı kaynakla uyuşmuyor; ölçü teyit edilmeli.');
+      if(match.confidence<.78)reasons.push('Desen eşleştirme güveni düşük; ölçü tahmin edilmedi.');
+      else {
+        source.designBoxPx=match.box;
+        if(source.mmPerPx) {
+          width=Math.round(match.box.w*source.mmPerPx);height=Math.round(match.box.h*source.mmPerPx);
+          if(match.box.w>ref.box.w || match.box.h>ref.box.h)reasons.push('Desen fiziksel ürün sınırlarını aşıyor; ölçü teyit edilmeli.');
+          if(!Number.isSafeInteger(width)||!Number.isSafeInteger(height)||width<=0||height<=0){width=height=null;reasons.push('Hesaplanan ölçü fiziksel olarak geçersiz.');}
         }
       }
     }
   } catch(e) {reasons.push(`Otomatik ölçü okunamadı: ${e.message}`);}
+  source.timingsMs={...Object.fromEntries(Object.entries(timings).map(([k,v])=>[k,Math.round(v)])),total:Math.round(performance.now()-started)};
   return {width_mm:width,height_mm:height,measure_source:source,needs_confirmation:reasons.length>0,reasons,reason:reasons.join(' ')};
 }
-module.exports={autoMeasure,raster,referencePixels,viewForPosition,designContent};
+module.exports={autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette};

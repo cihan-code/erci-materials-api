@@ -406,12 +406,7 @@ function autoInputs(db,v,line,app) {
   return {image,design,flat,product:line.product_key,position:app.position};
 }
 function autoFingerprint(app,input) {return JSON.stringify({app,input});}
-function flatRasterInput(dataDir,flat) {
-  if(!flat)return undefined;
-  const root=path.join(fs.realpathSync(dataDir),'siparis','flats'),file=path.resolve(flat.dosya);
-  if(!file.startsWith(root+path.sep) || fs.realpathSync(root)!==root || fs.realpathSync(file)!==file)fail('Kalıp görseli güvenli kütüphane dizininde değil',403);
-  return {buffer:fs.readFileSync(file),mime:path.extname(file).toLowerCase()==='.png'?'image/png':'image/jpeg'};
-}
+
 async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,changedOnly=false) {
   assertUser(db,user.id);draft(db,versionId);unlocked(db,versionId);
   return renderQueue(async signal=> {
@@ -425,13 +420,13 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
       if(!input)continue;
       const previous=provenance(app);
       if(changedOnly && previous.method==='otomatik' && previous.gorselFileId===input.image.id && previous.desenFileId===input.design.id &&
-        previous.flatId===(input.flat?.id??null) && previous.refCm===(input.flat?.refLengthCm??null) && previous.refBeden===(input.flat?.refBeden??null))continue;
+        previous.flatId===(input.flat?.id??null) && previous.refCm===(input.flat?.refLengthCm??null) && previous.refBeden===(input.flat?.refBeden??null) && JSON.stringify(previous.olculerL??null)===JSON.stringify(input.flat?.olculerL??null))continue;
       const fingerprint=autoFingerprint(app,input);
       let result;
       try {
         const image={...input.image,...await vectorInput(dataDir,input.image)};
         const design={...input.design,...await vectorInput(dataDir,input.design)};
-        result=await generateInChild({type:'autoMeasure',input:{...input,image,design,flatImage:flatRasterInput(dataDir,input.flat)}},signal,{timeoutMs:15000});
+        result=await generateInChild({type:'autoMeasure',input:{...input,image,design}},signal,{timeoutMs:15000});
       } catch(e) {
         if(signal.aborted)throw e;
         result={width_mm:null,height_mm:null,needs_confirmation:true,reason:`Otomatik ölçü tamamlanamadı: ${e.message}`,
