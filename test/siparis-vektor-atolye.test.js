@@ -384,14 +384,13 @@ test('G27 0.3 mm letter strokes require confirmation and embroidery is stricter'
   assert.equal(embroidery.report.rasterQuality.limits.minLineMm,1.2);
 });
 
-test('G27 open channels, enclosed holes and tiny closed shapes are measured', async () => {
+test('G29 exterior channels are excluded; enclosed holes and tiny closed shapes are measured', async () => {
   const channel = qualityPng(ctx=>{
     ctx.fillStyle='red';ctx.fillRect(0,0,40,60);ctx.fillRect(43,0,40,60);
   },83,60);
   const result = await vectorize({buffer:channel,mime:'image/png',targetMm:{w:8.3,h:6}});
-  assert.equal(result.report.quality,'teyit');
-  assert.ok(Math.abs(result.report.rasterQuality.minGapMm-.3)<.1);
-  assert.ok(result.report.reasons.some(x=>x.includes('En küçük boşluk')));
+  assert.equal(result.report.rasterQuality.minGapMm,null);
+  assert.ok(!result.report.reasons.some(x=>x.includes('En küçük boşluk')));
   for (const hole of [true,false]) {
     const buffer=qualityPng(ctx=>{
       ctx.fillStyle='red';ctx.fillRect(0,0,100,100);
@@ -494,4 +493,43 @@ test('G27 legacy cached preview without complexity metrics cannot silently becom
   assert.equal(result.report.rasterQuality.pathCount,null);
   assert.equal(result.report.rasterQuality.nodeCount,null);
   assert.ok(result.report.reasons.some(reason=>reason.includes('ölçümleri eksik')));
+});
+
+
+test('G29 angular thick letters ignore corner tips while sustained 0.3 mm writing needs review',async()=> {
+  for(const thickness of [20,3]) {
+    const buffer=qualityPng(ctx=>{
+      ctx.fillStyle='#102060';
+      ctx.fillRect(10,10,thickness,80);ctx.fillRect(10,70,80,20);
+      ctx.fillRect(110,10,thickness,80);ctx.fillRect(110,10,80,thickness);
+    });
+    const result=await vectorize({buffer,mime:'image/png',targetMm:{w:18,h:8}});
+    assert.equal(result.report.quality,thickness===20 ? 'iyi':'teyit',result.report.reasons.join(' '));
+    if(thickness===3) assert.ok(result.report.rasterQuality.minLineMm<=.31);
+  }
+});
+
+test('G29 matching opaque ground and design colours need explicit confirmation',async()=> {
+  for(const color of ['white','#172b40','#b64050']) {
+    const buffer=qualityPng(ctx=>{ctx.fillStyle=color;ctx.fillRect(0,0,200,100);});
+    const result=await vectorize({buffer,mime:'image/png',targetMm:{w:20,h:10}});
+    assert.equal(result.report.quality,'teyit');
+    assert.ok(result.report.reasons.includes('Zemin ve desen rengi ayrışmıyor; baskı alanı belirsiz'));
+  }
+});
+
+test('G29 components under 0.05 percent are counted as noise rather than closed shapes',async()=> {
+  const buffer=qualityPng(ctx=>{ctx.fillStyle='red';ctx.fillRect(0,0,160,100);ctx.fillRect(190,0,2,2);});
+  const result=await vectorize({buffer,mime:'image/png',targetMm:{w:96,h:50}});
+  assert.equal(result.report.quality,'iyi',result.report.reasons.join(' '));
+  assert.ok(result.report.rasterQuality.gurultuSayisi>=1);
+  assert.ok(result.report.rasterQuality.minShapeMm2>1);
+});
+
+test('G29 compact blob without a 1 mm skeleton segment is checked by closed area',async()=> {
+  const buffer=qualityPng(ctx=>{ctx.fillStyle='red';ctx.fillRect(10,10,80,80);});
+  const result=await vectorize({buffer,mime:'image/png',targetMm:{w:8,h:8}});
+  assert.equal(result.report.quality,'iyi',result.report.reasons.join(' '));
+  assert.equal(result.report.rasterQuality.minLineMm,null);
+  assert.ok(result.report.rasterQuality.minShapeMm2>1);
 });

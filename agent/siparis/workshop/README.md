@@ -49,13 +49,19 @@ Düz paletli kaynaklarda trace öncesi yakın RGB tonları ve kararsız kenar re
 normalize edilir; dört pikselden küçük speckle süzülür. Özgün piksel verisi benzerlik kontrolünde korunur.
 Fotoğraf/degrade veya güvenilir ayrışmayan renk dokusu teyit ister; OCR kullanılmaz.
 
-Bir piksellik morfolojik açma gürültüyü süzer. Kararlı renk bölgelerinin Zhang–Suen iskeleti üzerinde fiziksel piksel aralığıyla Öklid uzaklık dönüşümü hesaplanır.
-Çap eksi bir piksel aralığı (en az bir piksel) çizgi genişliğini muhafazakâr tahmin eder. 4 komşulu bileşenler
-kapalı renk şekillerinin ve iç deliklerin en küçük alanını verir. Boşluk maskesi kapalı delikleri ve en az bir eksende
-iki mürekkep arasında kalan arka planı kapsar; dışarı açılan kanallar da ölçülür, dış boş kenarlar ölçülmez.
-Boşluk iskeletinin açık uçları boşluk eşiği kadar fiziksel uzunlukta budanır; köşeye doğru incelen kısa
-uçlar gerçek dar kanal sayılmaz. Uzun paralel ince aralıklar ölçülür; küçük kapalı delikler ayrıca alanla denetlenir.
-`minGapMm: null` böyle bir boşluk bulunmadığını veya yalnız kısa uçlar kaldığını belirtir. Birden çok renk bölgesi inceyse en küçüğü kullanılır.
+Bir piksellik morfolojik açma ve bileşen alanı filtresi gürültüyü süzer. Toplam mürekkep alanının
+%0.05'inden küçük 4 komşulu bileşenler dışlanır; `gurultuSayisi` sayıyı bildirir. Kalan renk şekilleri
+ve kapalı negatif delikler için en küçük alan eşiğe karşı denetlenir.
+Zhang–Suen iskeleti üzerinde fiziksel piksel aralığıyla Öklid uzaklık dönüşümü hesaplanır.
+Çap eksi bir piksel aralığı (en az bir piksel) genişliği tahmin eder. 1 mm'den kısa iskelet segmentleri
+ölçüme girmez; uç/dal çevresinde segment yarıçapının, köşe çevresinde yerel yarıçapın yaklaşık iki katı dışlanır.
+Kalan genişliklerin fiziksel uzunlukla ağırlıklı %5 yüzdeliği kullanılır. Uç dışlaması tümünü kaplayan geniş,
+kompakt segmentler ancak 1 mm uzunluk koşulunu geçerse iç çaplarıyla ölçülür. Negatif maskeye aynı yöntem uygulanır;
+kenara değen arka plan bileşenleri dışlanır. `minGapMm: null` ölçülebilir kapalı boşluk olmadığını belirtir.
+Birden çok kararlı renk bölgesinde bulunan çizgi ölçümlerinin en küçüğü kullanılır.
+Opak resimde sınırın baskın rengine DeltaE eşiği içinde yakın pikseller %98'i aşarsa zemin ile desen
+ayrımı güvenilir değildir: `Zemin ve desen rengi ayrışmıyor; baskı alanı belirsiz` gerekçesi teyit ister.
+Bu, her renkte yakın ve düz opak alan için muhafazakâr bir sezgiseldir; şeffaf beyaz mürekkebi etkilemez.
 
 Çıktı PDF'si yeniden rasterleştirilir ve kırpılmış kaynakla aynı piksel ızgarasında karşılaştırılır.
 `iou`, bir piksel kenar toleransıyla mürekkep maskelerinin uyuşmasıdır; tolerans içinde karşı maskeye
@@ -67,7 +73,7 @@ uzaklıkta opak iç alan varsa piksel antialias kapsaması kabul edilir. Kalan y
 alfa kenar piksellerine bölünür; geniş saydam şeritler dolu iç alanla seyreltilmez.
 
 Analiz hedefte en fazla 300 dpi, en çok 1 milyon piksel kullanır; kaynak düşük çözünürlüklüyse büyütülmez.
-Bir piksellik morfolojik açma ve boşluk uç budaması daha düşük analiz çözünürlüğünde de gürültüyü süzer.
+Bir piksellik morfolojik açma, bileşen filtresi ve fiziksel iskelet segmentleri kullanılır.
 Küçültme tek başına teyit nedeni değildir. Renk sayısı eşiği veya 64 aday küme aşılırsa pahalı renk başına
 iskelet/alan ölçümleri yapılmaz (`minLineMm`, bazen `minShapeMm2`: null); ölçülemedi gerekçesi eklenir.
 Eşikler üretim onayı değildir. `minLineWidth` eski alanı mm tahmini olarak korunur.
@@ -80,6 +86,14 @@ Oran üst sınırı 1, çizgi/boşluk üst sınırı 100 mm, DeltaE üst sınır
 Hedef yoksa bu iki ölçü ve fiziksel çizgi/boşluk/şekil metrikleri `null` olur. `analysisDpi`,
 `noiseFilter`, `colorDeltaE`, `minColorAreaRatio`, `iouTolerancePx` analiz yöntemini açıklar.
 Nakış çağrısı açıkça `applicationType:'nakis'` taşır.
+
+G29 üçüncü tur, G27 ölçülerinde: `1773.png` (100 mm), `Kol.png` (100 mm), `Desen 1.png`
+(280 mm) iyi; `1773 beyaz.png` opak zemin belirsizliği, `ön nakış siyah.png` gerçek ince alt yazı
+(0.394 mm), WhatsApp JPEG ve Sütlü kahve fotoğraf ayrıntıları için teyit ister. İTÜ göğüs armasında
+ince açık harf konturları ve EST kutusunun dış çerçevesi vektörde kaybolur (IoU 0.8955); bu gerçek görsel
+fark teyit nedenidir. Eşikler değiştirilmedi. Özel ölçüm/önizleme raporu yerel
+`test-gorselleri/g27/sonuclar-3tur.md` içindedir; gerçek desen ve önizlemeleri repoya alınmaz.
+
 
 PDF kuralları korunur: `pdf-lib` vektör içeriğini, fontlarını ve form nesnelerini tutar; hedef yoksa saf vektör
 PDF aynen döner. Hedefte içerik ve ek açıklamalar mevcut kırpma/dönüş kurallarıyla ölçeklenir.

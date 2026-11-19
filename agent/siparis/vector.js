@@ -96,14 +96,33 @@ async function rasterInput(buffer, source, assessRaster = false) {
   // Keep a pale-only design measurable as well; raster output still needs review.
   const transparent = assessRaster && decoded.pixels.some((v,i) => i%4 === 3 && v < 250);
   const bounds = pixelBounds(decoded,jpeg ? 235 : 250) || (jpeg ? pixelBounds(decoded,250) : null)
-    || (transparent ? alphaBounds(decoded) : null);
+    || (assessRaster ? alphaBounds(decoded) : null);
   if (!bounds) throw new Error('Desen içerik kutusu boş');
   const cropped = new PNG({width:bounds.w,height:bounds.h});
   const pixels = Buffer.from(decoded.pixels);
   for (let y=0;y<bounds.h;y++) pixels.copy(cropped.data,y*bounds.w*4,
     ((bounds.y+y)*decoded.width+bounds.x)*4,((bounds.y+y)*decoded.width+bounds.x+bounds.w)*4);
   buffer=PNG.sync.write(cropped);
-  const image={width:bounds.w,height:bounds.h,pixels:cropped.data, transparent};
+  // An opaque pale field cannot establish whether white belongs to the design
+  // or its ground; shadows and codec specks must not imply a precise print area.
+  const borderColors=new Map();
+  for(let y=0;y<decoded.height;y++) for(let x=0;x<decoded.width;x++) {
+    if(x && y && x!==decoded.width-1 && y!==decoded.height-1) continue;
+    const i=(y*decoded.width+x)*4,rgb=[pixels[i],pixels[i+1],pixels[i+2]],key=rgb.map(v=>v>>3).join(',');
+    const bin=borderColors.get(key)||{rgb,count:0};bin.count++;borderColors.set(key,bin);
+  }
+  const ground=[...borderColors.values()].sort((a,b)=>b.count-a.count)[0];
+  let similar=0;
+  if(assessRaster && !transparent && ground) {
+    const groundLab=lab(ground.rgb),cache=new Map();
+    for(let i=0;i<pixels.length;i+=4) {
+      const key=(pixels[i]>>3)*1024+(pixels[i+1]>>3)*32+(pixels[i+2]>>3);
+      if(!cache.has(key)) cache.set(key,delta(groundLab,lab([pixels[i],pixels[i+1],pixels[i+2]]))<=qualityLimits().colorDeltaE);
+      if(cache.get(key)) similar++;
+    }
+  }
+  const groundUnclear=assessRaster && !transparent && similar/(decoded.width*decoded.height)>.98;
+  const image={width:bounds.w,height:bounds.h,pixels:cropped.data, transparent, groundUnclear};
   const dimensions = source ? {width:image.width*source.width/decoded.width,height:image.height*source.height/decoded.height}
     : {width:image.width*0.75,height:image.height*0.75};
   return {buffer,image,dimensions};
@@ -261,7 +280,7 @@ function distances(mask, width, height, sx, sy) {
 
 // Zhang–Suen thinning removes rectangle corners rather than treating short scanline
 // runs at rounded boundaries as fine detail. The distance on the skeleton estimates width.
-function skeletonWidth(mask, width, height, sx, sy, trim = 0) {
+function skeletonWidth(mask, width, height, sx, sy) {
   const distance = distances(mask, width, height, sx, sy), skeleton = mask.slice();
   let changed = true;
   while (changed) {
@@ -285,28 +304,71 @@ function skeletonWidth(mask, width, height, sx, sy, trim = 0) {
       if (remove.length) changed = true;
     }
   }
-  // Short tapered terminals are boundary corners, not a sustained narrow channel.
-  for(let step=0;step<trim;step++) {
-    const remove=[];
-    for(let y=1;y<height-1;y++) for(let x=1;x<width-1;x++) {
-      const i=y*width+x;if(!skeleton[i]) continue;
-      const count=[-width-1,-width,-width+1,-1,1,width-1,width,width+1].reduce((n,d)=>n+skeleton[i+d],0);
-      if(count<=1) remove.push(i);
+  // Follow physical skeleton segments. Junctions, terminals and sharp corners do
+  // not describe sustained print detail; exclude about two local radii around them.
+  const neighbours = i => {
+    const out=[];
+    for (const [dx,dy] of [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]]) {
+      const j=i+dy*width+dx;
+      if (j<0 || j>=mask.length || !skeleton[j]) continue;
+      if (dx && dy && (skeleton[i+dx] || skeleton[i+dy*width])) continue;
+      out.push(j);
     }
-    if(!remove.length) break;
-    for(const i of remove) skeleton[i]=0;
+    return out;
+  };
+  const graph=new Map();
+  for(let i=0;i<mask.length;i++) if(skeleton[i]) graph.set(i,neighbours(i));
+  const visited=new Set(), samples=[], compact=[];
+  const edgeKey=(a,b)=>a<b ? a+':'+b : b+':'+a;
+  const length=(a,b)=>Math.hypot((a%width-b%width)*sx,(Math.floor(a/width)-Math.floor(b/width))*sy);
+  function segment(start,next) {
+    const points=[start], positions=[0];let previous=start,current=next;
+    while(true) {
+      visited.add(edgeKey(previous,current));
+      positions.push(positions.at(-1)+length(previous,current));points.push(current);
+      const ns=graph.get(current);
+      if(ns.length!==2 || current===start) break;
+      const following=ns.find(n=>n!==previous);
+      if(visited.has(edgeKey(current,following))) break;
+      previous=current;current=following;
+    }
+    const total=positions.at(-1);
+    if(total<1) return;
+    let peak=0;for(const i of points) peak=Math.max(peak,distance[i]);
+    // A broad compact segment may be entirely covered by its endpoint radii;
+    // retain its inscribed width only after passing the physical 1 mm length gate.
+    if(total<=4*Math.sqrt(peak)) compact.push(2*Math.sqrt(peak)-Math.max(sx,sy));
+    const exclusions=[];
+    if(graph.get(start).length!==2) exclusions.push([0,2*Math.sqrt(peak)]);
+    if(graph.get(current).length!==2) exclusions.push([total,2*Math.sqrt(peak)]);
+    // Detect bends over a radius-sized baseline, rather than pixel stair steps.
+    for(let k=1;k<points.length-1;k++) {
+      const radius=Math.sqrt(distance[points[k]]);let left=k-1,right=k+1;
+      while(left>0 && positions[k]-positions[left]<radius) left--;
+      while(right<points.length-1 && positions[right]-positions[k]<radius) right++;
+      if(positions[k]-positions[left]<radius*.8 || positions[right]-positions[k]<radius*.8) continue;
+      const a=points[left],b=points[k],c=points[right];
+      const ux=(b%width-a%width)*sx,uy=(Math.floor(b/width)-Math.floor(a/width))*sy;
+      const vx=(c%width-b%width)*sx,vy=(Math.floor(c/width)-Math.floor(b/width))*sy;
+      if((ux*vx+uy*vy)/(Math.hypot(ux,uy)*Math.hypot(vx,vy))<.5) exclusions.push([positions[k],2*radius]);
+    }
+    for(let k=0;k<points.length;k++) {
+      if(exclusions.some(([p,r])=>Math.abs(positions[k]-p)<r)) continue;
+      const weight=((positions[k]- (positions[k-1]??positions[k]))+((positions[k+1]??positions[k])-positions[k]))/2;
+      if(weight>0) samples.push({value:Math.max(Math.min(sx,sy),2*Math.sqrt(distance[points[k]])-Math.max(sx,sy)),weight});
+    }
   }
-  let min = Infinity;
-  for (let i = 0; i < mask.length; i++) if (skeleton[i]) {
-    // Distance is to background pixel centres; subtract one pixel pitch to estimate edges.
-    min = Math.min(min, Math.max(Math.min(sx,sy), 2*Math.sqrt(distance[i])-Math.max(sx,sy)));
-  }
-  return Number.isFinite(min) ? min : null;
+  for(const [i,ns] of graph) if(ns.length!==2) for(const n of ns) if(!visited.has(edgeKey(i,n))) segment(i,n);
+  for(const [i,ns] of graph) for(const n of ns) if(!visited.has(edgeKey(i,n))) segment(i,n);
+  samples.sort((a,b)=>a.value-b.value);
+  const threshold=samples.reduce((n,s)=>n+s.weight,0)*.05;let cumulative=0;
+  for(const sample of samples) {cumulative+=sample.weight;if(cumulative>=threshold) return sample.value;}
+  return compact.length ? Math.min(...compact) : null;
 }
 
-function components(mask, width, height, excludeBorder = false) {
+function components(mask, width, height, excludeBorder = false, noiseArea = 0) {
   const remaining = mask.slice(), interior = new Uint8Array(mask.length), queue = new Int32Array(mask.length);
-  let minArea = Infinity;
+  let minArea = Infinity, gurultuSayisi = 0;
   for (let start = 0; start < mask.length; start++) {
     if (!remaining[start]) continue;
     let head = 0, tail = 1, border = false; queue[0] = start; remaining[start] = 0;
@@ -317,12 +379,13 @@ function components(mask, width, height, excludeBorder = false) {
         if (next >= 0 && remaining[next]) {remaining[next] = 0; queue[tail++] = next;}
       }
     }
+    if ((!excludeBorder || !border) && tail < noiseArea) {gurultuSayisi++;continue;}
     if (!excludeBorder || !border) {
       minArea = Math.min(minArea, tail);
       for (let j = 0; j < tail; j++) interior[queue[j]] = 1;
     }
   }
-  return { mask: interior, minArea: Number.isFinite(minArea) ? minArea : null };
+  return { mask: interior, minArea: Number.isFinite(minArea) ? minArea : null, gurultuSayisi };
 }
 
 // CIE76 Delta E in D65 Lab: alpha and antialias boundary mixtures are not inks.
@@ -415,38 +478,32 @@ async function rasterQuality(image, pdf, svg, dimensions, applicationType, targe
     if (ink) mask[(Math.floor(i/width)+1)*w+i%width+1] = 1;
   }
   const sx = dimensions.width/PT_PER_MM/width, sy = dimensions.height/PT_PER_MM/height;
-  let minLineMm = null, minShapeMm2 = null;
+  let minLineMm = null, minShapeMm2 = null, gurultuSayisi = 0;
+  const noiseArea=mask.reduce((n,p)=>n+p,0)*.0005;
   // Complex palettes already require review; avoid unbounded per-colour skeleton work.
   if (target && palette.colorCount <= limits.maxColors && palette.clusters.length <= 64) {
     for (let id=1;id<=palette.clusters.length;id++) {
       if (!palette.clusters[id-1].core) continue;
       const region = new Uint8Array(mask.length);
       for (let i = 0; i < colorIds.length; i++) if (colorIds[i] === id) region[(Math.floor(i/width)+1)*w+i%width+1] = 1;
-      const clean=opening(region,w,h), component = components(clean,w,h);
+      const filtered=components(region,w,h,false,noiseArea);
+      gurultuSayisi+=filtered.gurultuSayisi;
+      const clean=opening(filtered.mask,w,h), component=components(clean,w,h,false,noiseArea);
+      gurultuSayisi+=component.gurultuSayisi;
       if (component.minArea === null) continue;
-      const line = skeletonWidth(clean,w,h,sx,sy), area = component.minArea*sx*sy;
+      const line = skeletonWidth(component.mask,w,h,sx,sy), area = component.minArea*sx*sy;
       if (line !== null) minLineMm = Math.min(minLineMm ?? Infinity,line);
       minShapeMm2 = Math.min(minShapeMm2 ?? Infinity,area);
     }
   }
   const cleanMask=opening(mask,w,h);
   const background = Uint8Array.from(cleanMask, x => 1-x), holes = components(background,w,h,true);
-  // A background pixel bracketed by ink in either axis belongs to a gap,
-  // including channels open to the exterior. Outer blank margins never qualify.
-  const gaps = holes.mask.slice();
-  for (let y=1;y<h-1;y++) {
-    let first=-1,last=-1;
-    for (let x=1;x<w-1;x++) if(cleanMask[y*w+x]) {if(first<0) first=x;last=x;}
-    for (let x=first+1;first>=0 && x<last;x++) if(!cleanMask[y*w+x]) gaps[y*w+x]=1;
-  }
-  for (let x=1;x<w-1;x++) {
-    let first=-1,last=-1;
-    for (let y=1;y<h-1;y++) if(cleanMask[y*w+x]) {if(first<0) first=y;last=y;}
-    for (let y=first+1;first>=0 && y<last;y++) if(!cleanMask[y*w+x]) gaps[y*w+x]=1;
-  }
-  const minGapMm = target ? skeletonWidth(opening(gaps,w,h),w,h,sx,sy,Math.ceil(limits.minGapMm/Math.min(sx,sy))) : null;
-  const cleanHoles=components(opening(holes.mask,w,h),w,h);
-  if (target && cleanHoles.minArea !== null) minShapeMm2 = Math.min(minShapeMm2 ?? Infinity,cleanHoles.minArea*sx*sy);
+  // Negative components touching the image boundary are exterior background.
+  // Enclosed components use exactly the same segment measurement as positive ink.
+  const cleanHoles=components(opening(holes.mask,w,h),w,h,false,noiseArea);
+  gurultuSayisi+=cleanHoles.gurultuSayisi;
+  const minGapMm=target ? skeletonWidth(cleanHoles.mask,w,h,sx,sy) : null;
+  if(target && cleanHoles.minArea!==null) minShapeMm2=Math.min(minShapeMm2??Infinity,cleanHoles.minArea*sx*sy);
   const output = canvasLib.createCanvas(width,height), outputCtx = output.getContext('2d');
   const doc = await openPdf(pdf);
   try {
@@ -481,16 +538,17 @@ async function rasterQuality(image, pdf, svg, dimensions, applicationType, targe
       if (arity[name]) nodeCount += Math.ceil(args.length/arity[name])*(name==='C' ? 3 : ['Q','S'].includes(name) ? 2 : 1);
     }
   }
-  const metrics = { colorCount:palette.colorCount, minLineMm, minGapMm, minShapeMm2, pathCount, nodeCount:priorMetrics?.nodeCount ?? nodeCount,
+  const metrics = { gurultuSayisi, colorCount:palette.colorCount, minLineMm, minGapMm, minShapeMm2, pathCount, nodeCount:priorMetrics?.nodeCount ?? nodeCount,
     iou:union ? 1-mismatch/union : 0, pixelDifference:difference/(width*height*3),
     semiTransparentRatio:alphaEdgePixels ? semi/alphaEdgePixels : 0, alphaEdgePixels, semiTransparentPixels:semi, measurementSize:target ? 'target' : 'pending', analysisDpi:target ? Math.min(25.4/sx,25.4/sy) : null, noiseFilter:'one-pixel-opening', colorDeltaE:limits.colorDeltaE, minColorAreaRatio:limits.minColorAreaRatio, iouTolerancePx:1,
     widthMm:target ? dimensions.width/PT_PER_MM : null,heightMm:target ? dimensions.height/PT_PER_MM : null,
     applicationType, analysisWidth:width, analysisHeight:height, limits };
   const reasons = [];
+  if(image.groundUnclear) reasons.push('Zemin ve desen rengi ayrışmıyor; baskı alanı belirsiz');
   if (!metrics.colorCount) reasons.push('Algısal renk kümeleri güvenilir ayrıştırılamadı; fotoğraf veya geçiş için teyit gerekir.');
   if (metrics.colorCount > limits.maxColors) reasons.push(`Renk sayısı ${metrics.colorCount}; sınır ${limits.maxColors}.`);
-  if (minLineMm === null) reasons.push('En ince çizgi güvenilir ölçülemedi.');
-  else if (minLineMm < limits.minLineMm) reasons.push(`En ince çizgi ${minLineMm.toFixed(3)} mm; ${applicationType==='nakis' ? 'nakış' : 'baskı'} sınırı ${limits.minLineMm} mm.`);
+  if (minLineMm === null && (minShapeMm2===null || minShapeMm2<limits.minShapeMm2)) reasons.push('En ince çizgi güvenilir ölçülemedi.');
+  else if (minLineMm !== null && minLineMm < limits.minLineMm) reasons.push(`En ince çizgi ${minLineMm.toFixed(3)} mm; ${applicationType==='nakis' ? 'nakış' : 'baskı'} sınırı ${limits.minLineMm} mm.`);
   if (minGapMm !== null && minGapMm < limits.minGapMm) reasons.push(`En küçük boşluk ${minGapMm.toFixed(3)} mm; sınır ${limits.minGapMm} mm.`);
   if (minShapeMm2 !== null && minShapeMm2 < limits.minShapeMm2) reasons.push(`En küçük kapalı şekil ${minShapeMm2.toFixed(3)} mm²; sınır ${limits.minShapeMm2} mm².`);
   if (metrics.iou < limits.minIou) reasons.push(`Vektör benzerliği ${metrics.iou.toFixed(4)}; gerekli IoU ${limits.minIou}.`);
