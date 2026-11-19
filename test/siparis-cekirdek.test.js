@@ -76,6 +76,25 @@ test('WAL, foreign keys, idempotent schema and immediate transaction rollback',a
   assert.throws(()=>db.prepare("INSERT INTO order_versions(order_id,version_no,created_by) VALUES(999,1,999)").run(),/FOREIGN KEY/);
 });
 
+test('snapshot keeps optional file metadata on its own product line',async t => {
+  const f=await setup(t), order=f.make();
+  assert.equal(f.db.prepare("SELECT 1 FROM sqlite_master WHERE name='document_file_meta'").get(),undefined);
+  assert.deepEqual(orders.snapshot(f.db,order.versionId).files.map(file=>file.id),[order.fileId,order.printFileId]);
+  require('../agent/siparis/documents').init(f.db);
+  const second=orders.addLine(f.db,order.versionId,{product_key:'tisort',quantity:1},f.team);
+  const front=orders.addFile(f.db,order.versionId,{kind:'urun_gorsel',path:'/synthetic/front.png',sha256:'1'.repeat(64)},f.team);
+  const back=orders.addFile(f.db,order.versionId,{kind:'urun_gorsel',path:'/synthetic/back.png',sha256:'2'.repeat(64)},f.team);
+  const meta=f.db.prepare('INSERT INTO document_file_meta(file_id,line_id,gorunum,mime) VALUES(?,?,?,?)');
+  meta.run(front.id,order.lineId,'on','image/png');
+  meta.run(back.id,second.id,'arka','image/png');
+  const snapshot=orders.snapshot(f.db,order.versionId);
+  assert.deepEqual(snapshot.files.map(file=>[file.id,file.line_id,file.gorunum]),[
+    [order.fileId,null,null],[order.printFileId,null,null],
+    [front.id,order.lineId,'on'],[back.id,second.id,'arka']
+  ]);
+  assert.equal(snapshot.files.find(file=>file.id===front.id).sha256,front.sha256);
+});
+
 test('approval is atomic and idempotent; submit has no inventory or queue effects',async t => {
   const f=await setup(t); const order=f.make();
   orders.addFile(f.db,order.versionId,{kind:'uretim_formu',path:'/synthetic/production.pdf',sha256:'c'.repeat(64)},f.team);

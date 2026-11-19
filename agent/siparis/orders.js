@@ -15,9 +15,13 @@ function editable(db, id) {
 }
 function snapshot(db, versionId) {
   const v = version(db, versionId);
+  const hasFileMeta = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_file_meta'").get();
+  const filesSql = hasFileMeta
+    ? 'SELECT f.*,m.line_id,m.gorunum FROM files f LEFT JOIN document_file_meta m ON m.file_id=f.id WHERE f.version_id=? ORDER BY f.id'
+    : 'SELECT * FROM files WHERE version_id=? ORDER BY id';
   return { ...v, lines: db.prepare('SELECT * FROM order_lines WHERE version_id=? ORDER BY id').all(versionId).map(l => ({
     ...l, applications: db.prepare('SELECT * FROM applications WHERE line_id=? ORDER BY id').all(l.id)
-  })), files: db.prepare('SELECT * FROM files WHERE version_id=? ORDER BY id').all(versionId) };
+  })), files: db.prepare(filesSql).all(versionId) };
 }
 function insertApplication(db, lineId, app) {
   if (!['baski','nakis'].includes(app.kind) || typeof app.position !== 'string' || !app.position.trim()) fail('Uygulama türü ve konumu gerekli');
