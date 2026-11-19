@@ -63,7 +63,7 @@ function appsFor(order, lines, type) {
 }
 
 // Every form uses this formatter and the stored millimetres, never image geometry.
-function dimensions(app) { return `${app.width_mm / 10} × ${app.height_mm / 10} cm`; }
+function dimensions(app) { return `${String(app.width_mm / 10).replace('.', ',')} × ${String(app.height_mm / 10).replace('.', ',')} cm`; }
 
 function text(doc, value, x, y, width, size = 18, bold = false, extra = {}) {
   doc.font(bold ? 'Bold' : 'Regular').fontSize(size).fillColor(extra.color || '#111111');

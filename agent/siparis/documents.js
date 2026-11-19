@@ -1,0 +1,404 @@
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { tx, audit, fail, integer } = require('./db');
+const { assertUser } = require('./auth');
+const orders = require('./orders');
+const flats = require('./flats');
+const { measureApplication, designBoxFromPng } = require('./measure');
+const { fork } = require('node:child_process');
+const { buildWorkshopMessage, createWorkshopHandler } = require('./workshop');
+const { registerHandler } = require('./outbox');
+const UPLOAD_KINDS = ['urun_gorsel','desen_kaynak'];
+const GENERATED = ['uretim_formu','onay_formu','baski_formu','nakis_formu','desen_vektor'];
+const WORKSHOP = ['baski_formu','nakis_formu','desen_vektor'];
+const roots = new WeakMap();
+const sha256 = buffer => crypto.createHash('sha256').update(buffer).digest('hex');
+
+function init(db) {
+  // Old G1 databases allowed just one file per kind. Preserve IDs, approval FKs
+  // and bytes while enabling several source images and application vectors.
+  const legacy = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='files'").get();
+  if (/UNIQUE\s*\(\s*version_id\s*,\s*kind\s*\)/i.test(legacy?.sql || '')) {
+    db.pragma('foreign_keys = OFF');
+    try {
+      tx(db, () => {
+        db.exec(`CREATE TABLE IF NOT EXISTS document_files_migration (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, version_id INTEGER NOT NULL REFERENCES order_versions(id),
+          kind TEXT NOT NULL, path TEXT NOT NULL, sha256 TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        );
+        INSERT INTO document_files_migration SELECT * FROM files;
+        DROP TABLE files;
+        ALTER TABLE document_files_migration RENAME TO files;`);
+        if (db.pragma('foreign_key_check').length) fail('Dosya şema geçişinde ilişki hatası', 409);
+      });
+    } finally { db.pragma('foreign_keys = ON'); }
+  }
+  db.exec(`CREATE TABLE IF NOT EXISTS document_file_meta (
+    file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    line_id INTEGER REFERENCES order_lines(id), application_id INTEGER REFERENCES applications(id),
+    gorunum TEXT CHECK(gorunum IN ('on','arka')), mime TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS document_application_sources (
+    application_id INTEGER PRIMARY KEY REFERENCES applications(id),
+    file_id INTEGER NOT NULL REFERENCES files(id)
+  );
+  CREATE TABLE IF NOT EXISTS document_preparations (
+    version_id INTEGER PRIMARY KEY REFERENCES order_versions(id),
+    token TEXT, started_at INTEGER, ready INTEGER NOT NULL DEFAULT 0, source_json TEXT
+  );
+  CREATE TABLE IF NOT EXISTS document_workshop_results (
+    job_id INTEGER PRIMARY KEY REFERENCES outbox(id), status TEXT NOT NULL
+  );
+  -- Compatibility with the old G1 enqueue loop. New G10 inserts already have
+  -- the canonical kind and key; these triggers then make no changes.
+  CREATE TRIGGER IF NOT EXISTS document_workshop_allowlist
+    BEFORE INSERT ON outbox WHEN NEW.kind='atolye_dosya'
+    AND COALESCE(json_extract(NEW.payload_json,'$.file.kind'),'') NOT IN ('baski_formu','nakis_formu','desen_vektor')
+    BEGIN SELECT RAISE(IGNORE); END;
+  CREATE TRIGGER IF NOT EXISTS document_workshop_key
+    AFTER INSERT ON outbox WHEN NEW.kind='atolye_dosya'
+    AND NEW.idempotency_key <> 'atolye:' || NEW.version_id || ':' || json_extract(NEW.payload_json,'$.file.id')
+    BEGIN UPDATE outbox SET idempotency_key='atolye:' || NEW.version_id || ':' || json_extract(NEW.payload_json,'$.file.id') WHERE id=NEW.id; END;
+  CREATE TRIGGER IF NOT EXISTS document_workshop_manual
+    AFTER UPDATE OF status ON outbox WHEN OLD.status='isleniyor' AND NEW.status='tamam' AND EXISTS
+      (SELECT 1 FROM document_workshop_results WHERE job_id=NEW.id AND status='manuel_bekliyor')
+    BEGIN
+      UPDATE outbox SET status='manuel_bekliyor',provider_ref=NULL WHERE id=NEW.id;
+      INSERT INTO audit_log(action,ref,detail_json) VALUES('atolye_manuel_bekliyor',CAST(NEW.id AS TEXT),'{}');
+    END;`);
+  flats.init(db);
+}
+function safeSegment(value) {
+  if (typeof value !== 'string' || !/^[\p{L}\p{N}][\p{L}\p{N} _.-]{0,119}$/u.test(value) || value.includes('..'))
+    fail('Dosya yolunda geçersiz sipariş numarası', 400);
+  return value;
+}
+function directory(dataDir, ...segments) {
+  fs.mkdirSync(dataDir, {recursive:true});
+  let current = fs.realpathSync(dataDir);
+  for (const segment of ['siparis','files',...segments]) {
+    current = path.join(current, segment);
+    try { fs.mkdirSync(current); } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    if (fs.lstatSync(current).isSymbolicLink() || !fs.statSync(current).isDirectory()) fail('Güvensiz dosya dizini', 403);
+  }
+  return current;
+}
+function filePath(dataDir, file) {
+  const root = directory(dataDir);
+  const resolved = path.resolve(file.path);
+  if (!resolved.startsWith(root + path.sep)) fail('Dosya izin verilen dizinde değil', 403);
+  const relative = path.relative(root, resolved);
+  let current = root;
+  for (const part of relative.split(path.sep)) {
+    current = path.join(current, part);
+    if (fs.lstatSync(current).isSymbolicLink()) fail('Sembolik bağlantı reddedildi', 403);
+  }
+  if (!fs.statSync(current).isFile()) fail('Dosya bulunamadı', 404);
+  return current;
+}
+function readFile(dataDir, file) {
+  let buffer;
+  try { buffer = fs.readFileSync(filePath(dataDir, file)); }
+  catch (e) { if (e.code === 'ENOENT') fail('Dosya bulunamadı',404); throw e; }
+  if (sha256(buffer) !== file.sha256) fail('Dosyanın SHA256 özeti değişmiş',409);
+  return buffer;
+}
+function validateUpload(file) {
+  if (!file?.buffer?.length) fail('file alanında dosya gerekli');
+  const name = file.originalname;
+  if (!name || name.includes('..') || /[\\/\x00]/.test(name)) fail('Geçersiz dosya adı');
+  const ext = path.extname(name).toLowerCase();
+  const mime = {'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.pdf':'application/pdf','.svg':'image/svg+xml'}[ext];
+  if (!mime || file.mimetype !== mime) fail('Yalnız PNG/JPG/PDF/SVG kabul edilir',415);
+  const b = file.buffer;
+  if (mime === 'image/png') {
+    if (b.length < 24 || !b.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) fail('Geçersiz PNG');
+    const w=b.readUInt32BE(16), h=b.readUInt32BE(20);
+    if (!w || !h || w*h>40e6) fail('PNG en çok 40 megapiksel olabilir');
+    try { require('pngjs').PNG.sync.read(b); } catch { fail('Geçersiz PNG'); }
+  } else if (mime === 'image/jpeg' && !(b[0]===255 && b[1]===216 && b[2]===255)) fail('Geçersiz JPG');
+  else if (mime === 'application/pdf' && b.subarray(0,5).toString() !== '%PDF-') fail('Geçersiz PDF');
+  else if (mime === 'image/svg+xml') {
+    const s=b.toString('utf8');
+    if (!/<svg[\s>]/i.test(s) || /<!DOCTYPE|<!ENTITY|<script|<foreignObject|\bon\w+\s*=|(?:href|url)\s*[=(]\s*['"]?\s*(?!#)[^\s'"\)]/i.test(s))
+      fail('SVG etkin içerik veya dış kaynak içeremez');
+  }
+  return { buffer:b, mime, ext:ext === '.jpeg' ? 'jpg' : ext.slice(1) };
+}
+function draft(db, versionId) {
+  const v = orders.snapshot(db, integer(versionId,'versionId',1));
+  if (v.status !== 'taslak') fail('Yalnız taslak sürüm hazırlanabilir veya düzenlenebilir',409);
+  return v;
+}
+function unlocked(db, versionId) {
+  if (db.prepare('SELECT token FROM document_preparations WHERE version_id=?').get(versionId)?.token)
+    fail('Sürüm hazırlanıyor; işlem bitince tekrar deneyin',409);
+}
+function saveFile(db, dataDir, v, kind, content, user, meta = {}, written = []) {
+  const order = db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id);
+  const dir = directory(dataDir, safeSegment(order.order_no), `v${v.version_no}`);
+  const ext = meta.ext || 'pdf';
+  let n=1, filename;
+  for (;;) {
+    filename = path.join(dir, `${kind}-${n++}.${ext}`);
+    try { fs.writeFileSync(filename, content, {flag:'wx'}); break; }
+    catch (e) { if (e.code !== 'EEXIST') throw e; }
+  }
+  written.push(filename);
+  const file = orders.addFile(db,v.id,{kind,path:filename,sha256:sha256(content)},user);
+  db.prepare('INSERT INTO document_file_meta(file_id,line_id,application_id,gorunum,mime) VALUES(?,?,?,?,?)')
+    .run(file.id,meta.lineId ?? null,meta.applicationId ?? null,meta.gorunum ?? null,meta.mime || 'application/pdf');
+  return file;
+}
+function upload(db, dataDir, versionId, input, file, user) {
+  assertUser(db,user.id);
+  if (!UPLOAD_KINDS.includes(input.kind)) fail('Yükleme türü urun_gorsel veya desen_kaynak olmalı');
+  const written=[];
+  try { return tx(db, () => {
+    const v=draft(db,versionId); unlocked(db,versionId);
+    const lineId=input.lineId == null ? null : integer(Number(input.lineId),'lineId',1);
+    if (lineId && !v.lines.some(l=>l.id===lineId)) fail('Satır bu sürüme ait değil');
+    if (input.gorunum != null && !['on','arka'].includes(input.gorunum)) fail('gorunum on/arka olmalı');
+    if (input.kind==='urun_gorsel' && (!lineId || !input.gorunum)) fail('Ürün görseli için lineId ve gorunum gerekli');
+    return saveFile(db,dataDir,v,input.kind,file.buffer,user,{...file,lineId,gorunum:input.gorunum},written);
+  }); } catch (e) { for (const f of written) fs.unlinkSync(f); throw e; }
+}
+function measure(db, dataDir, input, user) {
+  assertUser(db,user.id);
+  if (!input || typeof input!=='object' || Array.isArray(input)) fail('Ölçü gövdesi nesne olmalı');
+  if (!['gogus','sirt','kol','ense','kapuson'].includes(input.position)) fail('Geçersiz uygulama konumu');
+  const lineId=integer(Number(input.lineId),'lineId',1);
+  const line=db.prepare('SELECT * FROM order_lines WHERE id=?').get(lineId);
+  if (!line) fail('Sipariş satırı bulunamadı',404);
+  let reference = {refLengthPx:input.refLengthPx,refLengthCm:input.refLengthCm};
+  if (input.flatId) {
+    const flat=flats.get(db,input.flatId);
+    reference = {refLengthPx:flat.refLengthPx,refLengthCm:flat.refLengthCm,refAciklama:flat.refAciklama,flatId:flat.id};
+  }
+  let source, box=input.designBoxPx;
+  if (input.desenDosyaId != null) {
+    source=db.prepare("SELECT * FROM files WHERE id=? AND version_id=? AND kind='desen_kaynak'").get(integer(Number(input.desenDosyaId),'desenDosyaId',1),line.version_id);
+    if (!source) fail('Desen dosyası bu sürüme ait değil');
+    const meta=db.prepare('SELECT * FROM document_file_meta WHERE file_id=?').get(source.id);
+    if (meta?.line_id && meta.line_id!==lineId) fail('Desen dosyası başka satıra ait');
+    if (!box) {
+      if (path.extname(source.path).toLowerCase()!=='.png') fail('Otomatik kutu için PNG gerekli; diğer türlerde designBoxPx verin');
+      try { box=designBoxFromPng(readFile(dataDir,source)); } catch (e) { if (e.status) throw e; fail('PNG kutusu okunamadı'); }
+    }
+  }
+  let result;
+  try { result=measureApplication({...reference,designBoxPx:box,imageKind:input.imageKind,flags:input.flags}); }
+  catch (e) { fail(e.message); }
+  return tx(db, () => {
+    draft(db,line.version_id); unlocked(db,line.version_id);
+    const application=orders.addApplication(db,lineId,{kind:input.kind,position:input.position,
+      width_mm:result.width_mm,height_mm:result.height_mm,needs_confirmation:result.needsConfirmation,
+      measure_source:JSON.stringify({...reference,designBoxPx:box,imageKind:input.imageKind,flags:input.flags || {},desenDosyaId:source?.id,reasons:result.reasons})},user);
+    if (source) db.prepare('INSERT INTO document_application_sources(application_id,file_id) VALUES(?,?)').run(application.id,source.id);
+    let confirmationId=null;
+    if (result.needsConfirmation) confirmationId=Number(db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('olcu','applications',?,?)").run(application.id,result.reason).lastInsertRowid);
+    return {...result,application,confirmationId};
+  });
+}
+function openMeasurements(db, versionId) {
+  return db.prepare(`SELECT c.* FROM confirmations c WHERE c.kind='olcu' AND c.status='acik' AND (
+    (c.ref_table='order_versions' AND c.ref_id=?) OR
+    (c.ref_table='order_lines' AND c.ref_id IN (SELECT id FROM order_lines WHERE version_id=?)) OR
+    (c.ref_table='applications' AND c.ref_id IN (SELECT a.id FROM applications a JOIN order_lines l ON l.id=a.line_id WHERE l.version_id=?)))`)
+    .all(versionId,versionId,versionId);
+}
+function assertMeasurements(db, v) {
+  const pending=openMeasurements(db,v.id);
+  if (pending.length) fail(`Açık ölçü teyidi: ${pending.map(c=>c.message).join(' ')}`,409);
+  for (const a of v.lines.flatMap(l=>l.applications)) {
+    if (![a.width_mm,a.height_mm].every(n=>Number.isSafeInteger(n) && n>0)) fail(`Uygulama ${a.id}: geçerli ölçü gerekli`,409);
+    if (a.needs_confirmation && !db.prepare("SELECT id FROM confirmations WHERE kind='olcu' AND ref_table='applications' AND ref_id=? AND status='cozuldu'").get(a.id))
+      fail(`Uygulama ${a.id}: ölçü teyidi gerekli`,409);
+  }
+}
+function inputFingerprint(db,v) {
+  return JSON.stringify({order:db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id),
+    lines:v.lines.map(({recipe_version,...line})=>line),files:v.files.filter(f=>!GENERATED.includes(f.kind))});
+}
+function assertFresh(db,v) {
+  const state=db.prepare('SELECT * FROM document_preparations WHERE version_id=?').get(v.id);
+  if (state?.ready && state.source_json!==inputFingerprint(db,v))
+    fail('Sürüm değişmiş; belgeleri hazirla?yeniden=1 ile yeniden üretin',409);
+}
+function sourceFor(db, v, app) {
+  const explicit=db.prepare('SELECT file_id FROM document_application_sources WHERE application_id=?').get(app.id)?.file_id;
+  const candidates=v.files.filter(f=>f.kind==='desen_kaynak').filter(f=> {
+    const meta=db.prepare('SELECT line_id FROM document_file_meta WHERE file_id=?').get(f.id);
+    return !meta?.line_id || meta.line_id===app.line_id;
+  });
+  const source=explicit ? v.files.find(f=>f.id===explicit && f.kind==='desen_kaynak') : candidates.length===1 ? candidates[0] : null;
+  if (!source) fail(`Uygulama ${app.id}: desenDosyaId ile tek bir kaynak bağlayın`,409);
+  return source;
+}
+function formOrder(db,dataDir,v,sourceByApp) {
+  const order=db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id);
+  const preview = file => file && /\.(png|jpe?g)$/i.test(file.path) ? readFile(dataDir,file) : undefined;
+  return {
+    orderNo:order.order_no,name:order.customer_name || 'Müşteri belirtilmedi',version:v.version_no,
+    date:new Date().toLocaleDateString('tr-TR'),deliveryDate:'Teslim tarihi belirtilmedi',description:[],
+    lines:v.lines.map(l=> {
+      const images={};
+      for (const f of v.files.filter(f=>f.kind==='urun_gorsel')) {
+        const meta=db.prepare('SELECT * FROM document_file_meta WHERE file_id=?').get(f.id);
+        if (meta?.line_id===l.id) images[meta.gorunum==='on'?'front':'back']=preview(f);
+      }
+      const sizes=JSON.parse(l.sizes_json);
+      if (Object.values(sizes).reduce((a,b)=>a+b,0)!==l.quantity) fail(`Satır ${l.id}: PDF için adetlere eşit beden dağılımı gerekli`,409);
+      return {id:String(l.id),product:l.product_key,color:l.color_name || 'Renk belirtilmedi',fabric:l.fabric_item_id ? db.prepare('SELECT name FROM stock_items WHERE id=?').get(l.fabric_item_id).name : 'Kumaş belirtilmedi',sizes,images};
+    }),
+    applications:v.lines.flatMap(l=>l.applications.map(a=>({type:a.kind,position:a.position,width_mm:a.width_mm,height_mm:a.height_mm,lineIds:[String(l.id)],preview:preview(sourceByApp.get(a.id))}))),
+  };
+}
+async function vectorInput(dataDir,file) {
+  return {buffer:readFile(dataDir,file),mime:{'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.pdf':'application/pdf','.svg':'image/svg+xml'}[path.extname(file.path).toLowerCase()]};
+}
+async function normalizeVectorInput({buffer,mime,...rest}) {
+  if (mime==='image/svg+xml') {
+    // G4 accepts PDF/PNG/JPEG. Convert SVG paths to a vector PDF first.
+    const PDFDocument=require('pdfkit');
+    const SVGtoPDF=require('svg-to-pdfkit');
+    const svg=buffer.toString('utf8');
+    const root=/<svg\b[^>]*>/i.exec(svg)?.[0] || '';
+    const attr=name=>new RegExp(`\\b${name}\\s*=\\s*["']([^"']*)["']`,'i').exec(root)?.[1];
+    const box=(attr('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+    const length=value=> {
+      const m=/^([\d.+e-]+)(px|pt|mm|cm|in|pc)?$/i.exec(value || '');
+      return m ? Number(m[1])*({px:0.75,pt:1,mm:72/25.4,cm:72/2.54,in:72,pc:12}[m[2]?.toLowerCase() || 'px']) : null;
+    };
+    const width=length(attr('width')) || (box.length===4 ? box[2]*0.75 : 750);
+    const height=length(attr('height')) || (box.length===4 ? box[3]*0.75 : 750);
+    if (![width,height].every(n=>Number.isFinite(n) && n>0 && n<=100000)) fail('Geçersiz SVG boyutu');
+    buffer=await new Promise((resolve,reject)=> {
+      const doc=new PDFDocument({size:[width,height],margin:0}); const chunks=[];
+      doc.on('data',c=>chunks.push(c)); doc.on('error',reject); doc.on('end',()=>resolve(Buffer.concat(chunks)));
+      try { SVGtoPDF(doc,svg,0,0,{width,height,preserveAspectRatio:'xMidYMid meet'}); doc.end(); }
+      catch (e) { doc.destroy(); reject(e); }
+    });
+    mime='application/pdf';
+  }
+  return {...rest,buffer,mime};
+}
+function generateInChild(input) {
+  // Native raster tracing and PDF.js stay out of the SQLite process. In
+  // particular, Node 24 + better-sqlite3 11 cannot safely share their GC context.
+  return new Promise((resolve,reject)=> {
+    const child=fork(__filename,['--vector-worker'],{serialization:'advanced',execArgv:[],stdio:['ignore','ignore','pipe','ipc']});
+    let settled=false;
+    const timer=setTimeout(()=> {child.kill();finish(new Error('Vektör üretimi zaman aşımına uğradı'));},120000);
+    timer.unref();
+    function finish(error,result) {
+      if (settled) return; settled=true; clearTimeout(timer);
+      if (error) reject(error); else resolve(result);
+    }
+    child.stderr.resume();
+    child.once('error',e=>finish(e));
+    child.once('exit',code=> {if (!settled) finish(new Error(`Vektör süreci tamamlanamadı (${code})`));});
+    child.once('message',message=> {
+      if (message.error) finish(new Error(message.error)); else finish(null,message.result);
+    });
+    child.send(input,error=> {if (error) {child.kill();finish(error);}});
+  });
+}
+async function prepare(db,dataDir,versionId,user,regenerate=false) {
+  assertUser(db,user.id);
+  const token=crypto.randomUUID();
+  const start=tx(db,()=> {
+    const v=draft(db,versionId); assertMeasurements(db,v);
+    const state=db.prepare('SELECT * FROM document_preparations WHERE version_id=?').get(versionId);
+    if (state?.token && Date.now()-state.started_at<10*60e3) fail('Sürüm zaten hazırlanıyor',409);
+    if (state?.ready && !regenerate) { assertFresh(db,v); return {existing:v.files}; }
+    db.prepare(`INSERT INTO document_preparations(version_id,token,started_at) VALUES(?,?,?)
+      ON CONFLICT(version_id) DO UPDATE SET token=excluded.token,started_at=excluded.started_at`).run(versionId,token,Date.now());
+    return {v,fingerprint:JSON.stringify(v),sourceFingerprint:inputFingerprint(db,v)};
+  });
+  if (start.existing) return start.existing;
+  const written=[];
+  try {
+    const {v}=start, sourceByApp=new Map(), generated=[];
+    for (const a of v.lines.flatMap(l=>l.applications)) sourceByApp.set(a.id,sourceFor(db,v,a));
+    for (const source of v.files.filter(f=>f.kind==='desen_kaynak'))
+      if (![...sourceByApp.values()].some(f=>f.id===source.id)) fail(`Desen ${source.id}: ölçülü uygulama bağlantısı gerekli`,409);
+    for (const a of v.lines.flatMap(l=>l.applications)) {
+      const result=await generateInChild({type:'vector',input:{...await vectorInput(dataDir,sourceByApp.get(a.id)),targetMm:{w:a.width_mm,h:a.height_mm}}});
+      generated.push({kind:'desen_vektor',buffer:result.pdf,meta:{applicationId:a.id},report:result.report});
+    }
+    const model=formOrder(db,dataDir,v,sourceByApp);
+    generated.push(...await generateInChild({type:'forms',model}));
+    return tx(db,()=> {
+      const current=draft(db,versionId); assertMeasurements(db,current);
+      if (JSON.stringify(current)!==start.fingerprint || inputFingerprint(db,current)!==start.sourceFingerprint || db.prepare('SELECT token FROM document_preparations WHERE version_id=?').get(versionId)?.token!==token)
+        fail('Sürüm hazırlama sırasında değişti; yeniden deneyin',409);
+      // Old bytes remain immutable; only current draft registrations are replaced.
+      for (const f of current.files.filter(f=>GENERATED.includes(f.kind))) {
+        db.prepare("UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='vektor_kalite' AND ref_table='files' AND ref_id=? AND status='acik'").run(user.id,f.id);
+        db.prepare('DELETE FROM files WHERE id=?').run(f.id);
+      }
+      for (const g of generated) {
+        const file=saveFile(db,dataDir,v,g.kind,g.buffer,user,g.meta,written);
+        if (g.report?.quality==='teyit') db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('vektor_kalite','files',?,?)")
+          .run(file.id,`Vektör kalitesi görsel teyit gerektiriyor: ${JSON.stringify(g.report)}`);
+      }
+      db.prepare('UPDATE document_preparations SET token=NULL,ready=1,source_json=? WHERE version_id=? AND token=?').run(start.sourceFingerprint,versionId,token);
+      audit(db,user.id,'belgeler_hazirla',versionId,{regenerate});
+      return orders.snapshot(db,versionId).files;
+    });
+  } catch (e) { for (const f of written) fs.unlinkSync(f); throw e; }
+  finally { db.prepare('UPDATE document_preparations SET token=NULL WHERE version_id=? AND token=?').run(versionId,token); }
+}
+function workshopPackage(db,versionId) {
+  const v=orders.snapshot(db,versionId);
+  if (v.status!=='onaylandi') fail('Atölye paketi için sürüm onaylanmalı',409);
+  const order=db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id);
+  const files=v.files.filter(f=>WORKSHOP.includes(f.kind)).map(f=> {
+    const job=db.prepare("SELECT id,status,idempotency_key FROM outbox WHERE version_id=? AND kind='atolye_dosya' AND (idempotency_key=? OR json_extract(payload_json,'$.file.id')=?) ORDER BY id DESC LIMIT 1")
+      .get(versionId,`atolye:${versionId}:${f.id}`,f.id);
+    return {...f,url:`/api/siparis/dosyalar/${f.id}`,outbox:job || null};
+  });
+  return {message:buildWorkshopMessage({...order,version_no:v.version_no,lines:v.lines},files),files};
+}
+function registerWorkshop(boundDb,dataDir) {
+  roots.set(boundDb,dataDir);
+  const handler=createWorkshopHandler(process.env);
+  return registerHandler('atolye_dosya',async(payload,context)=> {
+    const {db,job}=context;
+    const file=db.prepare('SELECT * FROM files WHERE id=? AND version_id=?').get(payload.file?.id,job.version_id);
+    if (!file || !WORKSHOP.includes(file.kind)) fail('Bu dosya atölyeye gönderilemez',409);
+    if (orders.version(db,job.version_id).status!=='onaylandi') fail('Sürüm onaylanmamış',409);
+    const order=db.prepare('SELECT o.* FROM orders o JOIN order_versions v ON v.order_id=o.id WHERE v.id=?').get(job.version_id);
+    // Verify the registered path and bytes even if the upstream payload was altered.
+    const root=roots.get(db) || path.dirname(db.name);
+    const buffer=readFile(root,file);
+    const result=await handler({...job,payload_json:{...payload,order:{...order,version_no:orders.version(db,job.version_id).version_no,lines:orders.snapshot(db,job.version_id).lines},file:{...file,buffer,mime:'application/pdf'}}});
+    tx(db,()=> {
+      db.prepare(`INSERT INTO document_workshop_results(job_id,status) VALUES(?,?)
+        ON CONFLICT(job_id) DO UPDATE SET status=excluded.status`).run(job.id,result.status);
+      audit(db,null,'atolye_bagdastirici_sonucu',job.id,{status:result.status});
+    });
+    return result;
+  });
+}
+module.exports={init,validateUpload,upload,measure,prepare,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+if (require.main===module && process.argv[2]==='--vector-worker') {
+  process.once('message',async job=> {
+    try {
+      let result;
+      if (job.type==='vector') result=await require('./vector').vectorize(await normalizeVectorInput(job.input));
+      else {
+        const forms=require('./pdf'); result=[];
+        for (const [kind,render] of [['uretim_formu',forms.renderProductionForm],['onay_formu',forms.renderApprovalForm],['baski_formu',forms.renderPrintForm],['nakis_formu',forms.renderEmbroideryForm]]) {
+          const buffer=await render(job.model);
+          if (buffer!==null) result.push({kind,buffer});
+        }
+      }
+      process.send({result},()=>process.disconnect());
+    } catch (e) {process.send({error:e.message},()=>process.disconnect());}
+  });
+}
