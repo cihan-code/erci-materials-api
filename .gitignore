@@ -5,3 +5,5 @@ data/
 .env
 .env.*
 test/tmp/
+# Private local measurement inputs, annotated previews and trial reports.
+/test-gorselleri/

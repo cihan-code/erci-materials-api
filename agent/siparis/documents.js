@@ -386,7 +386,7 @@ function provenance(app) {
 }
 function manuallyMeasured(app) {
   const source=provenance(app);
-  return source.method==='elle' || (source.method!=='otomatik' && (app.width_mm!=null || app.height_mm!=null));
+  return source.method==='elle' || (!['otomatik','otomatik_renk'].includes(source.method) && (app.width_mm!=null || app.height_mm!=null));
 }
 function autoInputs(db,v,line,app) {
   const view=viewForPosition(app.position);
@@ -396,7 +396,7 @@ function autoInputs(db,v,line,app) {
   const sourceId=db.prepare('SELECT file_id FROM document_application_sources WHERE application_id=?').get(app.id)?.file_id;
   const design=v.files.find(f=>f.id===sourceId && f.kind==='desen_kaynak');
   const meta=design && db.prepare('SELECT line_id FROM document_file_meta WHERE file_id=?').get(design.id);
-  if(!image || !design || (meta?.line_id && meta.line_id!==line.id))return null;
+  if(!image || (meta?.line_id && meta.line_id!==line.id))return null;
   const productFlats=flats.list(db).filter(f=>f.urun===line.product_key);
   const viewFlats=productFlats.filter(f=>f.gorunum===(view==='teyit'?image.gorunum:view));
   // A front library drawing also supplies the same garment's back chest width.
@@ -419,18 +419,18 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
       const input=autoInputs(db,v,line,app);
       if(!input)continue;
       const previous=provenance(app);
-      if(changedOnly && previous.method==='otomatik' && previous.gorselFileId===input.image.id && previous.desenFileId===input.design.id &&
+      if(changedOnly && ['otomatik','otomatik_renk'].includes(previous.method) && previous.gorselFileId===input.image.id && previous.desenFileId===(input.design?.id??null) &&
         previous.flatId===(input.flat?.id??null) && previous.refCm===(input.flat?.refLengthCm??null) && previous.refBeden===(input.flat?.refBeden??null) && JSON.stringify(previous.olculerL??null)===JSON.stringify(input.flat?.olculerL??null))continue;
       const fingerprint=autoFingerprint(app,input);
       let result;
       try {
         const image={...input.image,...await vectorInput(dataDir,input.image)};
-        const design={...input.design,...await vectorInput(dataDir,input.design)};
+        const design=input.design?{...input.design,...await vectorInput(dataDir,input.design)}:null;
         result=await generateInChild({type:'autoMeasure',input:{...input,image,design}},signal,{timeoutMs:15000});
       } catch(e) {
         if(signal.aborted)throw e;
         result={width_mm:null,height_mm:null,needs_confirmation:true,reason:`Otomatik ölçü tamamlanamadı: ${e.message}`,
-          measure_source:{method:'otomatik',flatId:input.flat?.id??null,flatAd:input.flat?.ad??null,refBeden:input.flat?.refBeden??null,refCm:input.flat?.refLengthCm??null,chestPx:null,designBoxPx:null,scale:null,confidence:0,gorselFileId:input.image.id,desenFileId:input.design.id}};
+          measure_source:{method:'otomatik',flatId:input.flat?.id??null,flatAd:input.flat?.ad??null,refBeden:input.flat?.refBeden??null,refCm:input.flat?.refLengthCm??null,chestPx:null,designBoxPx:null,scale:null,confidence:0,gorselFileId:input.image.id,desenFileId:(input.design?.id??null)}};
       }
       signal.throwIfAborted();
       tx(db,()=> {

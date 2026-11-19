@@ -107,18 +107,18 @@ test('G24 manual correction made while worker runs cannot be overwritten, even w
 test('G24 print size has no preset cap; non-L references and divergent scales require confirmation',async()=>{
   const large=await auto.autoMeasure(input(mockup({width:220})));assert.ok(large.width_mm>350,JSON.stringify(large));assert.doesNotMatch(large.reason,/olağandışı/);
   const other=await auto.autoMeasure(input(mockup(),{flat:{...flat,refBeden:'M'}}));assert.match(other.reason,/L beden değil/);assert.equal(other.width_mm,null);
-  const check=await auto.autoMeasure(input(mockup(),{flat:{...flat,olculerL:{omuzdan_boy:80,etek:60}}}));assert.match(check.reason,/%8/);assert.equal(check.width_mm,null);assert.equal(check.measure_source.mmPerPx,null);
+  const check=await auto.autoMeasure(input(mockup(),{flat:{...flat,olculerL:{omuzdan_boy:80,etek:60}}}));assert.match(check.reason,/%15/);assert.equal(check.width_mm,null);assert.equal(check.measure_source.mmPerPx,null);
   const single=await auto.autoMeasure(input(mockup(),{flat:{...flat,olculerL:{etek:60}}}));assert.match(single.reason,/Tek L ölçeği/);assert.ok(single.width_mm>0);
 });
 test('G24 white garments on transparent backgrounds use alpha as the product mask',async()=>{
   const {createCanvas}=require('@napi-rs/canvas'),c=createCanvas(400,500),x=c.getContext('2d');x.fillStyle='white';x.fillRect(100,40,200,420);x.fillRect(60,40,280,100);
   const p=await auto.raster({buffer:c.toBuffer('image/png'),mime:'image/png'}),r=auto.silhouette(p);assert.equal(r.hemWidthPx,200);
 });
-test('G24 a single front product flat supplies the back reference; unlinked sources never measure',async t=>{
+test('G24 a single front product flat supplies the back reference; unlinked sources use color',async t=>{
   const f=await fixture(t),o=await f.order(),line=o.version.lines[0],v=o.version.id,m=mockup({position:'sirt'});addFlat(f);
   const source=ok(await f.upload(v,{lineId:line.id,buffer:m.design}),201);
   ok(await f.upload(v,{kind:'urun_gorsel',lineId:line.id,gorunum:'arka',buffer:m.image}),201);
-  const app=ok(await f.post(`/satirlar/${line.id}/uygulamalar`,{kind:'baski',position:'sirt'}),201);assert.equal(app.width_mm,null);
+  const app=ok(await f.post(`/satirlar/${line.id}/uygulamalar`,{kind:'baski',position:'sirt'}),201);assert.ok(app.width_mm>0);assert.equal(JSON.parse(app.measure_source).method,'otomatik_renk');
   const edited=ok(await f.request(`/uygulamalar/${app.id}`,{method:'PATCH',token:f.token,body:{desenDosyaId:source.id}}));
   assert.equal(JSON.parse(edited.application.measure_source).flatId,'tisorton');assert.ok(Math.abs(edited.application.width_mm-240)<=5);
 });
@@ -177,4 +177,70 @@ test('G24b large type, script marks and filled cover rectangles are not products
     else {x.strokeStyle='#253252';x.lineWidth=30;x.beginPath();x.moveTo(70,350);x.bezierCurveTo(150,50,350,500,530,130);x.bezierCurveTo(540,430,150,220,100,450);x.stroke();}
     assert.equal(auto.silhouette(await auto.raster({buffer:c.toBuffer('image/png'),mime:'image/png'})),null,kind);
   }
+});
+
+const {multiMockup}=require('./fixtures/siparis/oto-multi');
+const hoodieFlat={...flat,olculerL:{omuzdan_boy:71,etek:52,gogus:61,tum_omuz:61.5}};
+test('G24c two views without a design exclude lining, cords, piping and pocket; order is irrelevant',async()=>{
+  for(const swap of [false,true])for(const position of ['gogus','sirt']) {
+    const r=await auto.autoMeasure(input(multiMockup({swap}),{design:null,flat:hoodieFlat,product:'sweat',position}));
+    const front=position==='gogus',b=r.measure_source.designBoxPx;
+    assert.equal(r.measure_source.method,'otomatik_renk');assert.equal(r.measure_source.views.length,2);
+    assert.equal(r.measure_source.selectedView,front?'on':'arka');
+    assert.ok(Math.abs(b.x-(front?(swap?845:305):(swap?202:742)))<=2,JSON.stringify(r));
+    assert.ok(Math.abs(b.y-235)<=2);assert.ok(Math.abs(b.w-(front?70:135))<=2);assert.ok(Math.abs(b.h-(front?40:60))<=2);
+    assert.ok(Math.abs(r.width_mm-(front?140:270))<=3,JSON.stringify(r));
+    assert.ok(Math.abs(r.height_mm-(front?80:120))<=3,JSON.stringify(r));
+    assert.equal(r.measure_source.shoulderY,150);assert.ok(r.measure_source.viewScaleDifference<.05);
+    assert.ok(Math.abs(r.measure_source.mmPerPx-2)<.03);
+  }
+});
+test('G24c unknown views and competing prints never invent a placement; empty garments have no print',async()=>{
+  for(const options of [{ambiguous:true},{repeated:true},{missing:true}]) {
+    const r=await auto.autoMeasure(input(multiMockup(options),{design:null,flat:hoodieFlat,product:'sweat'}));
+    assert.equal(r.needs_confirmation,true,JSON.stringify(r));assert.equal(r.width_mm,null,JSON.stringify(r));
+    if(options.ambiguous)assert.match(r.reason,/görünüm teyit/);
+    if(options.repeated)assert.match(r.reason,/yerleşim teyit/);
+  }
+});
+test('G24c touching lower sleeves split only from independent upper bodies',async()=>{
+  for(const position of ['gogus','sirt']) {
+    const r=await auto.autoMeasure(input(multiMockup({touching:true}),{design:null,flat:hoodieFlat,product:'sweat',position}));
+    assert.equal(r.measure_source.views.length,2,JSON.stringify(r));
+    assert.ok(r.measure_source.views.every(v=>v.view!=='teyit'),JSON.stringify(r));
+    assert.ok(Math.abs(r.width_mm-(position==='gogus'?140:270))<=3,JSON.stringify(r));
+    assert.ok(Math.abs(r.measure_source.designBoxPx.x-(position==='gogus'?305:582))<=2);
+    assert.ok(r.measure_source.viewScaleDifference<.05);
+  }
+});
+test('G24c view scale differences above 5% and axis differences above 15% require confirmation',async()=>{
+  const scaled=await auto.autoMeasure(input(multiMockup({backScale:.82}),{design:null,flat:hoodieFlat,product:'sweat',position:'sirt'}));
+  assert.ok(scaled.measure_source.viewScaleDifference>.05);assert.match(scaled.reason,/%5/);assert.equal(scaled.needs_confirmation,true);
+  const m=mockup(),within=await auto.autoMeasure(input(m,{flat:{...flat,olculerL:{omuzdan_boy:102,etek:60}}}));
+  assert.ok(within.measure_source.scaleDifference>.08&&within.measure_source.scaleDifference<.15);
+  assert.equal(within.needs_confirmation,false,JSON.stringify(within));
+  assert.equal(within.measure_source.mmPerPx,(within.measure_source.verticalMmPerPx+within.measure_source.horizontalMmPerPx)/2);
+});
+test('G24c mismatched and unreadable design files fall back to compact color ink',async()=>{
+  const m=multiMockup();
+  for(const design of [{buffer:mockup().design,mime:'image/png'},{buffer:Buffer.from('invalid'),mime:'image/png'}]) {
+    const r=await auto.autoMeasure(input(m,{design,flat:hoodieFlat,product:'sweat',position:'sirt'}));
+    assert.equal(r.measure_source.method,'otomatik_renk',JSON.stringify(r));assert.ok(Math.abs(r.width_mm-270)<=3,JSON.stringify(r));
+  }
+});
+test('G24c API uploads the same two-view hoodie for both applications without a design and preserves manual edits',async t=>{
+  const f=await fixture(t),o=await f.order({lines:[{product_key:'sweat',quantity:1,sizes:{L:1}}]}),v=o.version.id,line=o.version.lines[0],m=multiMockup();
+  addFlat(f,'sweat');f.db.prepare('UPDATE document_flats SET olculerL=?').run(JSON.stringify(hoodieFlat.olculerL));
+  for(const view of ['on','arka'])ok(await f.upload(v,{kind:'urun_gorsel',lineId:line.id,gorunum:view,buffer:m.image}),201);
+  const apps=[];
+  for(const [kind,position,width] of [['nakis','gogus',140],['baski','sirt',270]]) {
+    const app=ok(await f.post(`/satirlar/${line.id}/uygulamalar`,{kind,position}),201);apps.push(app);
+    assert.ok(Math.abs(app.width_mm-width)<=3,JSON.stringify(app));assert.equal(JSON.parse(app.measure_source).method,'otomatik_renk');
+    assert.equal(JSON.parse(app.measure_source).desenFileId,null);
+  }
+  assert.equal(f.db.prepare("SELECT count(*) n FROM files WHERE kind='desen_kaynak'").get().n,0);
+  assert.equal(ok(await f.post(`/surumler/${v}/otomatik-olc`)).results.length,2);
+  ok(await f.request(`/uygulamalar/${apps[0].id}`,{method:'PATCH',token:f.token,body:{width_mm:155,height_mm:85}}));
+  assert.equal(ok(await f.post(`/surumler/${v}/otomatik-olc`)).results.length,1);
+  assert.equal(f.db.prepare('SELECT width_mm FROM applications WHERE id=?').get(apps[0].id).width_mm,155);
 });
