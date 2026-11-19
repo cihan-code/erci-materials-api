@@ -158,6 +158,12 @@ async function upload(db, dataDir, versionId, input, file, user) {
   return saved;
 }
 function measure(db, dataDir, input, user, applicationId = null) {
+  const result=measureNow(db,dataDir,input,user,applicationId);
+  const versionId=result?.application && db.prepare('SELECT version_id FROM order_lines WHERE id=?').get(result.application.line_id)?.version_id;
+  if (versionId) requalifyVersion(db,dataDir,versionId,user);
+  return result;
+}
+function measureNow(db, dataDir, input, user, applicationId = null) {
   assertUser(db,user.id);
   if (!input || typeof input!=='object' || Array.isArray(input)) fail('Ölçü gövdesi nesne olmalı');
   if (!POSITIONS.includes(input.position)) fail('Geçersiz uygulama konumu');
@@ -416,7 +422,7 @@ function autoInputs(db,v,line,app) {
   const flat=requested ? productFlats.find(f=>f.id===requested)??null : candidates.length===1?candidates[0]:null;
   return {image,design,flat,product:line.product_key,position:app.position};
 }
-function autoFingerprint(app,input) {return JSON.stringify({app,input});}
+function autoFingerprint({desenDosyaId,...app},input) {return JSON.stringify({app,input});}
 
 async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,changedOnly=false) {
   assertUser(db,user.id);draft(db,versionId);unlocked(db,versionId);
@@ -459,7 +465,7 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
       });
     }
     return {results};
-  });
+  }).then(r=>{requalifyVersion(db,dataDir,versionId,user);return r;});
 }
 async function addApplication(db,dataDir,lineId,input,user) {
   const app=tx(db,()=> {
@@ -620,10 +626,58 @@ function queuePreview(db,dataDir,file,user) {
   pending.add(task);
   return task;
 }
+// Once an application has a size, a preview that waited for it ('beklemede') is judged
+// against that target. Runs in the background on the shared render queue.
+function requalifyVersion(db,dataDir,versionId,user) {
+  const task=(async()=> {
+    try {
+      const rows=db.prepare(`SELECT a.id,a.kind,a.width_mm,a.height_mm,s.file_id FROM applications a
+        JOIN order_lines l ON l.id=a.line_id JOIN document_application_sources s ON s.application_id=a.id
+        JOIN document_vector_previews p ON p.source_file_id=s.file_id
+        WHERE l.version_id=? AND a.width_mm IS NOT NULL AND a.height_mm IS NOT NULL AND p.status IN ('hazir','teyit')`).all(versionId);
+      for (const a of rows) {
+        const qualityOf=r=> { try { return JSON.parse(r?.report_json||'{}').quality; } catch { return null; } };
+        const row=db.prepare('SELECT * FROM document_vector_previews WHERE source_file_id=?').get(a.file_id);
+        if (qualityOf(row)!=='beklemede') continue;
+        const targetMm={w:a.width_mm,h:a.height_mm};
+        const result=await renderQueue(async signal=> {
+          const v=orders.snapshot(db,versionId),source=v.files.find(f=>f.id===a.file_id && SOURCE_KINDS.includes(f.kind));
+          const prev=source && readyPreview(db,dataDir,v,source);
+          if (!prev || prev.report.quality!=='beklemede') return null;
+          const original=await vectorInput(dataDir,source);
+          if (!['image/png','image/jpeg','image/jpg'].includes(original.mime)) return null;
+          return generateInChild({type:'vector',input:{manualVector:true,buffer:prev.buffer,mime:'application/pdf',targetMm,applicationType:a.kind,
+            qualitySource:{...original,metrics:prev.report.rasterQuality}}},signal);
+        });
+        if (!result) continue;
+        tx(db,()=> {
+          const cur=db.prepare('SELECT * FROM document_vector_previews WHERE source_file_id=?').get(a.file_id);
+          const app=db.prepare('SELECT width_mm,height_mm FROM applications WHERE id=?').get(a.id);
+          // Skip if the preview, the source link or the size changed while rendering.
+          if (!cur || cur.preview_file_id!==row.preview_file_id || qualityOf(cur)!=='beklemede' || !app || app.width_mm!==a.width_mm || app.height_mm!==a.height_mm) return;
+          if (db.prepare('SELECT file_id FROM document_application_sources WHERE application_id=?').get(a.id)?.file_id!==a.file_id) return;
+          const report={...result.report,targetMm};
+          const open=db.prepare("SELECT id FROM confirmations WHERE kind='vektor_kalite' AND ref_table='files' AND ref_id=? AND status='acik'").get(cur.preview_file_id);
+          if (report.quality==='teyit' && !open) db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('vektor_kalite','files',?,?)")
+            .run(cur.preview_file_id,`Vektör kalitesi görsel teyit gerektiriyor: ${JSON.stringify(report)}`);
+          if (report.quality==='iyi') db.prepare("UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='vektor_kalite' AND ref_table='files' AND ref_id=? AND status='acik'").run(user.id,cur.preview_file_id);
+          db.prepare("UPDATE document_vector_previews SET status=?,report_json=?,updated_at=? WHERE source_file_id=?")
+            .run(report.quality==='teyit'?'teyit':'hazir',JSON.stringify(report),Date.now(),a.file_id);
+        });
+      }
+    } catch {}
+  })().finally(()=>pending.delete(task));
+  pending.add(task);
+  return task;
+}
 function vectorStatus(db,versionId) {
   return db.prepare(`SELECT p.source_file_id AS sourceFileId,p.preview_file_id AS previewFileId,p.status,p.message,p.report_json
     FROM document_vector_previews p JOIN files f ON f.id=p.source_file_id WHERE f.version_id=? ORDER BY p.source_file_id`).all(versionId)
-    .map(({report_json,...r})=>({...r,quality:report_json ? JSON.parse(report_json).quality ?? null : null}));
+    .map(({report_json,...r})=> {
+      const report=report_json ? JSON.parse(report_json) : {};
+      return {...r,quality:report.quality ?? null,reasons:Array.isArray(report.reasons) ? report.reasons : [],
+        ...(report.targetMm ? {targetMm:report.targetMm} : {})};
+    });
 }
 const settled=()=>Promise.all([...pending]);
 function workshopPackage(db,versionId) {

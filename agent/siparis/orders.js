@@ -19,8 +19,12 @@ function snapshot(db, versionId) {
   const filesSql = hasFileMeta
     ? 'SELECT f.*,m.line_id,m.gorunum FROM files f LEFT JOIN document_file_meta m ON m.file_id=f.id WHERE f.version_id=? ORDER BY f.id'
     : 'SELECT * FROM files WHERE version_id=? ORDER BY id';
+  const hasSources = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_application_sources'").get();
+  const appsSql = hasSources
+    ? 'SELECT a.*,(SELECT s.file_id FROM document_application_sources s WHERE s.application_id=a.id) AS desenDosyaId FROM applications a WHERE a.line_id=? ORDER BY a.id'
+    : 'SELECT * FROM applications WHERE line_id=? ORDER BY id';
   return { ...v, lines: db.prepare('SELECT * FROM order_lines WHERE version_id=? ORDER BY id').all(versionId).map(l => ({
-    ...l, applications: db.prepare('SELECT * FROM applications WHERE line_id=? ORDER BY id').all(l.id)
+    ...l, applications: db.prepare(appsSql).all(l.id).map(a => ({ ...a, desenDosyaId: a.desenDosyaId ?? null }))
   })), files: db.prepare(filesSql).all(versionId) };
 }
 function insertApplication(db, lineId, app) {
