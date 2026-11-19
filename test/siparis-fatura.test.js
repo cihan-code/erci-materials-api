@@ -377,3 +377,64 @@ test('A14: panel creates fabric items under the invoice key, edits only labels, 
   const [matched] = invoices.ingest(f.db, { lines: [line(1, 'Gri melanj şardonlu 3 iplik 5 kg', 5)] });
   assert.equal(f.db.prepare('SELECT item_id FROM invoice_lines WHERE id=?').get(matched.id).item_id, item.id, 'invoices land on the panel item');
 });
+
+test('G13a-1: a resend that confirms delivery is delivered; a corrected purchaseRef re-matches', async t => {
+  const f = await setup(t, { fabrics: [black, pink] });
+  const ks = 'sardonlu_3_iplik|siyah';
+  const a = f.order([{ product_key: 'sweat', fabric_item_id: f.item(ks), color_name: 'Siyah', quantity: 20 }]);
+  const b = f.order([{ product_key: 'sweat', fabric_item_id: f.item(ks), color_name: 'Siyah', quantity: 20 }]);
+  const send = extra => invoices.ingest(f.db, { source: 'finans-ajani', lines: [line(1, 'Siyah şardonlu 3 iplik 5 kg', 5, extra)] })[0];
+  assert.equal(send().matchStatus, 'teyit', 'two orders wait for the same fabric');
+  const fixed = send({ purchaseRef: 'MRC-T002' });
+  assert.deepEqual([fixed.status, fixed.matchStatus], ['guncellendi', 'eslesti']);
+  assert.equal(f.db.prepare('SELECT purchase_ref FROM invoice_lines WHERE id=?').get(fixed.id).purchase_ref, 'MRC-T002');
+  const delivered = send({ purchaseRef: 'MRC-T002', deliveryConfirmed: true });
+  assert.deepEqual([delivered.status, delivered.deliveryStatus], ['ayni', 'teslim_alindi']);
+  assert.deepEqual([f.alloc(a.lineIds[0]), f.alloc(b.lineIds[0])], [{ r: 0, s: 7000 }, { r: 5000, s: 2000 }]);
+  assert.equal(send({ purchaseRef: 'MRC-T002', deliveryConfirmed: true }).status, 'ayni');
+  assert.equal(f.db.prepare("SELECT count(*) n FROM stock_movements WHERE type='giris'").get().n, 1);
+});
+
+test('G13a-1: a delivery confirmed on a stale suggestion is not guessed; it waits for the team', async t => {
+  const f = await setup(t, { fabrics: [black] });
+  const ks = 'sardonlu_3_iplik|siyah';
+  const a = f.order([{ product_key: 'sweat', fabric_item_id: f.item(ks), color_name: 'Siyah', quantity: 20 }]);
+  const send = extra => invoices.ingest(f.db, { source: 'finans-ajani', lines: [line(1, 'Siyah şardonlu 3 iplik 5 kg', 5, extra)] })[0];
+  assert.equal(send().matchStatus, 'eslesti');
+  stock.recordCount(f.db, { itemId: f.item(ks), countedMilli: 6000, countKey: 'raf', userId: f.manager.id });
+  assert.deepEqual(f.alloc(a.lineIds[0]), { r: 6000, s: 1000 }, 'the need shrank after the match');
+  const late = send({ deliveryConfirmed: true });
+  assert.deepEqual([late.status, late.deliveryStatus], ['ayni', 'teslim_bekliyor']);
+  assert.match(late.reasons.join(' '), /öneri artık geçerli değil/);
+  assert.equal(f.db.prepare("SELECT count(*) n FROM confirmations WHERE kind='fatura_eslesme' AND ref_id=? AND status='acik'").get(late.id).n, 1);
+});
+
+test('G13a-3: one consumption key cannot be reused for another material of the same line', async t => {
+  const lined = { version: 'test-lined', products: { sweat: { materials: [{ key: 'kumas', g_per_unit: 350 }, { key: 'astar', g_per_unit: 50, when: 'lining' }] } } };
+  const f = await setup(t, { fabrics: [black], stockKg: { k1: 50 }, recipe: lined });
+  const item = f.item('sardonlu_3_iplik|siyah');
+  const o = f.order([{ product_key: 'sweat', fabric_item_id: item, quantity: 10, lining: true, material_items: { astar: item } }]);
+  const cut = { orderLineId: o.lineIds[0], materialKey: 'kumas', qtyMilli: 400, businessKey: 'kesim-1', userId: f.team.id };
+  const once = stock.consume(f.db, cut);
+  assert.deepEqual(stock.consume(f.db, cut), once);
+  assert.throws(() => stock.consume(f.db, { ...cut, materialKey: 'astar' }), e => e.status === 409);
+  assert.deepEqual(f.db.prepare('SELECT material_key m,consumed_milli c FROM allocations WHERE order_line_id=? ORDER BY id').all(o.lineIds[0]).map(x => [x.m, x.c]),
+    [['kumas', 400], ['astar', 0]]);
+});
+
+test('G13a-4: a second receipt of one invoice line must repeat the first distribution', async t => {
+  const f = await setup(t, { fabrics: [black] });
+  const ks = 'sardonlu_3_iplik|siyah';
+  const a = f.order([{ product_key: 'sweat', fabric_item_id: f.item(ks), color_name: 'Siyah', quantity: 20 }]);
+  const b = f.order([{ product_key: 'sweat', fabric_item_id: f.item(ks), color_name: 'Siyah', quantity: 20 }]);
+  const [r] = invoices.ingest(f.db, { source: 'finans-ajani', lines: [line(1, 'Siyah şardonlu 3 iplik 4 kg', 4)] });
+  const plan = [{ orderLineId: b.lineIds[0], qtyMilli: 3000 }, { orderLineId: a.lineIds[0], qtyMilli: 1000 }];
+  const first = invoices.deliver(f.db, r.id, { itemId: f.item(ks), allocations: plan }, f.team.id);
+  assert.deepEqual(invoices.deliver(f.db, r.id, { itemId: f.item(ks), allocations: [...plan].reverse() }, f.team.id).movement, first.movement);
+  assert.deepEqual(invoices.deliver(f.db, r.id, {}, f.team.id).movement, first.movement, 'no body repeats what was done');
+  assert.throws(() => invoices.deliver(f.db, r.id, { itemId: f.item(ks), allocations: [{ orderLineId: a.lineIds[0], qtyMilli: 4000 }] }, f.team.id), e => e.status === 409);
+  const line2 = f.db.prepare('SELECT * FROM invoice_lines WHERE id=?').get(r.id);
+  assert.throws(() => stock.receiveDelivery(f.db, { invoiceLineId: line2.id, itemId: f.item(ks), qtyMilli: 4000, userId: f.team.id }), e => e.status === 409,
+    'FIFO is a different distribution than the explicit one');
+  assert.deepEqual([f.alloc(a.lineIds[0]), f.alloc(b.lineIds[0])], [{ r: 1000, s: 6000 }, { r: 3000, s: 4000 }]);
+});

@@ -18,10 +18,21 @@ function available(db, itemId) {
   if (!row) fail('Stok kalemi bulunamadı', 404);
   return row.available_milli;
 }
-function movement(db, { itemId, type, qtyMilli, orderLineId = null, invoiceLineId = null, businessKey, userId = null, note = null }) {
+function movement(db, { itemId, type, qtyMilli, orderLineId = null, invoiceLineId = null, businessKey, userId = null, note = null, allocationId = null }) {
   integer(qtyMilli, 'qtyMilli', ['duzeltme','acilis'].includes(type) ? -Number.MAX_SAFE_INTEGER : 1);
-  return Number(db.prepare(`INSERT INTO stock_movements(item_id,type,qty_milli,order_line_id,invoice_line_id,business_key,created_by,note)
-    VALUES(?,?,?,?,?,?,?,?)`).run(itemId, type, qtyMilli, orderLineId, invoiceLineId, businessKey, userId, note).lastInsertRowid);
+  return Number(db.prepare(`INSERT INTO stock_movements(item_id,type,qty_milli,order_line_id,invoice_line_id,business_key,created_by,note,allocation_id)
+    VALUES(?,?,?,?,?,?,?,?,?)`).run(itemId, type, qtyMilli, orderLineId, invoiceLineId, businessKey, userId, note, allocationId).lastInsertRowid);
+}
+// One receipt per invoice line: the distribution asked for the first time is part of the idempotent payload.
+function deliveryRequest(allocations) {
+  if (allocations === undefined) return JSON.stringify({ mode: 'fifo' });
+  if (!Array.isArray(allocations)) fail('allocations listesi gerekli');
+  return JSON.stringify({ mode: 'explicit', allocations: allocations.map(e => [Number(e?.orderLineId), e?.qtyMilli])
+    .sort((x, y) => x[0] - y[0] || x[1] - y[1]) });
+}
+function storedAllocations(json) {
+  const r = json ? JSON.parse(json) : null;
+  return r?.mode === 'explicit' ? r.allocations.map(([orderLineId, qtyMilli]) => ({ orderLineId, qtyMilli })) : undefined;
 }
 function openShortages(db, itemId) {
   return db.prepare(`SELECT a.* FROM allocations a JOIN order_lines l ON l.id=a.order_line_id
@@ -109,8 +120,11 @@ function recordCount(db, { itemId, countedMilli, countKey, userId, note = null }
 function receive(db, { invoiceLineId, itemId, qtyMilli, allocations, userId = null }) {
   const businessKey = `giris:${invoiceLineId}`;
   const existing = db.prepare('SELECT * FROM stock_movements WHERE business_key=?').get(businessKey);
+  const request = deliveryRequest(allocations);
   if (existing) {
     if (existing.item_id !== itemId || existing.qty_milli !== qtyMilli) fail('Bu fatura satırı başka bir kalem veya miktarla teslim alınmış', 409);
+    const first = db.prepare('SELECT delivery_request_json r FROM invoice_lines WHERE id=?').get(invoiceLineId)?.r;
+    if (first && first !== request) fail('Bu fatura satırı başka bir dağıtımla teslim alınmış', 409);
     return existing;
   }
   integer(qtyMilli, 'qtyMilli', 1);
@@ -151,8 +165,8 @@ function receive(db, { invoiceLineId, itemId, qtyMilli, allocations, userId = nu
     const g = given.get(t.row.id) || { orderLineId: t.row.order_line_id, materialKey: t.row.material_key, qtyMilli: 0 };
     g.qtyMilli += t.qty; given.set(t.row.id, g);
   }
-  db.prepare("UPDATE invoice_lines SET delivery_status='teslim_alindi',match_status='eslesti',item_id=?,allocation_json=? WHERE id=?")
-    .run(itemId, JSON.stringify([...given.values()]), invoiceLineId);
+  db.prepare("UPDATE invoice_lines SET delivery_status='teslim_alindi',match_status='eslesti',item_id=?,allocation_json=?,delivery_request_json=? WHERE id=?")
+    .run(itemId, JSON.stringify([...given.values()]), request, invoiceLineId);
   audit(db, userId, 'teslim_al', invoiceLineId, { itemId, qtyMilli, allocatedMilli: qtyMilli-remaining });
   return db.prepare('SELECT * FROM stock_movements WHERE id=?').get(id);
 }
@@ -183,12 +197,15 @@ function consume(db, { orderLineId, materialKey, qtyMilli, businessKey, userId }
     const existing = db.prepare('SELECT * FROM stock_movements WHERE business_key=?').get(key);
     const a = db.prepare('SELECT * FROM allocations WHERE order_line_id=? AND material_key=?').get(orderLineId, materialKey);
     if (existing) {
-      if (existing.order_line_id !== orderLineId || existing.qty_milli !== qtyMilli || existing.item_id !== a?.item_id)
+      // Fabric and lining of one line may sit on the same item, so the allocation (material) is part of the payload.
+      const sameAllocation = existing.allocation_id != null ? existing.allocation_id === a?.id
+        : JSON.parse(db.prepare("SELECT detail_json d FROM audit_log WHERE action='stok_cikis' AND ref=?").get(String(existing.id))?.d || '{}').materialKey === materialKey;
+      if (existing.order_line_id !== orderLineId || existing.qty_milli !== qtyMilli || existing.item_id !== a?.item_id || !sameAllocation)
         fail('İşlem anahtarı farklı bir çıkış için kullanılmış', 409);
       return existing;
     }
     if (!a || a.reserved_milli < qtyMilli) fail('Yeterli tahsis yok', 409);
-    const id = movement(db, { itemId: a.item_id, type: 'cikis', qtyMilli, orderLineId, businessKey: key, userId });
+    const id = movement(db, { itemId: a.item_id, type: 'cikis', qtyMilli, orderLineId, businessKey: key, userId, allocationId: a.id });
     db.prepare('UPDATE allocations SET reserved_milli=reserved_milli-?,consumed_milli=consumed_milli+? WHERE id=?').run(qtyMilli, qtyMilli, a.id);
     audit(db, userId, 'stok_cikis', id, { orderLineId, materialKey, qtyMilli }); return db.prepare('SELECT * FROM stock_movements WHERE id=?').get(id);
   });
@@ -247,5 +264,5 @@ function updateStockItem(db, id, changes = {}, userId) {
     return db.prepare('SELECT * FROM stock_items WHERE id=?').get(id);
   });
 }
-module.exports = { stockSummary, stockView, available, movement, fillShortages, importLegacyFabrics, recordCount, receive, receiveDelivery,
+module.exports = { storedAllocations, stockSummary, stockView, available, movement, fillShortages, importLegacyFabrics, recordCount, receive, receiveDelivery,
   adjustStock, consume, createStockItem, updateStockItem };
