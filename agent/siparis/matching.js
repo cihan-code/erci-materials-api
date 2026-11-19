@@ -11,15 +11,18 @@ const FABRICS = [
   { key: 'sardonlu_3_iplik', aliases: ['sardonlu 3 iplik', 'sardonlu uc iplik', '3 iplik sardonlu', 'uc iplik sardonlu'] },
   { key: 'sardonsuz_3_iplik', aliases: ['sardonsuz 3 iplik', 'sardonsuz uc iplik', '3 iplik sardonsuz', 'uc iplik sardonsuz'] },
   { key: 'lakost', aliases: ['lakost', 'lacoste', 'lakost pike', 'lacoste pike', 'pike lakost'] },
-  { key: 'supren_30_1', aliases: ['supren 30/1', 'suprem 30/1', '30/1 suprem', '30/1 supren'] },
   { key: 'kaskorse', aliases: ['kaskorse', 'kas korse'] },
-  { key: 'ribana', aliases: ['ribana'] },
   { key: 'astar', aliases: ['astar'] },
-  { key: 'penye', aliases: ['penye'] },
 ];
-// Partial fabric names ("3 iplik", "süprem" without yarn count): seen outside a full alias they leave the type open.
-const FABRIC_HINTS = new Set(['iplik', 'sardonlu', 'sardonsuz', 'suprem', 'supren', 'pike', 'interlok', 'kase', 'scuba',
-  'dalgic', 'selanik', 'jarse', 'polar', 'likra', 'likrali', 'elastan', 'elastanli']);
+// Knit fabrics are built rather than listed: base + yarn count + stretch, e.g. supren_30_1, ribana_30_1_likrali.
+// "Penye" (combed yarn) and "örme" (knitted) only describe a knit; süprem without a yarn count stays open.
+const KNIT_BASES = { suprem: 'supren', supren: 'supren', ribana: 'ribana', interlok: 'interlok' };
+const COUNT_REQUIRED = new Set(['supren']);
+const STRETCH_WORDS = new Set(['likra', 'likrali', 'elastan', 'elastanli']);
+const FIBERS = new Set(['pamuk', 'polyester', 'poliester', 'elastan', 'likra', 'viskon', 'modal', 'lyocell', 'akrilik', 'yun', 'keten']);
+// Partial fabric names ("3 iplik", "penye" alone, "likralı" without a knit): left over they leave the type open.
+const FABRIC_HINTS = new Set(['iplik', 'sardonlu', 'sardonsuz', 'suprem', 'supren', 'ribana', 'penye', 'pike', 'interlok', 'kase',
+  'scuba', 'dalgic', 'selanik', 'jarse', 'polar', 'likra', 'likrali', 'elastan', 'elastanli']);
 const COLORS = [
   { key: 'siyah', label: 'siyah', aliases: ['siyah'] },
   { key: 'beyaz', label: 'beyaz', aliases: ['beyaz'] },
@@ -45,6 +48,13 @@ const COLORS = [
   { key: 'bej', label: 'bej', aliases: ['bej'] },
   { key: 'fume', label: 'füme', aliases: ['fume'] },
   { key: 'indigo', label: 'indigo', aliases: ['indigo'] },
+  { key: 'murdum', label: 'mürdüm', aliases: ['murdum'] },
+  { key: 'hardal', label: 'hardal', aliases: ['hardal'] },
+  { key: 'kiremit', label: 'kiremit', aliases: ['kiremit'] },
+  { key: 'vizon', label: 'vizon', aliases: ['vizon'] },
+  { key: 'tas', label: 'taş', aliases: ['tas'] },
+  { key: 'acik_gri', label: 'açık gri', aliases: ['acik gri'] },
+  { key: 'koyu_gri', label: 'koyu gri', aliases: ['koyu gri'] },
 ];
 // A shade word next to a dictionary colour ("koyu lacivert") names a different stock item.
 const COLOR_PRE = new Set(['acik', 'koyu', 'neon', 'pastel']);
@@ -53,7 +63,7 @@ const UNITS = { kg: 'kg', kgs: 'kg', kilo: 'kg', kilogram: 'kg', g: 'g', gr: 'g'
   m: 'm', mt: 'm', mtr: 'm', metre: 'm', adet: 'adet', ad: 'adet' };
 // Supplier-invoice noise that says nothing about which fabric item it is (packaging, width, grammage, units).
 // Any other unread word makes the line 'teyit': it may be a shade or variant ("petrol mavi"). Listed in README.
-const FILLER = new Set(['kumas', 'kumasi', 'renk', 'rengi', 'top', 'rulo', 've', 'ile', 'x', 'adet', 'ad', 'en', 'boy',
+const FILLER = new Set(['kumas', 'kumasi', 'orme', 'yuzde', 'renk', 'rengi', 'top', 'rulo', 've', 'ile', 'x', 'adet', 'ad', 'en', 'boy',
   'g', 'gr', 'gram', 'gramaj', 'gsm', 'gr/m', 'g/m', 'kg', 'kilo', 'm', 'mt', 'metre', 'cm', 'mm']);
 const SWEAT_FABRIC = 'sardonlu_3_iplik';
 const PRODUCT_DEFAULTS = { sweat: SWEAT_FABRIC, sweatshirt: SWEAT_FABRIC, hoodie: SWEAT_FABRIC, kapusonlu: SWEAT_FABRIC,
@@ -64,7 +74,8 @@ function fold(text) {
     .normalize('NFD').replace(/[̀-ͯ]/g, '');
 }
 function tokens(text) {
-  return fold(text).replace(/[×*]/g, ' x ')
+  return fold(text).replace(/[×*]/g, ' x ').replace(/%/g, ' yuzde ')
+    .replace(/(suprem|supren|ribana|interlok)orme/g, '$1 orme')
     .replace(/(\d)\s*\/\s*(\d)/g, '$1/$2')
     .replace(/(\d)([a-z])/g, '$1 $2').replace(/([a-z])(\d)/g, '$1 $2')
     .replace(/[^a-z0-9/.,]+/g, ' ')
@@ -107,9 +118,13 @@ function parseNumber(tok) {
   return Number(int + '.' + frac);
 }
 
+// A type written in words ("30/1 likralı ribana") gets the same key the invoice parser builds.
 function typeKey(text) {
   const phrase = tokens(text).join(' ');
-  return phrase ? FABRIC_ALIAS.get(phrase) || slug(text) || null : null;
+  if (!phrase) return null;
+  const p = parseInvoiceDescription(phrase);
+  if (p.fabricType && !p.colorKey && !p.unknownWords.length && !p.issues.some(i => i.field === 'fabricType')) return p.fabricType;
+  return FABRIC_ALIAS.get(phrase) || slug(text) || null;
 }
 function colorKey(name) {
   const phrase = tokens(name).join(' ');
@@ -133,15 +148,53 @@ function defaultFabricFor(productKey) {
   return k.split('_').some(w => w === 'sweat' || w === 'sweatshirt') ? SWEAT_FABRIC : null;
 }
 
+// "%95 pamuk %5 elastan" says nothing about which item it is, except that elastane makes it a stretch fabric.
+function readComposition(toks, used) {
+  const parts = [];
+  toks.forEach((t, i) => {
+    const pct = t === 'yuzde' ? toks[i + 1] : toks[i + 1] === 'yuzde' ? t : null;
+    if (!/^\d{1,3}$/.test(pct || '') || !FIBERS.has(toks[i + 2]) || used[i] || used[i + 1] || used[i + 2]) return;
+    used[i] = used[i + 1] = used[i + 2] = true;
+    parts.push({ fiber: toks[i + 2], pct: Number(pct) });
+  });
+  return parts;
+}
+function readKnit(toks, used, composition) {
+  const index = test => toks.map((t, i) => (!used[i] && test(t) ? i : -1)).filter(i => i >= 0);
+  const bases = index(t => KNIT_BASES[t]);
+  if (!bases.length) return { type: null };
+  // "30 1" written apart is a yarn count only beside a knit word and not before a unit ("30 1 kg").
+  for (let i = 0; i + 1 < toks.length; i++)
+    if (!used[i] && !used[i + 1] && /^\d{2}$/.test(toks[i]) && toks[i + 1] === '1' && !UNITS[toks[i + 2]] &&
+        bases.some(b => b >= i - 3 && b <= i + 4)) { toks[i] += '/1'; toks[i + 1] = ''; used[i + 1] = true; }
+  const kinds = uniq(bases.map(i => KNIT_BASES[toks[i]]));
+  if (kinds.length > 1) return { issue: `Açıklamada birden çok kumaş türü var: ${kinds.join(', ')}.` };
+  const counts = index(t => /^\d{2}\/1$/.test(t)), written = uniq(counts.map(i => toks[i]));
+  if (written.length > 1) return { issue: `Açıklamada birden çok iplik numarası var: ${written.join(', ')}.` };
+  if (COUNT_REQUIRED.has(kinds[0]) && !written.length) return { issue: 'Süprem için iplik numarası yok (ör. 30/1).' };
+  const stretch = index(t => STRETCH_WORDS.has(t));
+  const elastaneInContent = composition.some(p => ['elastan', 'likra'].includes(p.fiber) && p.pct > 0);
+  if (stretch.length && composition.length && !elastaneInContent && composition.reduce((n, p) => n + p.pct, 0) === 100)
+    return { issue: 'İçerikte elastan yok ama likralı yazıyor.' };
+  for (const i of [...bases, ...counts, ...stretch, ...index(t => t === 'penye')]) used[i] = true;
+  return { type: kinds[0] + (written[0] ? '_' + written[0].replace('/', '_') : '') + (stretch.length || elastaneInContent ? '_likrali' : '') };
+}
+
 function parseInvoiceDescription(text) {
   const toks = tokens(text), used = toks.map(() => false), issues = [];
   const issue = (field, message) => issues.push({ field, message });
 
-  const fabrics = uniq(matchPhrases(toks, FABRIC_PHRASES, used).map(h => h.key));
+  const composition = readComposition(toks, used);
+  const knit = readKnit(toks, used, composition);
+  const fabrics = uniq([...matchPhrases(toks, FABRIC_PHRASES, used).map(h => h.key), knit.type]);
   const hints = toks.filter((t, i) => !used[i] && FABRIC_HINTS.has(t));
+  const stretchContent = composition.some(p => ['elastan', 'likra'].includes(p.fiber) && p.pct > 0);
   let fabricType = null;
-  if (fabrics.length > 1) issue('fabricType', `Açıklamada birden çok kumaş türü var: ${fabrics.join(', ')}.`);
+  if (knit.issue) issue('fabricType', knit.issue);
+  else if (fabrics.length > 1) issue('fabricType', `Açıklamada birden çok kumaş türü var: ${fabrics.join(', ')}.`);
   else if (hints.length) issue('fabricType', `Kumaş türü net değil: "${toks.filter(t => FABRIC_HINTS.has(t) || /\d\/\d/.test(t)).join(' ')}".`);
+  // Only knit keys carry stretch; elastane in another fabric would be an item the key cannot tell apart.
+  else if (stretchContent && fabrics[0] && !knit.type) issue('fabricType', `İçerikte elastan var; ${fabrics[0]} için likralı ayrımı yok.`);
   else fabricType = fabrics[0] || null;
 
   const colorHits = matchPhrases(toks, COLOR_PHRASES, used);

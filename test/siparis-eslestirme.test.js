@@ -216,5 +216,53 @@ test('G13a-2: an unread word blocks a match even when type and colour were found
   const ok = matchInvoiceLine({ line: line(noisy, { qtyMilli: 25000 }), openNeeds: needs });
   assert.deepEqual([ok.status, ok.fabricKey, ok.allocations], ['eslesti', 'sardonlu_3_iplik|siyah', [{ orderLineId: 2, qtyMilli: 25000 }]]);
   assert.deepEqual(parseInvoiceDescription('Siyah penye 1,5 metre en 160 cm 250 gr/m2 10 kg').unknownWords, []);
-  assert.equal(matchInvoiceLine({ line: line('Siyah %100 pamuk penye 10 kg', { qtyMilli: 10000 }), openNeeds: [] }).status, 'teyit', 'composition is not noise');
+  // Composition is noise (G16); this line stays teyit because "penye" alone names no fabric.
+  const combed = matchInvoiceLine({ line: line('Siyah %100 pamuk penye 10 kg', { qtyMilli: 10000 }), openNeeds: [] });
+  assert.equal(combed.status, 'teyit');
+  assert.match(said(combed), /Kumaş türü net değil: "penye"/);
+});
+
+test('G16: real invoice wording reads to knit keys; penye and örme describe, yarn count and stretch are part of the type', () => {
+  const a = '30/1 PENYE SÜPREM ÖRME KUMAŞ MÜRDÜM', b = '24/1 PENYE SÜPREMÖRME KUMAŞ BEYAZ', c = '30/1 PENYE LİKRALI RİBANA ÖRME KUMAŞ BEYAZ';
+  const read = t => { const p = parseInvoiceDescription(t); return [p.fabricType, p.colorKey, p.unknownWords, p.issues]; };
+  assert.deepEqual(read(a), ['supren_30_1', 'murdum', [], []]);
+  assert.deepEqual(read(b), ['supren_24_1', 'beyaz', [], []]);
+  assert.deepEqual(read(c), ['ribana_30_1_likrali', 'beyaz', [], []]);
+  assert.equal(parseInvoiceDescription(a).colorName, 'mürdüm');
+  const needs = [need(1, 'tisort', 'Mürdüm', 9000, { fabricKey: 'supren_30_1|murdum' }), need(2, 'tisort', 'Beyaz', 50000, { fabricKey: 'supren_30_1|beyaz' })];
+  const ra = matchInvoiceLine({ line: line(a, { qtyMilli: 7500 }), openNeeds: needs });
+  assert.deepEqual([ra.status, ra.fabricKey, ra.allocations], ['eslesti', 'supren_30_1|murdum', [{ orderLineId: 1, qtyMilli: 7500 }]]);
+  const rb = matchInvoiceLine({ line: line(b, { qtyMilli: 43800 }), openNeeds: needs });
+  assert.deepEqual([rb.status, rb.fabricKey, rb.allocations], ['eslesti', 'supren_24_1|beyaz', []], '24/1 never fills a 30/1 need');
+  const rc = matchInvoiceLine({ line: line(c, { qtyMilli: 2400 }), openNeeds: [need(3, 'tisort', 'Beyaz', 2400, { fabricKey: 'ribana_30_1_likrali|beyaz' })] });
+  assert.deepEqual([rc.status, rc.fabricKey, rc.unallocatedMilli], ['eslesti', 'ribana_30_1_likrali|beyaz', 0]);
+  assert.equal(fabricKey('30/1 likralı ribana', 'Beyaz'), 'ribana_30_1_likrali|beyaz', 'a panel item typed in words gets the invoice key');
+  assert.equal(fabricKey('supren_24_1', 'BEYAZ'), 'supren_24_1|beyaz');
+});
+
+test('G16: open or contradictory knit wording stays teyit', () => {
+  const type = t => parseInvoiceDescription(t).fabricType;
+  const issue = t => parseInvoiceDescription(t).issues.map(i => i.message).join(' ');
+  assert.equal(type('Siyah süprem 30 1 10 kg'), 'supren_30_1', '"30 1" written apart');
+  assert.equal(type('Beyaz penye 10 kg'), null);
+  assert.match(issue('Beyaz penye 10 kg'), /penye/);
+  assert.match(issue('Beyaz süprem örme kumaş 10 kg'), /iplik numarası yok/);
+  assert.match(issue('30/1 24/1 süprem beyaz'), /birden çok iplik numarası/);
+  assert.match(issue('30/1 süprem ribana beyaz'), /birden çok kumaş türü/);
+  assert.match(issue('Likralı lakost siyah'), /Kumaş türü net değil/);
+  assert.equal(type('%95 pamuk %5 elastan 30/1 ribana siyah'), 'ribana_30_1_likrali', 'elastane in the content agrees with likralı');
+  assert.equal(type('%95 pamuk %5 elastan 30/1 likralı ribana siyah'), 'ribana_30_1_likrali');
+  assert.match(issue('%100 pamuk likralı ribana siyah'), /elastan yok ama likralı/);
+  assert.match(issue('Lakost %95 pamuk %5 elastan siyah'), /likralı ayrımı yok/);
+  assert.deepEqual(parseInvoiceDescription('%100 pamuk 30/1 süprem siyah').unknownWords, []);
+  assert.deepEqual(parseInvoiceDescription('Siyah pamuklu süprem 30/1').unknownWords, ['pamuklu'], 'fibre words count only as a % content');
+  assert.equal(matchInvoiceLine({ line: line('Lakost petrol mavi 10 kg', { qtyMilli: 10000 }), openNeeds: [] }).status, 'teyit');
+});
+
+test('G16: added colours read as one key; shade words outside the dictionary still stop the line', () => {
+  const colour = t => parseInvoiceDescription(t).colorKey;
+  assert.deepEqual(['Ekru', 'HAKİ', 'hardal', 'İndigo', 'saks', 'Kiremit', 'vizon', 'TAŞ', 'füme', 'bebe mavi', 'Açık gri', 'koyu gri'].map(c => colour(`30/1 süprem ${c} 5 kg`)),
+    ['ekru', 'haki', 'hardal', 'indigo', 'saks_mavi', 'kiremit', 'vizon', 'tas', 'fume', 'bebe_mavi', 'acik_gri', 'koyu_gri']);
+  assert.equal(colour('30/1 süprem koyu lacivert 5 kg'), null);
+  assert.equal(colour('30/1 süprem mürdüm 5 kg'), 'murdum');
 });
