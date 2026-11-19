@@ -8,6 +8,7 @@ const { authFor, login } = require('./auth');
 const orders = require('./orders');
 const { approveVersion } = require('./approval');
 const stock = require('./stock');
+const { kartelaView } = require('./kartela');
 const outbox = require('./outbox');
 module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, recipes } = {}) {
   const db = suppliedDb || openDb(path.join(dataDir, 'siparis.sqlite'));
@@ -60,8 +61,9 @@ module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, r
   router.post('/surumler/:id/onay', requireUser('onay'), wrap((req,res) => res.json(approveVersion(db,{versionId:Number(req.params.id),fileId:req.body.fileId,userId:req.user.id,recipes}))));
   router.post('/surumler/:id/revizyon', wrap((req,res) => res.status(201).json(orders.reviseVersion(db,Number(req.params.id),req.body,req.user))));
   router.get('/stok', (req,res) => res.json(stock.stockView(db)));
+  router.get('/kartela', (req,res) => res.json(kartelaView()));
   router.post('/stok/kalemler', wrap((req,res) => {
-    try { res.status(201).json(stock.createStockItem(db,req.body,req.user.id)); }
+    try { const item = stock.createStockItem(db,req.body,req.user.id); res.status(item.mevcut ? 200 : 201).json(item); }
     catch (err) { if (err.item) return res.status(409).json({error:err.message,item:err.item}); throw err; }
   }));
   router.patch('/stok/kalemler/:id', wrap((req,res) => res.json(stock.updateStockItem(db,Number(req.params.id),req.body,req.user.id))));

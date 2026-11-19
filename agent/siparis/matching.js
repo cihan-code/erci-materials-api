@@ -60,6 +60,32 @@ const COLORS = [
   { key: 'tas', label: 'taş', aliases: ['tas'] },
   { key: 'acik_gri', label: 'açık gri', aliases: ['acik gri'] },
   { key: 'koyu_gri', label: 'koyu gri', aliases: ['koyu gri'] },
+  // Kartela colours (kartela.json). Only the written name is an alias, so each key stays the slug colorKey gave the
+  // same name before it was listed; listed light/dark shades are colours of their own.
+  { key: 'koyu_kirmizi', label: 'koyu kırmızı', aliases: ['koyu kirmizi'] },
+  { key: 'nar_cicegi', label: 'nar çiçeği', aliases: ['nar cicegi'] },
+  { key: 'fusya', label: 'fuşya', aliases: ['fusya'] },
+  { key: 'somon', label: 'somon', aliases: ['somon'] },
+  { key: 'turkuaz', label: 'turkuaz', aliases: ['turkuaz'] },
+  { key: 'petrol_mavi', label: 'petrol mavi', aliases: ['petrol mavi'] },
+  { key: 'petrol_yesili', label: 'petrol yeşili', aliases: ['petrol yesili'] },
+  { key: 'zumrut_yesili', label: 'zümrüt yeşili', aliases: ['zumrut yesili'] },
+  { key: 'fistik_yesili', label: 'fıstık yeşili', aliases: ['fistik yesili'] },
+  { key: 'su_yesili', label: 'su yeşili', aliases: ['su yesili'] },
+  { key: 'kuf_yesili', label: 'küf yeşili', aliases: ['kuf yesili'] },
+  { key: 'asker_yesili', label: 'asker yeşili', aliases: ['asker yesili'] },
+  { key: 'acik_yesil', label: 'açık yeşil', aliases: ['acik yesil'] },
+  { key: 'mint', label: 'mint', aliases: ['mint'] },
+  { key: 'zeytin', label: 'zeytin', aliases: ['zeytin'] },
+  { key: 'acik_haki', label: 'açık haki', aliases: ['acik haki'] },
+  { key: 'acik_sari', label: 'açık sarı', aliases: ['acik sari'] },
+  { key: 'acik_lila', label: 'açık lila', aliases: ['acik lila'] },
+  { key: 'koyu_vizon', label: 'koyu vizon', aliases: ['koyu vizon'] },
+  { key: 'antrasit_melanj', label: 'antrasit melanj', aliases: ['antrasit melanj'] },
+  { key: 'ten', label: 'ten', aliases: ['ten'] },
+  { key: 'krem', label: 'krem', aliases: ['krem'] },
+  { key: 'taba', label: 'taba', aliases: ['taba'] },
+  { key: 'karamel', label: 'karamel', aliases: ['karamel'] },
 ];
 // A shade word next to a dictionary colour ("koyu lacivert") names a different stock item.
 const COLOR_PRE = new Set(['acik', 'koyu', 'neon', 'pastel']);
@@ -67,7 +93,7 @@ const COLOR_POST = new Set(['melanj', 'tonu']);
 const UNITS = { kg: 'kg', kgs: 'kg', kilo: 'kg', kilogram: 'kg', g: 'g', gr: 'g', gram: 'g',
   m: 'm', mt: 'm', mtr: 'm', metre: 'm', adet: 'adet', ad: 'adet' };
 // Supplier-invoice noise that says nothing about which fabric item it is (packaging, width, grammage, units).
-// Any other unread word makes the line 'teyit': it may be a shade or variant ("petrol mavi"). Listed in README.
+// Any other unread word makes the line 'teyit': it may be a shade or variant ("gece mavi"). Listed in README.
 const FILLER = new Set(['kumas', 'kumasi', 'orme', 'yuzde', 'renk', 'rengi', 'top', 'rulo', 've', 'ile', 'x', 'adet', 'ad', 'en', 'boy',
   'g', 'gr', 'gram', 'gramaj', 'gsm', 'gr/m', 'g/m', 'kg', 'kilo', 'm', 'mt', 'metre', 'cm', 'mm']);
 const SWEAT_FABRIC = 'sardonlu_3_iplik';
@@ -135,6 +161,8 @@ function colorKey(name) {
   const phrase = tokens(name).join(' ');
   return phrase ? COLOR_ALIAS.get(phrase) || slug(name) || null : null;
 }
+// Dictionary colours only: unlike colorKey there is no slug fallback for an unlisted name.
+const dictionaryColorKey = name => COLOR_ALIAS.get(tokens(name).join(' ')) || null;
 // Same format as stock_items.fabric_key: "<type>|<colour>", both canonical ASCII slugs.
 function fabricKey(type, color) {
   const t = typeKey(type), c = colorKey(color);
@@ -288,7 +316,7 @@ function matchInvoiceLine({ line, openNeeds, purchaseAllocations } = {}) {
   if (issueOf('colorName') && !own.color && !colorKey(line.colorName)) return fail(issueOf('colorName').message);
   lineType = types[0] || null;
   lineColor = colors[0] || null;
-  // A word the dictionaries do not know may change the item ("petrol mavi" is not "mavi"); only a person's explicit
+  // A word the dictionaries do not know may change the item ("gece mavi" is not "mavi"); only a person's explicit
   // type and colour outrank it.
   if (parsed.unknownWords.length && !(own.type && (own.color || colorKey(line.colorName))))
     return fail(`Açıklamada tanınmayan sözcük var ("${parsed.unknownWords.join(' ')}"); kumaş ya da renk eksik okunmuş olabilir.`);
@@ -395,4 +423,4 @@ function matchInvoiceLine({ line, openNeeds, purchaseAllocations } = {}) {
   return { status: 'eslesti', fabricKey: key, allocations, unallocatedMilli: rest, reasons };
 }
 
-module.exports = { parseInvoiceDescription, fabricKey, defaultFabricFor, matchInvoiceLine, colorKey, splitFabricKey };
+module.exports = { parseInvoiceDescription, fabricKey, defaultFabricFor, matchInvoiceLine, colorKey, splitFabricKey, typeKey, dictionaryColorKey };

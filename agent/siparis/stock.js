@@ -2,6 +2,7 @@
 const { tx, audit, fail, integer } = require('./db');
 const { assertUser } = require('./auth');
 const { parseInvoiceDescription, fabricKey, splitFabricKey } = require('./matching');
+const { withKartela, resolveKartelaItem } = require('./kartela');
 function stockSummary(db) {
   return db.prepare(`SELECT s.*,
     COALESCE(m.total,0) AS total_milli, COALESCE(a.reserved,0) AS reserved_milli,
@@ -216,7 +217,7 @@ function stockView(db) {
   return stockSummary(db).map(row => {
     const view = { ...row };
     for (const f of MILLI_FIELDS) view[`${f}_kg`] = row.unit === 'kg' ? row[`${f}_milli`] / 1000 : null;
-    return view;
+    return withKartela(view);
   });
 }
 const HEX = /^#[0-9a-f]{6}$/i;
@@ -231,18 +232,29 @@ function itemHex(value) {
   return value.toLowerCase();
 }
 // New fabric item from the panel: the key comes from matching.fabricKey so invoices find the same item.
-function createStockItem(db, { tur, renk, ad, unit, colorNo, colorHex } = {}, userId) {
+// With kartelaNo the card defines colour, number, hex and name; an existing item under that key is returned as mevcut.
+function createStockItem(db, { tur, renk, ad, unit, colorNo, colorHex, kartelaNo } = {}, userId) {
   return tx(db, () => {
     assertUser(db, userId);
     if (!['kg','m','adet'].includes(unit)) fail("unit 'kg', 'm' veya 'adet' olmalı");
+    if (kartelaNo != null && kartelaNo !== '') {
+      if ([ad, colorNo, colorHex].some(v => v != null && v !== '')) fail('kartelaNo ile ad, colorNo ve colorHex gönderilmez; karteladan gelir');
+      const k = resolveKartelaItem({ tur, kartelaNo, renk });
+      const existing = db.prepare('SELECT * FROM stock_items WHERE fabric_key=?').get(k.fabricKey);
+      if (existing) return { ...withKartela(existing), mevcut: true };
+      const id = Number(db.prepare('INSERT INTO stock_items(fabric_key,name,color_name,color_no,unit,color_hex) VALUES(?,?,?,?,?,?)')
+        .run(k.fabricKey, k.name, k.renk.renk, String(k.renk.no), unit, k.renk.hex).lastInsertRowid);
+      audit(db, userId, 'stok_kalemi_olustur', id, { fabricKey: k.fabricKey, kartela: k.card.id, no: k.renk.no });
+      return withKartela(db.prepare('SELECT * FROM stock_items WHERE id=?').get(id));
+    }
     const key = fabricKey(itemText(tur, 'tur', 100), itemText(renk, 'renk', 100));
     if (!key) fail('Kumaş türü ve renk gerekli');
     const existing = db.prepare('SELECT * FROM stock_items WHERE fabric_key=?').get(key);
-    if (existing) { const e = new Error('Bu kumaş türü ve renk için kalem zaten var'); e.status = 409; e.item = existing; throw e; }
+    if (existing) { const e = new Error('Bu kumaş türü ve renk için kalem zaten var'); e.status = 409; e.item = withKartela(existing); throw e; }
     const id = Number(db.prepare('INSERT INTO stock_items(fabric_key,name,color_name,color_no,unit,color_hex) VALUES(?,?,?,?,?,?)')
       .run(key, itemText(ad, 'ad', 200) || splitFabricKey(key).type.replace(/_/g, ' '), renk.trim(), itemText(colorNo, 'colorNo', 50), unit, itemHex(colorHex)).lastInsertRowid);
     audit(db, userId, 'stok_kalemi_olustur', id, { fabricKey: key });
-    return db.prepare('SELECT * FROM stock_items WHERE id=?').get(id);
+    return withKartela(db.prepare('SELECT * FROM stock_items WHERE id=?').get(id));
   });
 }
 // Identity (type, colour, unit) stays fixed once stock and invoices point at the item; only labels change.
@@ -261,7 +273,7 @@ function updateStockItem(db, id, changes = {}, userId) {
     if (!next.name) fail('ad boş olamaz');
     db.prepare('UPDATE stock_items SET name=?,color_no=?,color_hex=? WHERE id=?').run(next.name, next.color_no, next.color_hex, id);
     audit(db, userId, 'stok_kalemi_duzenle', id, changes);
-    return db.prepare('SELECT * FROM stock_items WHERE id=?').get(id);
+    return withKartela(db.prepare('SELECT * FROM stock_items WHERE id=?').get(id));
   });
 }
 module.exports = { storedAllocations, stockSummary, stockView, available, movement, fillShortages, importLegacyFabrics, recordCount, receive, receiveDelivery,

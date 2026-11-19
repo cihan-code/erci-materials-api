@@ -6,13 +6,15 @@ const { StringDecoder } = require('string_decoder');
 const { openDb, tx, audit, fail } = require('./db');
 const { createUser, passwordHash } = require('./auth');
 const { importLegacyFabrics } = require('./stock');
+const { applyKartela } = require('./kartela');
 const USAGE = [
   'Kullanım: node agent/siparis/cli.js <komut>',
   '  kullanici-ekle <ad> <yonetici|ekip> [--onaysiz]',
   '  kullanici-listele',
   '  sifre-degistir <ad>            (terminalde gizli giriş; pipe/stdin ya da SIPARIS_SIFRE)',
   '  kullanici-onaysiz <ad> | kullanici-onayli <ad>',
-  '  eski-kumaslari-aktar [--kuru]'
+  '  eski-kumaslari-aktar [--kuru]',
+  '  kartela-uygula [--kuru]         (kartelalı kalemlere renk no, hex ve standart ad yazar)'
 ].join('\n');
 const dataDir = () => process.env.DATA_DIR || path.join(__dirname, '../../data');
 async function readPassword() {
@@ -89,11 +91,12 @@ function findUser(db, name) {
 async function main(argv = process.argv.slice(2)) {
   const [command, name, role, ...flags] = argv;
   const needsName = ['kullanici-ekle', 'sifre-degistir', 'kullanici-onaysiz', 'kullanici-onayli'];
-  if (!['kullanici-listele', 'eski-kumaslari-aktar', ...needsName].includes(command) || (needsName.includes(command) && !name)) throw new Error(USAGE);
+  const dryCapable = ['eski-kumaslari-aktar', 'kartela-uygula'];
+  if (!['kullanici-listele', ...dryCapable, ...needsName].includes(command) || (needsName.includes(command) && !name)) throw new Error(USAGE);
   if (command === 'kullanici-ekle' && (!['yonetici', 'ekip'].includes(role) || flags.some(f => !['--onay', '--onaysiz'].includes(f)) ||
       (flags.includes('--onay') && flags.includes('--onaysiz')))) throw new Error(USAGE);
-  if (command === 'eski-kumaslari-aktar' && [name, role, ...flags].some(a => a !== undefined && a !== '--kuru')) throw new Error(USAGE);
-  const dry = command === 'eski-kumaslari-aktar' && argv.includes('--kuru');
+  if (dryCapable.includes(command) && [name, role, ...flags].some(a => a !== undefined && a !== '--kuru')) throw new Error(USAGE);
+  const dry = dryCapable.includes(command) && argv.includes('--kuru');
   let legacy = null;
   if (command === 'eski-kumaslari-aktar') {
     const file = path.join(dataDir(), 'stok-data.json');
@@ -128,6 +131,13 @@ async function main(argv = process.argv.slice(2)) {
         audit(db, null, 'onay_yetkisi', u.id, { onayYetkisi: on, cli: true });
       });
       console.log(`Onay yetkisi ${on ? 'açıldı' : 'kapatıldı'}: ${String(name).trim()}`);
+    } else if (command === 'kartela-uygula') {
+      const result = applyKartela(db, { dry });
+      const label = { degisir: dry ? 'değişecek' : 'değişti', uygun: 'uygun', eslesmedi: 'eşleşmedi' };
+      if (dry) console.log('[KURU ÇALIŞTIRMA, hiçbir şey yazılmadı]');
+      console.log('id\tanahtar\tdurum\tayrıntı');
+      for (const r of result.rows) console.log(`${r.id}\t${r.fabricKey}\t${label[r.durum]}\t${r.neden || r.name}`);
+      console.log(`${dry ? 'Değişecek' : 'Değişen'} kalem: ${result.changed}; zaten uygun: ${result.unchanged}; eşleşmedi: ${result.unmatched}`);
     } else {
       const lastItem = db.prepare('SELECT COALESCE(MAX(id),0) m FROM stock_items').get().m;
       const lastConf = db.prepare('SELECT COALESCE(MAX(id),0) m FROM confirmations').get().m;

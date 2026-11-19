@@ -208,10 +208,11 @@ test('ambiguous candidates: near colour, need without fabric, unread fabric word
 
 test('G13a-2: an unread word blocks a match even when type and colour were found; listed supplier noise does not', () => {
   const needs = [need(1, 'polo', 'Mavi', 10000, { fabricKey: 'lakost|mavi' }), need(2, 'sweat', 'Siyah', 30000)];
-  const petrol = matchInvoiceLine({ line: line('Lakost petrol mavi 10 kg', { qtyMilli: 10000 }), openNeeds: needs });
+  // "petrol mavi" was the example here until G33 put it on the Lacoste card; "gece mavi" is still an unlisted shade.
+  const petrol = matchInvoiceLine({ line: line('Lakost gece mavi 10 kg', { qtyMilli: 10000 }), openNeeds: needs });
   assert.equal(petrol.status, 'teyit');
-  assert.match(said(petrol), /tanınmayan sözcük var \("petrol"\)/);
-  assert.deepEqual(parseInvoiceDescription('Lakost petrol mavi 10 kg').unknownWords, ['petrol']);
+  assert.match(said(petrol), /tanınmayan sözcük var \("gece"\)/);
+  assert.deepEqual(parseInvoiceDescription('Lakost gece mavi 10 kg').unknownWords, ['gece']);
   const noisy = 'Siyah şardonlu 3 iplik kumaş 2 top en 180 cm gramaj 300 gr 25 kg';
   assert.deepEqual(parseInvoiceDescription(noisy).unknownWords, []);
   assert.equal(parseInvoiceDescription(noisy).qtyMilli, 25000, 'grammage is not a quantity');
@@ -258,7 +259,7 @@ test('G16: open or contradictory knit wording stays teyit', () => {
   assert.match(issue('Lakost %95 pamuk %5 elastan siyah'), /likralı ayrımı yok/);
   assert.deepEqual(parseInvoiceDescription('%100 pamuk 30/1 süprem siyah').unknownWords, []);
   assert.deepEqual(parseInvoiceDescription('Siyah pamuklu süprem 30/1').unknownWords, ['pamuklu'], 'fibre words count only as a % content');
-  assert.equal(matchInvoiceLine({ line: line('Lakost petrol mavi 10 kg', { qtyMilli: 10000 }), openNeeds: [] }).status, 'teyit');
+  assert.equal(matchInvoiceLine({ line: line('Lakost gece mavi 10 kg', { qtyMilli: 10000 }), openNeeds: [] }).status, 'teyit');
 });
 
 test('G16: added colours read as one key; shade words outside the dictionary still stop the line', () => {

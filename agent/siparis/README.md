@@ -16,12 +16,13 @@ CommonJS; Node >=20; `better-sqlite3` 12.x. Sunucu `DATA_DIR/siparis.sqlite` dos
 | orders | `updateOrder(db,orderId,{job_no?,customer_name?},user)`, `cancelOrder(db,orderId,user)` |
 | approval | `approveVersion(db,{versionId,userId,fileId,recipes?})` → `{approval,allocations,outbox}` |
 | stock | `importLegacyFabrics(db,stokData)` (yalnız kalemler), `stockSummary(db)`, `stockView(db)` (+ `*_kg`), `recordCount(db,{itemId,countedMilli,countKey,userId,note?})` |
-| stock | `createStockItem(db,{tur,renk,ad?,unit,colorNo?,colorHex?},userId)`, `updateStockItem(db,id,{ad?,colorNo?,colorHex?},userId)`, `fillShortages(db,itemId,{keyPrefix,...})` |
+| stock | `createStockItem(db,{tur,renk,ad?,unit,colorNo?,colorHex?} \| {tur,kartelaNo,unit},userId)`, `updateStockItem(db,id,{ad?,colorNo?,colorHex?},userId)`, `fillShortages(db,itemId,{keyPrefix,...})` |
 | stock | `receiveDelivery(db,{invoiceLineId,itemId,qtyMilli,allocations?:[{orderLineId,qtyMilli}],userId})` |
 | stock | `adjustStock(db,{itemId,qtyMilli,businessKey,userId,note})`, `consume(db,{orderLineId,materialKey,qtyMilli,businessKey,userId})` |
 | outbox | `claimNext(db,kind?)`, `markDone(db,id,providerRef,claimToken?)`, `markFailed(db,id,err,claimToken?)` |
 | outbox | `retry(db,id,user)`, `setManual(db,id,user?)`, `markManualSent(db,id,user,providerRef?)` |
 | outbox | `registerHandler(kind,async (payload,context)=>result)` → unregister, `runOnce(db,kind?,{onError?,heartbeatMs?}?)`, `startWorker(db,{intervalMs?,onError?}?)` → stop |
+| kartela | `kartelaView()`, `withKartela(item)`, `fabricName(tur)`, `applyKartela(db,{dry?})` → `{rows,changed,unchanged,unmatched}`, `loadKartela(data)` |
 | invoices | `ingest(db,{source,lines},{userId?})` → satır sonuçları, `deliver(db,id,{itemId?,allocations?},userId)`, `list(db,{durum?})` |
 | routes | `require('./routes')(app,{dataDir,db?,worker?,recipes?})` → `{db,stop,close}` |
 
@@ -92,11 +93,12 @@ Onay, son onaylı sürümle sabit `line_key` üzerinden karşılaştırır. Ayr�
   - gri melanj (bitişik "grimelanj" de), gri, açık gri, koyu gri, antrasit, füme, taş, vizon;
   - kırmızı, kiremit, mürdüm, mor, lila;
   - saks mavi, bebe mavi, açık mavi, mavi, indigo, nefti ("nefti yeşil" de), yeşil, haki;
-  - sarı, hardal, turuncu, kahverengi, bej.
+  - sarı, hardal, turuncu, kahverengi, bej;
+  - kartela renkleri (G33): fuşya, turkuaz, ten, krem, somon, taba, karamel, mint, zeytin, nar çiçeği, antrasit melanj, petrol mavi, petrol yeşili, zümrüt yeşili, fıstık yeşili, su yeşili, küf yeşili, asker yeşili. Kartelada ayrı numarası olan açık/koyu tonlar kendi rengidir: açık haki, açık sarı, açık lila, açık yeşil, koyu kırmızı, koyu vizon. Yalnız kartelada yazan ad tanınır ("zümrüt yeşil" değil "zümrüt yeşili").
 - **Tekrar eden renk:** Stok aktarımı `ad + ' ' + renk` okur. Aynı rengin iki kez geçmesi çelişki değildir; iki farklı renk geçmesi (ör. "Pike Raşel Lacivert" + "İndigo") `teyit` olur.
-- **Renk tonu:** Sözlükte olmayan bir ton sözcüğü (`açık`, `koyu`, `neon`, `pastel`, `melanj`, `tonu`) rengi açık bırakır; örneğin "koyu lacivert" `teyit` olur.
+- **Renk tonu:** Sözlükte olmayan bir ton sözcüğü (`açık`, `koyu`, `neon`, `pastel`, `melanj`, `tonu`) rengi açık bırakır; örneğin "koyu lacivert" ya da "açık turkuaz" `teyit` olur.
 
-**Tanınmayan sözcük:** Tür ve renk bulunsa bile açıklamada sözlükte olmayan bir sözcük varsa satır `teyit` olur; örneğin "Lakost petrol mavi" `lakost|mavi` sayılmaz. Kişinin açıkça verdiği tür ve renk bu kuralın önüne geçer.
+**Tanınmayan sözcük:** Tür ve renk bulunsa bile açıklamada sözlükte olmayan bir sözcük varsa satır `teyit` olur; örneğin "Lakost gece mavi" `lakost|mavi` sayılmaz. Kişinin açıkça verdiği tür ve renk bu kuralın önüne geçer.
 - **İzinli tedarikçi gürültüsü** (`FILLER`): `kumaş`, `kumaşı`, `örme`, `renk`, `rengi`, `top`, `rulo`, `ve`, `ile`, `x`, `adet`, `ad`, `en`, `boy`, `g`, `gr`, `gram`, `gramaj`, `gsm`, `gr/m`, `g/m`, `kg`, `kilo`, `m`, `mt`, `metre`, `cm`, `mm`.
 - **Sayılar ve ölçüler** ("180 cm", "250 gr/m2") okunmaz. "gramaj 300 gr" miktar sayılmaz.
 
@@ -112,7 +114,8 @@ Tüm yollar `/api/siparis` altında. Yalnız `POST /giris` açıktır (`{ad,sifr
 - `GET /surumler/:id`, `POST /surumler/:id/satirlar`, `POST /satirlar/:id/uygulamalar`
 - `POST /surumler/:id/dosyalar`, `/gonder`, `/onay` (`{fileId}`), `/revizyon`
 - `GET /stok`, `/stok/hareketler?itemId=...`; `POST /stok/teslim`, `/stok/duzelt`, `/stok/cikis`, `/stok/sayim` (`{itemId,countedKg|countedMilli,countKey,note?}`)
-- `POST /stok/kalemler` (`{tur,renk,ad?,unit,colorNo?,colorHex?}`; aynı anahtar varsa 409 ve `{item}`), `PATCH /stok/kalemler/:id` (yalnız `ad`, `colorNo`, `colorHex`)
+- `POST /stok/kalemler` (`{tur,renk,ad?,unit,colorNo?,colorHex?}`; aynı anahtar varsa 409 ve `{item}`; ya da `{tur,kartelaNo,unit}`, bkz. Kartela), `PATCH /stok/kalemler/:id` (yalnız `ad`, `colorNo`, `colorHex`)
+- `GET /kartela` (kişi girişi), bkz. Kartela
 - `POST /fatura-satirlari` (servis anahtarı ya da kullanıcı), `GET /fatura-satirlari?durum=eslesti|teyit|eslesmedi|teslim_bekliyor|teslim_alindi`, `POST /fatura-satirlari/:id/teslim` (`{itemId?,allocations?}`)
 - `GET /teyitler?status=acik`, `POST /teyitler/:id/coz`
 - `GET /outbox`; `POST /outbox/:id/tekrar`, `/manuel`, `/elle-gonderildi`
@@ -133,7 +136,19 @@ node agent/siparis/cli.js kullanici-onayli 'Örnek Kullanıcı'              # o
 # DATA_DIR/stok-data.json içindeki eski kumaş kalemlerini aktarır (açılış bakiyesi aktarılmaz; sayım ayrıca girilir).
 node agent/siparis/cli.js eski-kumaslari-aktar --kuru                     # önce dene: hiçbir şey yazmaz, özeti verir
 node agent/siparis/cli.js eski-kumaslari-aktar                            # ikinci çalıştırma yeni kalem eklemez
+node agent/siparis/cli.js kartela-uygula --kuru                           # kartelalı kalemlere no/hex/ad; önce dene
+node agent/siparis/cli.js kartela-uygula                                  # ikinci çalıştırmada değişen 0
 ```
+
+## Kartela
+
+Müşteri rengi kartela numarasıyla seçer. Stok kalemi "kumaş + kartela no + renk" ile tanımlanır; anahtar yine `"<tür>|<renk>"` kalır, böylece rengi yazıyla geçen fatura aynı kaleme düşer.
+
+- **Veri:** `agent/siparis/kartela.json`, şirketin kendi kataloğu. Her kartelada `id`, `ad`, isteğe bağlı `not`, `kumaslar` (`fabric_key` türü → görünen ad, ör. `supren_30_1` → "30/1 Süprem") ve `renkler` (`no`, `renk`, `hex`, isteğe bağlı `dokulu`, `teyit`) vardır. Polar'ın renkleri `renklerKaynagi: "uc_iplik"` ile 3 İplik'ten gelir. Dosya yüklenirken denetlenir: renk adı sözlükte olmalı, numara kartelada tek olmalı, bir tür tek kartelada olmalı. Bozuksa modül açılmaz.
+- **Uç:** `GET /kartela` → `{surum:1,kartelalar:[{id,ad,not?,kumaslar:[{tur,ad}],renkler:[{no,renk,renkKey,hex,dokulu?,teyit?}]}]}`. Polar'ın renkleri çözülmüş döner; `hex` küçük harflidir.
+- **Kalem açma:** `POST /stok/kalemler {tur,kartelaNo,unit}`. `tur` anahtar ya da yazı olabilir ("30/1 Süprem"). Sunucu `color_name`, `color_no`, `color_hex`, `fabric_key = tur|renkKey` ve "<kumaş adı> <no> <Renk>" adını yazar (ör. "30/1 Süprem 14 Lacivert"). Aynı `fabric_key` varsa yeni kalem açılmaz; o kalem `mevcut:true` ile 200 döner. 400 durumları: türün kartelası yok, numara kartelada yok, renk adı `teyit` bekliyor (ad anahtara girdiği için), `ad`/`colorNo`/`colorHex` gönderilmiş ya da verilen `renk` numarayla uyuşmuyor.
+- **Kalem listesi:** `GET /stok`, `POST`/`PATCH /stok/kalemler` kalemleri `color_no`, `color_hex` ile döner. Kayıtlı numara kartelada anahtardaki rengi gösteriyorsa ayrıca `kartela:{id,ad,no}` gelir.
+- **`kartela-uygula [--kuru]`:** Türü kartelalı ve anahtardaki rengi kartelada tek bir renge denk gelen kalemlere `color_no`, `color_hex`, kartela renk adını ve standart adı yazar; her değişiklik `kartela_uygula` audit kaydı bırakır. `--kuru` yazmaz. Ham (`legacy:`), kartelasız, kartelada olmayan, birden çok adaylı, adı `teyit` bekleyen, renk adı anahtarla çelişen ya da başka bir renk no taşıyan kalemler "eşleşmedi" olarak listelenir ve değişmez. İkinci çalıştırmada değişen 0 olur.
 
 ## Doğrulama
 
