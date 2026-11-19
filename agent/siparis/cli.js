@@ -2,6 +2,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const { StringDecoder } = require('string_decoder');
 const { openDb, tx, audit, fail } = require('./db');
 const { createUser, passwordHash } = require('./auth');
 const { importLegacyFabrics } = require('./stock');
@@ -9,12 +10,77 @@ const USAGE = [
   'Kullanım: node agent/siparis/cli.js <komut>',
   '  kullanici-ekle <ad> <yonetici|ekip> [--onaysiz]',
   '  kullanici-listele',
-  '  sifre-degistir <ad>            (yeni şifre stdin ya da SIPARIS_SIFRE)',
+  '  sifre-degistir <ad>            (terminalde gizli giriş; pipe/stdin ya da SIPARIS_SIFRE)',
   '  kullanici-onaysiz <ad> | kullanici-onayli <ad>',
   '  eski-kumaslari-aktar [--kuru]'
 ].join('\n');
 const dataDir = () => process.env.DATA_DIR || path.join(__dirname, '../../data');
-const readPassword = () => process.env.SIPARIS_SIFRE || fs.readFileSync(0, 'utf8').replace(/\r?\n$/, '');
+async function readPassword() {
+  if (!process.stdin.isTTY) return process.env.SIPARIS_SIFRE || fs.readFileSync(0, 'utf8').replace(/\r?\n$/, '');
+  const input = process.stdin, output = process.stderr;
+  const wasRaw = input.isRaw, wasFlowing = input.readableFlowing === true;
+  const decoder = new StringDecoder('utf8');
+  let line = '', first, skipLf = false;
+  const interrupted = () => Object.assign(new Error('Şifre girişi iptal edildi'), { exitCode: 130 });
+  let onData, onEnd, onError;
+  const signals = new Map();
+  try {
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (error, password) => {
+        if (settled) return;
+        settled = true;
+        error ? reject(error) : resolve(password);
+      };
+      onError = error => finish(error);
+      onEnd = () => finish(new Error('Şifre girişi tamamlanmadı'));
+      onData = chunk => {
+        for (const char of decoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))) {
+          if (settled) break;
+          if (char === '\u0003') { finish(interrupted()); break; }
+          if (char === '\u0004') { onEnd(); break; }
+          if (char === '\n' && skipLf) { skipLf = false; continue; }
+          skipLf = char === '\r';
+          if (char === '\r' || char === '\n') {
+            output.write('\n');
+            if (first === undefined) {
+              first = line;
+              line = '';
+              output.write('Şifre (tekrar): ');
+            } else if (line !== first) finish(new Error('Şifreler uyuşmuyor'));
+            else finish(null, first);
+          } else if (char === '\u007f' || char === '\b') {
+            line = Array.from(line).slice(0, -1).join('');
+          } else if (char >= ' ' && char !== '\u007f') {
+            line += char;
+            if (line.length > 1024) finish(new Error('Şifre 8–1024 karakter olmalı'));
+          }
+        }
+      };
+      for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+        const handler = () => finish(Object.assign(new Error('Şifre girişi iptal edildi'), {
+          exitCode: signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 129
+        }));
+        signals.set(signal, handler);
+        process.on(signal, handler);
+      }
+      input.on('data', onData);
+      input.on('end', onEnd);
+      input.on('error', onError);
+      input.setRawMode(true); // Raw TTY mode also disables terminal echo.
+      output.write('Şifre: ');
+      input.resume();
+    });
+  } finally {
+    input.removeListener('data', onData);
+    input.removeListener('end', onEnd);
+    input.removeListener('error', onError);
+    for (const [signal, handler] of signals) process.removeListener(signal, handler);
+    input.setRawMode(Boolean(wasRaw));
+    if (!wasFlowing) input.pause();
+    output.write('\n');
+  }
+}
 function findUser(db, name) {
   const user = db.prepare('SELECT id,name FROM users WHERE name=?').get(String(name).trim());
   if (!user) fail(`Kullanıcı bulunamadı: ${name}`);
@@ -34,7 +100,8 @@ async function main(argv = process.argv.slice(2)) {
     if (!fs.existsSync(file)) throw new Error(`Dosya bulunamadı: ${file}`);
     legacy = JSON.parse(fs.readFileSync(file, 'utf8'));
   }
-  const password = command === 'kullanici-ekle' || command === 'sifre-degistir' ? readPassword() : null;
+  const password = command === 'kullanici-ekle' || command === 'sifre-degistir' ? await readPassword() : null;
+  if (password !== null && (password.length < 8 || password.length > 1024)) throw new Error('Şifre 8–1024 karakter olmalı');
   const db = openDb(path.join(dataDir(), 'siparis.sqlite'));
   try {
     if (command === 'kullanici-ekle') {
@@ -79,5 +146,5 @@ async function main(argv = process.argv.slice(2)) {
     }
   } finally { db.close(); }
 }
-if (require.main === module) main().catch(e => { console.error(e.message); process.exitCode = 1; });
+if (require.main === module) main().catch(e => { console.error(e.message); process.exitCode = e.exitCode || 1; });
 module.exports = { main };

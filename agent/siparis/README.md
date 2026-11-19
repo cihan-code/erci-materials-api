@@ -120,11 +120,14 @@ Tüm yollar `/api/siparis` altında. Yalnız `POST /giris` açıktır (`{ad,sifr
 Onay, düzeltme, sayım, tekrar gönderim, elle gönderildi işareti ve onaylı sürüm revizyonu: `yonetici` veya `onay_yetkisi=1`. Patron kararıyla yeni kullanıcılar varsayılan olarak `onay_yetkisi=1` alır, yani giriş yapan herkes bu işlemleri yapabilir; kim yaptığı audit kaydında kalır. Kısıtlamak için kullanıcıyı `--onaysiz` ile ekleyin ya da `onay_yetkisi`ni 0 yapın. Kullanıcı ekleme:
 
 ```sh
-# Şifreyi stdin'den verin veya SIPARIS_SIFRE ortam değişkenini ayarlayın.
+# Terminalde şifre ve tekrarı sorulur; yazılan karakterler gösterilmez (en az 8 karakter).
 node agent/siparis/cli.js kullanici-ekle 'Örnek Kullanıcı' ekip            # onay yetkili (varsayılan)
 node agent/siparis/cli.js kullanici-ekle 'Örnek Stajyer' ekip --onaysiz    # kısıtlı
 node agent/siparis/cli.js kullanici-listele                               # ad, rol, onay yetkisi, tarih
 node agent/siparis/cli.js sifre-degistir 'Örnek Kullanıcı'                # yeni şifre; açık oturumlar kapanır
+# Pipe/env kullanımında tekrar sorulmaz; SIPARIS_SIFRE doluysa stdin yerine kullanılır.
+printf '%s\n' 'ornek-test-sifresi' | node agent/siparis/cli.js sifre-degistir 'Örnek Kullanıcı'
+SIPARIS_SIFRE='ornek-test-sifresi' node agent/siparis/cli.js kullanici-ekle 'Test Kullanıcısı' ekip </dev/null
 node agent/siparis/cli.js kullanici-onaysiz 'Örnek Kullanıcı'             # onay yetkisini kapat (audit'li)
 node agent/siparis/cli.js kullanici-onayli 'Örnek Kullanıcı'              # onay yetkisini aç
 # DATA_DIR/stok-data.json içindeki eski kumaş kalemlerini aktarır (açılış bakiyesi aktarılmaz; sayım ayrıca girilir).
