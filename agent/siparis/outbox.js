@@ -134,10 +134,13 @@ async function runOnce(db, kind, { onError = reportError, heartbeatMs = 60000 } 
     const response=await handler(JSON.parse(job.payload_json), { idempotencyKey: job.idempotency_key, job, db });
     // Parked results keep the job open: fiyat_bekliyor returns via retry, manuel_bekliyor closes via markManualSent.
     if (PARKED.includes(response?.status)) return tx(db, () => {
-      const changed=db.prepare("UPDATE outbox SET status=?,provider_ref=COALESCE(?,provider_ref),claim_token=NULL,updated_at=? WHERE id=? AND status='isleniyor' AND claim_token=?")
-        .run(response.status,refText(response.providerRef),now(),job.id,job.claim_token).changes;
+      // Input saved while the adapter ran would otherwise stay parked: an optional synchronous stillWaiting(db)
+      // re-tests the wait in this transaction, and false sends the job straight back to bekliyor.
+      const requeue = typeof response.stillWaiting === 'function' && response.stillWaiting(db) === false;
+      const changed=db.prepare("UPDATE outbox SET status=?,provider_ref=COALESCE(?,provider_ref),claim_token=NULL,next_run_at=CASE WHEN ? THEN ? ELSE next_run_at END,updated_at=? WHERE id=? AND status='isleniyor' AND claim_token=?")
+        .run(requeue ? 'bekliyor' : response.status,refText(response.providerRef),requeue ? 1 : 0,now(),now(),job.id,job.claim_token).changes;
       if (!changed) fail('İş sahipliği geçersiz',409);
-      audit(db,null,response.status === 'fiyat_bekliyor' ? 'kuyruk_fiyat_bekliyor' : 'kuyruk_manuel',job.id); return get(db,job.id);
+      audit(db,null,requeue ? 'kuyruk_yeniden' : response.status === 'fiyat_bekliyor' ? 'kuyruk_fiyat_bekliyor' : 'kuyruk_manuel',job.id); return get(db,job.id);
     });
     const ref=response?.providerRef;
     // Only {providerRef} means done. Anything else has an unknown outcome at the provider: never resend it blindly.

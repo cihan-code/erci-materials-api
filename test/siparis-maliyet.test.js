@@ -210,7 +210,12 @@ test('revizyonda aynı İşler kaydı güncellenir; eski sürümün fiyatı yeni
   assert.equal(s.body.versionNo, 2);
   assert.equal(s.body.unitPrice, null);
   assert.equal(s.body.jobId, v1.provider_ref);
-  assert.equal((await f.http('POST', fiyat(a), f.tokens.manager, { unitPrice: 28, kdvDahil: true, bnItems: sirt })).status, 200);
+  // Patron: every unit price is excluding VAT; a VAT-inclusive entry is refused and stores nothing.
+  const inclusive = await f.http('POST', fiyat(a), f.tokens.manager, { unitPrice: 28, kdvDahil: true, bnItems: sirt });
+  assert.equal(inclusive.status, 400);
+  assert.equal(inclusive.body.error, 'Fiyatlar KDV hariç girilir');
+  assert.equal(f.row(v2Id)?.unit_price ?? null, null);
+  assert.equal((await f.http('POST', fiyat(a), f.tokens.manager, { unitPrice: 28, kdvDahil: false, bnItems: sirt })).status, 200);
   const v2 = await f.run();
   assert.equal(v2.status, 'tamam');
   assert.equal(v2.provider_ref, v1.provider_ref);
@@ -221,8 +226,56 @@ test('revizyonda aynı İşler kaydı güncellenir; eski sürümün fiyatı yeni
   assert.deepEqual(jobs[0].cost_items, [{ category: 'Kumaş', amount: 300 }, { category: 'Dikim', amount: 135 },
     { category: 'Risk Payı (%10)', amount: 43.5 }, { category: 'Baskı (sırt - Orta Boyut, 30 adet)', amount: 60 }]);
   assert.equal(jobs[0].document_id, f.row(v2Id).document_id);
-  assert.match(jobs[0].note, /KDV dahil/);
+  assert.match(jobs[0].note, /KDV hariç/);
+  assert.doesNotMatch(jobs[0].note, /KDV dahil/);
+  assert.equal((await f.http('GET', maliyet(a), f.tokens.team)).body.kdvDahil, false);
   assert.equal(f.db.prepare('SELECT job_no FROM orders WHERE id=?').get(a.orderId).job_no, 'MRC-T001');
+});
+
+test('aktarılmış İşler kaydı silinmişse aynı iş numaralı başka kayda geçilmez; kalıcı hata ve teyit açılır', async t => {
+  const f = await setup(t);
+  const a = f.approved({ order_no: 'MRC-T001' });
+  await f.http('POST', fiyat(a), f.tokens.manager, { unitPrice: 30, bnItems: sirt });
+  const v1 = await f.run();
+  assert.equal(v1.status, 'tamam');
+  // The transferred record is deleted in İşler and someone types a new one with the same job number.
+  const panel = JSON.parse(fs.readFileSync(PANEL, 'utf8'));
+  const stranger = { id: 99, job_no: 'MRC-T001', title: 'Başka iş', quantity: 5, unit_price: 12, cost_items: [] };
+  panel.data.jobs = [stranger];
+  fs.writeFileSync(PANEL, JSON.stringify(panel));
+  const v2Id = f.revise(a.versionId, { lines: [{ id: a.lineId, quantity: 30, sizes: { S: 10, M: 20 } }] });
+  await f.http('POST', fiyat(a), f.tokens.manager, { unitPrice: 28, bnItems: sirt });
+  const failed = await f.run();
+  assert.equal(failed.version_id, v2Id);
+  assert.equal(failed.status, 'basarisiz');
+  assert.match(failed.last_error, /İşler kaydı silinmiş; ekip doğrulamalı/);
+  assert.match(f.teyit(failed), /İşler kaydı silinmiş; ekip doğrulamalı/);
+  assert.deepEqual(panelJobs(), [stranger]);
+});
+
+test('işlenirken girilen fiyat kaybolmaz: iş fiyat_bekliyor\'da takılmaz, işlenen fiyat sessizce değişmez', async t => {
+  const f = await setup(t);
+  // A price request lands after the adapter read "no price" but before the queue parks the job.
+  const a = f.approved({ order_no: 'MRC-T001' });
+  let during = () => cost.setPrice(f.db, a.orderId, { unitPrice: 30, bnItems: sirt }, f.manager);
+  t.after(queue.registerHandler('maliyet_aktarim', async (payload, context) => {
+    const result = await cost.transfer(payload, context, { dataDir: DATA, recipes });
+    during();
+    return result;
+  }));
+  const raced = await f.run();
+  assert.equal(raced.status, 'bekliyor');
+  assert.equal(f.row(a.versionId).unit_price, 30);
+  during = () => {};
+  assert.equal((await f.run()).status, 'tamam');
+  assert.equal(panelJobs()[0].unit_price, 30);
+  // Changing an existing price while the transfer runs would leave İşler and the status disagreeing.
+  const b = f.approved({ order_no: 'MRC-T002' });
+  await f.http('POST', fiyat(b), f.tokens.manager, { unitPrice: 25, bnItems: sirt });
+  during = () => assert.throws(() => cost.setPrice(f.db, b.orderId, { unitPrice: 35 }, f.manager), e => e.status === 409);
+  assert.equal((await f.run()).status, 'tamam');
+  assert.equal(panelJobs().find(j => j.job_no === 'MRC-T002').unit_price, 25);
+  assert.equal(f.row(b.versionId).unit_price, 25);
 });
 
 test('revizyon eski sürümün bekleyen maliyet işini iptal eder; yedek yol eski sürümü İşler\'e yazmaz', async t => {
