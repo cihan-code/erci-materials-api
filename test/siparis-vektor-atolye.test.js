@@ -103,9 +103,9 @@ test('thin lines, text, unknown fill detail and suspicious ratio request confirm
   assert.equal(line.report.quality, 'teyit'); assert.ok(line.report.reasons.includes('ince_cizgi'));
   const text = await vectorize({ buffer: await vectorPdf({ text: true }), mime: 'application/pdf' });
   assert.equal(text.report.quality, 'teyit'); assert.ok(text.report.reasons.includes('metin'));
-  const ratio = await vectorize({ buffer: png({ width: 600, height: 24 }), mime: 'image/png' });
-  assert.ok(ratio.report.reasons.includes('supheli_oran'));
-  const rasterThin = await vectorize({ buffer: png({ thin: true }), mime: 'image/png' });
+  const ratio = await vectorize({ buffer: png({ width: 600, height: 24 }), mime: 'image/png', targetMm:{w:60,h:2.4} });
+  assert.ok(ratio.report.reasons.some(x=>x.includes('oranı olağan sınırların dışında')));
+  const rasterThin = await vectorize({ buffer: png({ thin: true }), mime: 'image/png',targetMm:{w:20,h:10} });
   assert.ok(rasterThin.report.minLineWidth < 0.3);
 });
 
@@ -340,4 +340,158 @@ test('G14-13 test mode cannot dispatch outside NODE_ENV=test and cloud without d
   const logs=[];
   const handler=createWorkshopHandler({OTOMATIK_GONDERIM:'1',WHATSAPP_MODE:'cloud'},{logger:{warn:m=>logs.push(m)}});
   assert.equal((await handler(job())).status,'manuel_bekliyor');assert.match(logs.join(' '),/kalıcı|durable/i);
+});
+
+function qualityPng(draw, width = 200, height = 100) {
+  const canvas = createCanvas(width,height), ctx = canvas.getContext('2d');
+  draw(ctx); return canvas.toBuffer('image/png');
+}
+
+test('G27 thick two-colour logo can be iyi and target scale is measured again', async () => {
+  const buffer = qualityPng(ctx => {
+    ctx.fillStyle='#cc1020';ctx.fillRect(10,10,180,80);
+    ctx.fillStyle='#1030cc';ctx.fillRect(70,30,60,40);
+  });
+  const natural = await vectorize({buffer,mime:'image/png'});
+  assert.equal(natural.report.quality,'beklemede');
+  assert.equal(natural.report.qualityLabel,'Kalite ölçüden sonra değerlendirilecek');
+  assert.deepEqual(natural.report.reasons,[]);
+  assert.equal(natural.report.rasterQuality.colorCount,2);
+  assert.equal(natural.report.rasterQuality.measurementSize,'pending');
+  assert.ok(natural.report.rasterQuality.iou >= .97);
+  assert.ok(natural.report.rasterQuality.nodeCount >= natural.report.pathCount);
+  const small = await vectorize({buffer,mime:'image/png',targetMm:{w:1.8,h:.8}});
+  assert.equal(small.report.quality,'teyit');
+  assert.equal(small.report.rasterQuality.measurementSize,'target');
+  assert.ok(small.report.reasons.some(x=>x.includes('En ince çizgi')));
+  const large = await vectorize({buffer,mime:'image/png',targetMm:{w:90,h:40}});
+  assert.equal(large.report.quality,'iyi',large.report.reasons.join(' '));
+});
+
+test('G27 0.3 mm letter strokes require confirmation and embroidery is stricter', async () => {
+  const buffer = qualityPng(ctx => {
+    ctx.fillStyle='#102060';ctx.fillRect(10,10,180,3);ctx.fillRect(10,10,3,80);ctx.fillRect(80,10,3,80);
+  });
+  const result = await vectorize({buffer,mime:'image/png',targetMm:{w:18,h:8}});
+  assert.equal(result.report.quality,'teyit');
+  assert.ok(result.report.rasterQuality.minLineMm <= .31);
+  assert.ok(result.report.reasons.some(x=>x.includes('En ince çizgi')));
+  const bar = qualityPng(ctx=>{ctx.fillStyle='red';ctx.fillRect(10,10,100,5);});
+  const options = {buffer:bar,mime:'image/png',targetMm:{w:20,h:1}};
+  assert.equal((await vectorize(options)).report.quality,'iyi');
+  const embroidery = await vectorize({...options,applicationType:'nakis'});
+  assert.equal(embroidery.report.quality,'teyit');
+  assert.equal(embroidery.report.rasterQuality.limits.minLineMm,1.2);
+});
+
+test('G27 open channels, enclosed holes and tiny closed shapes are measured', async () => {
+  const channel = qualityPng(ctx=>{
+    ctx.fillStyle='red';ctx.fillRect(0,0,40,60);ctx.fillRect(43,0,40,60);
+  },83,60);
+  const result = await vectorize({buffer:channel,mime:'image/png',targetMm:{w:8.3,h:6}});
+  assert.equal(result.report.quality,'teyit');
+  assert.ok(Math.abs(result.report.rasterQuality.minGapMm-.3)<.1);
+  assert.ok(result.report.reasons.some(x=>x.includes('En küçük boşluk')));
+  for (const hole of [true,false]) {
+    const buffer=qualityPng(ctx=>{
+      ctx.fillStyle='red';ctx.fillRect(0,0,100,100);
+      if(hole) ctx.clearRect(50,50,3,3);
+      else {ctx.clearRect(40,40,20,20);ctx.fillStyle='blue';ctx.fillRect(50,50,3,3);}
+    },100,100);
+    const tiny=await vectorize({buffer,mime:'image/png',targetMm:{w:10,h:10}});
+    assert.equal(tiny.report.quality,'teyit');
+    assert.ok(tiny.report.rasterQuality.minShapeMm2 <= .1);
+    assert.ok(tiny.report.reasons.some(x=>x.includes('En küçük kapalı şekil')));
+  }
+});
+
+test('G27 gradient and photographic colour noise require confirmation', async () => {
+  for (const photograph of [false,true]) {
+    const canvas=createCanvas(64,32),ctx=canvas.getContext('2d'),pixels=ctx.createImageData(64,32);
+    for(let i=0;i<64*32;i++) {
+      const x=i%64,y=Math.floor(i/64),p=i*4;
+      pixels.data[p]=photograph ? (x*53+y*71)%256 : x*4;
+      pixels.data[p+1]=photograph ? (x*97+y*29)%256 : 50;
+      pixels.data[p+2]=photograph ? (x*13+y*109)%256 : 160;
+      pixels.data[p+3]=255;
+    }
+    ctx.putImageData(pixels,0,0);
+    const buffer=canvas.toBuffer(photograph ? 'image/jpeg' : 'image/png');
+    const result=await vectorize({buffer,mime:photograph ? 'image/jpeg' : 'image/png',targetMm:{w:32,h:16}});
+    assert.equal(result.report.quality,'teyit');
+    assert.ok(result.report.rasterQuality.colorCount>6 || photograph);
+    assert.ok(result.report.reasons.length>0);
+  }
+});
+
+test('G27 broad translucent edge requires review despite a large opaque interior', async () => {
+  const buffer=qualityPng(ctx=>{
+    ctx.fillStyle='rgba(200,0,0,.5)';ctx.fillRect(0,0,1000,400);
+    ctx.fillStyle='rgb(200,0,0)';ctx.fillRect(10,10,980,380);
+  },1000,400);
+  const result=await vectorize({buffer,mime:'image/png',targetMm:{w:100,h:40}});
+  assert.equal(result.report.quality,'teyit');
+  assert.ok(result.report.rasterQuality.semiTransparentRatio>.1);
+  assert.ok(result.report.reasons.some(x=>x.includes('Alfa kenarında')));
+});
+
+test('G27 white and pale ink on transparency remain measurable', async () => {
+  for(const color of ['white','#ededed']) {
+    const buffer=qualityPng(ctx=>{ctx.fillStyle=color;ctx.fillRect(10,10,180,80);});
+    const result=await vectorize({buffer,mime:'image/png',targetMm:{w:90,h:40}});
+    assert.equal(result.report.quality,'iyi',result.report.reasons.join(' '));
+    assert.ok(result.report.rasterQuality.minLineMm>1);
+    assert.equal(result.report.rasterQuality.iou,1);
+  }
+});
+
+test('G27 invalid environment limits fall back safely; valid limits apply', async t => {
+  const key='SIPARIS_VECTOR_BASKI_MIN_LINE_MM',previous=process.env[key];
+  t.after(()=>{if(previous===undefined) delete process.env[key];else process.env[key]=previous;});
+  const buffer=qualityPng(ctx=>{ctx.fillStyle='red';ctx.fillRect(10,10,100,3);});
+  for(const invalid of ['', 'NaN','-1','0','Infinity','101']) {
+    process.env[key]=invalid;
+    const result=await vectorize({buffer,mime:'image/png',targetMm:{w:10,h:.3}});
+    assert.equal(result.report.quality,'teyit');
+    assert.equal(result.report.rasterQuality.limits.minLineMm,.8);
+  }
+  process.env[key]='2';
+  const result=await vectorize({buffer,mime:'image/png',targetMm:{w:100,h:40}});
+  assert.equal(result.report.rasterQuality.limits.minLineMm,2);
+  assert.equal(result.report.quality,'teyit');
+  await assert.rejects(vectorize({buffer,mime:'image/png',applicationType:'unknown'}),/applicationType/);
+});
+
+ test('G27 antialias alpha coverage and minor colour noise do not create extra inks', async()=> {
+  const buffer=qualityPng(ctx=>{
+    ctx.fillStyle='rgba(200,0,0,.5)';ctx.fillRect(0,0,200,100);
+    ctx.fillStyle='rgb(200,0,0)';ctx.fillRect(1,1,198,98);
+    ctx.fillStyle='rgb(195,4,3)';ctx.fillRect(20,20,80,40);
+    ctx.fillStyle='blue';ctx.fillRect(50,50,3,3);
+  });
+  const result=await vectorize({buffer,mime:'image/png',targetMm:{w:100,h:50}});
+  assert.equal(result.report.rasterQuality.colorCount,1);
+  assert.equal(result.report.rasterQuality.semiTransparentRatio,0);
+  assert.ok(!result.report.reasons.some(x=>x.includes('Alfa kenarında')));
+ });
+
+test('G27 cached white preview uses its cropped page and original raster for final quality',async()=> {
+  const buffer=qualityPng(ctx=>{ctx.fillStyle='white';ctx.fillRect(10,10,180,80);});
+  const preview=await vectorize({buffer,mime:'image/png'});
+  const result=await vectorize({buffer:preview.pdf,mime:'application/pdf',manualVector:true,targetMm:{w:90,h:40},
+    qualitySource:{buffer,mime:'image/png',metrics:preview.report.rasterQuality}});
+  assert.equal(result.report.quality,'iyi',result.report.reasons.join(' '));
+  assert.equal(result.report.rasterQuality.widthMm,90);
+  assert.ok(result.report.rasterQuality.minLineMm>1);
+});
+
+test('G27 legacy cached preview without complexity metrics cannot silently become good',async()=> {
+  const buffer=qualityPng(ctx=>{ctx.fillStyle='red';ctx.fillRect(10,10,180,80);});
+  const preview=await vectorize({buffer,mime:'image/png'});
+  const result=await vectorize({buffer:preview.pdf,mime:'application/pdf',manualVector:true,targetMm:{w:90,h:40},
+    qualitySource:{buffer,mime:'image/png'}});
+  assert.equal(result.report.quality,'teyit');
+  assert.equal(result.report.rasterQuality.pathCount,null);
+  assert.equal(result.report.rasterQuality.nodeCount,null);
+  assert.ok(result.report.reasons.some(reason=>reason.includes('ölçümleri eksik')));
 });
