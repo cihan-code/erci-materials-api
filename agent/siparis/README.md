@@ -186,6 +186,13 @@ TTY'den kullanıcı adını ve **gizli** şifreyi sorar, `/api/siparis/giris` il
 aldığı token'ı yalnız bellekte tutar. Her kalıp için multipart `POST /duz-cizimler`
 ve JSON `PUT /duz-cizimler/:id/referans` kullanılır. Aynı adlı kalıp tekrar
 yüklenmez; önceki işlem referans kaydetmeden kesildiyse eksik referans onarılır.
+
+**Referans beden L (Patron kararı, 19.11.2026).** Referans cm değerleri L bedenin
+ölçüsüdür; kayıt `refBeden` alanında (`"L"`, eski kayıtlarda `null`) saklanır.
+JSON'da önceki M değeri yedek olarak `refLengthCmM` alanında kalır. Mevcut
+kalıpların referansını güncellemek için `--guncelle` kullanılır: aynı adlı kalıplar
+atlanmaz, `PUT /duz-cizimler/:id/referans` ile güncellenir. `--kuru --guncelle`
+neyin değişeceğini `M 52 → L 54` biçiminde listeler.
 Uzak sunucuda HTTPS gerekir; yönlendirme takip edilmez. Canlı yüklemeyi ayrıca
 hedefleyip çalıştırmanız gerekir. `urun` yalnız `agent/operations/recipes.json`
 anahtarıdır; eşleşme yoksa `null` kalır ve API zorunlu ürün istediği için
