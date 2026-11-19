@@ -535,12 +535,16 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
       for (const source of v.files.filter(f=>SOURCE_KINDS.includes(f.kind)))
         if (!sourceByApp.size) fail(`Desen ${source.id}: ölçülü uygulama bağlantısı gerekli`,409);
       for (const a of v.lines.flatMap(l=>l.applications)) {
-        const targetMm={w:a.width_mm,h:a.height_mm}, source=sourceByApp.get(a.id), prev=readyPreview(db,dataDir,v,source);
-        // A ready preview of the same source is scaled instead of traced again.
-        const result=await generateInChild({type:'vector',input:prev
-          ? {manualVector:true,buffer:prev.buffer,mime:'application/pdf',targetMm}
-          : {...await vectorInput(dataDir,source),targetMm}},signal);
-        const report=prev ? {...result.report,quality:prev.report.quality==='teyit' || result.report.aspectRatioError>0.01 ? 'teyit' : 'iyi',
+        const targetMm={w:a.width_mm,h:a.height_mm},source=sourceByApp.get(a.id),prev=readyPreview(db,dataDir,v,source);
+        const original=await vectorInput(dataDir,source),raster=['image/png','image/jpeg','image/jpg'].includes(original.mime);
+        const cached=prev && (!raster || (Number.isFinite(prev.report.rasterQuality?.pathCount) && Number.isFinite(prev.report.rasterQuality?.nodeCount)));
+        // Legacy previews without complexity metrics are retraced from the original raster.
+        // Keep cached vector paths; final raster quality is measured against the original artwork.
+        const result=await generateInChild({type:'vector',input:cached
+          ? {manualVector:true,buffer:prev.buffer,mime:'application/pdf',targetMm,applicationType:a.kind,
+            ...(raster ? {qualitySource:{...original,metrics:prev.report.rasterQuality}} : {})}
+          : {...original,targetMm,applicationType:a.kind}},signal);
+        const report=prev && !raster ? {...result.report,quality:prev.report.quality==='teyit' || result.report.aspectRatioError>0.01 ? 'teyit' : 'iyi',
           reasons:[...new Set([...(prev.report.reasons||[]),...(result.report.aspectRatioError>0.01 ? ['oran_bozuldu'] : [])])]} : result.report;
         generated.push({kind:'desen_vektor',buffer:result.pdf,meta:{applicationId:a.id},report});
       }

@@ -8,36 +8,95 @@ CommonJS, Node >=18.20 önerilir (deponun >=18 tabanıyla uyumlu API'ler; yereld
 ```js
 const { vectorize } = require('../vector');
 const { pdf, kind, report } = await vectorize({ buffer, mime,
-  targetMm: { w: 280, h: 120 } }); // isteğe bağlı, TAM sayfa mm
+  targetMm: { w: 280, h: 120 }, applicationType: 'nakis' });
+// applicationType: 'baski' (varsayılan) veya 'nakis'; targetMm isteğe bağlı.
 ```
 
 PNG/JPEG: yerel `@neplex/vectorizer` (Rust vtracer) → SVG → `svg-to-pdfkit`/PDFKit yolları.
-Hedef sayfaya tek ölçek katsayısıyla ortalı fit yapılır; boş kenarlar olabilir. Hedef yoksa raster 96 dpi kabul edilir.
-`pdf-lib` vektör sayfaların içeriğini, fontlarını ve form nesnelerini tutar. Hedef yoksa saf vektör PDF aynen döner;
-hedefte mevcut içerik ve ek açıklamalar orantılı ölçeklenir. Sayfa dönüşü ve crop origin dikkate alınır.
+Mevcut içerik kırpması korunur: alfa sıfır ve beyaz kenarlar dışarıda, JPEG için açık kenar toleransı vardır.
+Yalnız tamamen beyaz, şeffaf zeminli PNG'de içerik bulunamazsa alfa kutusu kullanılır.
+Hedef, kırpılmış içeriğin iki boyutuna uygulanır; en ve boy bağımsız ölçeklenir. Oran farkı %1'i aşarsa teyit istenir.
+Hedef yoksa PDF önizlemesinin doğal boyutu 96 dpi kabul edilir; dosya DPI metadata'sı kullanılmaz.
+PNG/JPEG kalite kararı hedef olmadan `beklemede` kalır; `qualityLabel` tam olarak
+`Kalite ölçüden sonra değerlendirilecek` olur ve kalite teyidi açılmaz. Fiziksel metrikler `null` döner.
+Hazırlama özgün kaynağı her uygulamanın hedef mm ölçüsü ve baskı/nakış türüyle yeniden değerlendirir;
+önizlemenin kalite kararını ölçüm yerine kullanmaz. Hazır önizleme PDF'sinin yolları yeniden trace edilmeden
+ölçeklenir; aynı worker'da `qualitySource` özgün raster ve önizleme SVG karmaşıklık metriklerini taşır,
+hedef PDF özgün piksellerle yeniden karşılaştırılır. Açık kalite teyidi gönderimi ve onayı engeller.
 
-PDF.js operator list Form XObject içeriklerini açarak yolları/metni/görüntüleri sınıflandırır.
-**Yalnız görüntü içeren sayfalar** PDF.js + Skia canvas ile 144 dpi render edilir, sonra yerel vtracer'a girer.
-Ham image extraction yerine bu yol seçildi: sayfa crop, image transform, alfa maskesi ve birden fazla görüntünün yerleşimi korunur.
-Vektör/metin sayfa hiçbir zaman rasterleştirilmez. Karma sayfadaki mevcut raster da korunur ve `teyit` olur.
-Tamamen raster PDF için yeni belge oluşturulur; kaynak `/Image` nesneleri bile çıktıda bulunmaz.
-Karma çok sayfalı belgede orijinal form yapısını korumak için mevcut belge kullanılır; değişen raster sayfaların kullanılmayan kaynak nesneleri kalabilir.
+PNG/JPEG artık her durumda teyit istemez. `report.rasterQuality` içindeki ölçümler ve eşikler kararı açıklar:
 
-Rapor: `pathCount` boyama operatörü sayısıdır (Bezier segment sayısı değil); `colorCount` kullanılan renk tanımlarının tahminidir.
-`minLineWidth` mm cinsinden tahmindir: PDF stroke genişliği × transform; rasterda iki yönde foreground pixel run.
-Dolgu konturunun gerçek nakış/baskı kalınlığı ölçülemez. Ölçülemeyen dolgu detayı, <0.2 mm çizgi, metin,
->2000 yol, aşırı kaynak oranı ve karma raster için `quality: 'teyit'` döner. Raster sonuçlar OCR olmadan
-ince yazı güvenilir ayırt edilemediği için her zaman görsel `teyit` ister. Bu rapor üretim onayı değildir.
-`aspectRatioPreserved` ve `aspectRatioError`, uniform transform değişmezinden hesaplanır; görüntü benzerliği skoru değildir.
-Testlerde çıktı önizlemesindeki renkli şeklin en-boy oranı da ±%1 içinde ölçülür.
+| Sinyal | Varsayılan iyi sınırı | Ortam değişkeni (`SIPARIS_VECTOR_` önekiyle) |
+|---|---|---|
+| Renk sayısı | ≤6 | `MAX_COLORS` |
+| Yeni algısal renk kümesi uzaklığı | DeltaE >10 (CIE76, D65 Lab) | `COLOR_DELTA_E` |
+| Sayılan renk kümesinin en küçük mürekkep alan oranı | ≥%0.5 | `MIN_COLOR_AREA_RATIO` |
+| En ince çizgi | baskı ≥0.8 mm, nakış ≥1.2 mm | `BASKI_MIN_LINE_MM`, `NAKIS_MIN_LINE_MM` |
+| En küçük boşluk | baskı ≥0.8 mm, nakış ≥1.2 mm | `BASKI_MIN_GAP_MM`, `NAKIS_MIN_GAP_MM` |
+| En küçük kapalı renk şekli veya delik alanı | baskı ≥0.64 mm², nakış ≥1.44 mm² | `BASKI_MIN_SHAPE_MM2`, `NAKIS_MIN_SHAPE_MM2` |
+| Kaynak/çıktı silüet IoU | ≥0.97 | `MIN_IOU` |
+| Ortalama RGB piksel farkı | ≤0.03 | `MAX_PIXEL_DIFFERENCE` |
+| Alfa kenarındaki yarı saydam piksel oranı | ≤0.02 | `MAX_SEMI_TRANSPARENT_RATIO` |
+| SVG yol / düğüm sayısı | ≤500 / ≤10000 | `MAX_PATHS`, `MAX_NODES` |
+
+RGB histogramı Lab uzayına dönüştürülür; en sık, komşularıyla tutarlı iç renkler kümeleri başlatır.
+Merkezden DeltaE 10'u aşan ton ayrı küme olur. Alfa ve komşularıyla sert geçiş yapan antialias
+karışımları yeni mürekkep sayılmaz; alanı toplam opak mürekkebin %0.5'inden küçük kümeler renk sayısına girmez.
+Bununla birlikte küçük, kararlı gerçek renk şekilleri fiziksel alan/çizgi denetimine girer.
+Opak zeminde en küçük RGB kanalı <245, şeffaf zeminde alfa >127 mürekkep maskesini verir.
+Beyaz/açık mürekkep şeffaf zeminde korunur; opak beyaz zemin üzerindeki beyaz desen otomatik ayırt edilemez.
+Düz paletli kaynaklarda trace öncesi yakın RGB tonları ve kararsız kenar renkleri baskın mürekkeplere
+normalize edilir; dört pikselden küçük speckle süzülür. Özgün piksel verisi benzerlik kontrolünde korunur.
+Fotoğraf/degrade veya güvenilir ayrışmayan renk dokusu teyit ister; OCR kullanılmaz.
+
+Bir piksellik morfolojik açma gürültüyü süzer. Kararlı renk bölgelerinin Zhang–Suen iskeleti üzerinde fiziksel piksel aralığıyla Öklid uzaklık dönüşümü hesaplanır.
+Çap eksi bir piksel aralığı (en az bir piksel) çizgi genişliğini muhafazakâr tahmin eder. 4 komşulu bileşenler
+kapalı renk şekillerinin ve iç deliklerin en küçük alanını verir. Boşluk maskesi kapalı delikleri ve en az bir eksende
+iki mürekkep arasında kalan arka planı kapsar; dışarı açılan kanallar da ölçülür, dış boş kenarlar ölçülmez.
+Boşluk iskeletinin açık uçları boşluk eşiği kadar fiziksel uzunlukta budanır; köşeye doğru incelen kısa
+uçlar gerçek dar kanal sayılmaz. Uzun paralel ince aralıklar ölçülür; küçük kapalı delikler ayrıca alanla denetlenir.
+`minGapMm: null` böyle bir boşluk bulunmadığını veya yalnız kısa uçlar kaldığını belirtir. Birden çok renk bölgesi inceyse en küçüğü kullanılır.
+
+Çıktı PDF'si yeniden rasterleştirilir ve kırpılmış kaynakla aynı piksel ızgarasında karşılaştırılır.
+`iou`, bir piksel kenar toleransıyla mürekkep maskelerinin uyuşmasıdır; tolerans içinde karşı maskeye
+yakın pikseller hata sayılmaz, diğer farklar birleşim alanına bölünür; `pixelDifference` beyaz üzerine birleştirilmiş RGB'nin
+0..1 aralığındaki ortalama mutlak farkıdır. Kontrol düğümleri dahil SVG koordinat grupları sayılır;
+komut harfi yazılmadan yinelenen koordinatlar da düğüm sayısına girer. `report.pathCount` ise eskisi gibi
+PDF boyama operatörü sayısıdır. Alfa 9..246 piksellerde, analiz ızgarasında iki piksel eşdeğeri
+uzaklıkta opak iç alan varsa piksel antialias kapsaması kabul edilir. Kalan yarı saydam piksel sayısı bütün
+alfa kenar piksellerine bölünür; geniş saydam şeritler dolu iç alanla seyreltilmez.
+
+Analiz hedefte en fazla 300 dpi, en çok 1 milyon piksel kullanır; kaynak düşük çözünürlüklüyse büyütülmez.
+Bir piksellik morfolojik açma ve boşluk uç budaması daha düşük analiz çözünürlüğünde de gürültüyü süzer.
+Küçültme tek başına teyit nedeni değildir. Renk sayısı eşiği veya 64 aday küme aşılırsa pahalı renk başına
+iskelet/alan ölçümleri yapılmaz (`minLineMm`, bazen `minShapeMm2`: null); ölçülemedi gerekçesi eklenir.
+Eşikler üretim onayı değildir. `minLineWidth` eski alanı mm tahmini olarak korunur.
+Yeni PNG/JPEG nedenleri `report.reasons` içinde düz Türkçedir; PDF neden kodları değişmez.
+
+Ortam değerleri her çağrıda okunur. Boş, sıfır, negatif, sonlu olmayan veya sınır dışı değerler varsayılana döner.
+Oran üst sınırı 1, çizgi/boşluk üst sınırı 100 mm, DeltaE üst sınırı 100, diğer ayarların üst sınırı 1 milyon; geçerli pozitif değerler
+üretim yöntemine göre ayarlanabilir. Etkin değerler `rasterQuality.limits` içinde bulunur.
+`measurementSize: 'pending'|'target'`, `widthMm`, `heightMm` kararın hangi fiziksel ölçüde verildiğini gösterir.
+Hedef yoksa bu iki ölçü ve fiziksel çizgi/boşluk/şekil metrikleri `null` olur. `analysisDpi`,
+`noiseFilter`, `colorDeltaE`, `minColorAreaRatio`, `iouTolerancePx` analiz yöntemini açıklar.
+Nakış çağrısı açıkça `applicationType:'nakis'` taşır.
+
+PDF kuralları korunur: `pdf-lib` vektör içeriğini, fontlarını ve form nesnelerini tutar; hedef yoksa saf vektör
+PDF aynen döner. Hedefte içerik ve ek açıklamalar mevcut kırpma/dönüş kurallarıyla ölçeklenir.
+PDF.js Form XObject içeriklerini açar; yalnız görüntü içeren sayfalar 144 dpi çizilir ve yerel vtracer'a girer.
+Böylece sayfa crop, transform, alfa maskesi ve birden fazla görüntünün yerleşimi korunur.
+Vektör/metin sayfa rasterleştirilmez; karma sayfadaki raster korunur ve teyit ister. Tam raster PDF yeni belgeye
+alınır, kaynak `/Image` nesneleri çıktıya taşınmaz; karma çok sayfalı belgede orijinal form korunur.
+PDF girdileri eski kuralları kullanır: raster her zaman teyit; <0.2 mm stroke, metin, ölçülemeyen dolgu kalınlığı,
+>2000 yol, olağan dışı kaynak oranı veya oran bozulması teyit nedenidir. `manualVector` sözleşmesi değişmez.
 
 ```sh
 node agent/siparis/vector.js --karsilastir /yerel/girdi --output /ayri/cikti
 ```
 
-`--output` yoksa sistem geçici dizini kullanılır. Girdi klasörüne dosya/dizin yazılmaz; içerisine yönlenen symlink output da reddedilir.
-Desteklenen üst seviye dosyalar için ayrı PDF, JSON ve sayfa başına PNG üretilir. Var olan çıktının üstüne yazılmaz.
-Gerçek desen ve önizlemeleri repoya koymayın. 40 MP üstü PDF render hata verir.
+`--output` yoksa sistem geçici dizini kullanılır. Girdiye ve içine yönlenen symlink output'a yazılmaz.
+Üst seviye dosyalar için ayrı PDF, JSON ve sayfa PNG'leri üretilir; var olan çıktının üstüne yazılmaz.
+Gerçek desen ve önizlemeleri repoya koymayın. 40 MP üstü görsel/PDF render hata verir.
 
 ## Atölye
 

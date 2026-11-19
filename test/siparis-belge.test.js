@@ -297,6 +297,9 @@ test('G14-2 revision is editable, carries open/resolved measurements and prepare
 });
 test('G14-4 open vector quality blocks both submit and approval until resolved',async t=> {
   const f=await fixture(t), a=await prepared(f,{both:false});
+  // A simple thick source can now be good; make the open-confirmation precondition explicit.
+  f.db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('vektor_kalite','files',?,'review')")
+    .run(a.files.find(x=>x.kind==='desen_vektor').id);
   assert.equal((await f.post(`/surumler/${a.id}/gonder`)).status,409);
   const fileId=a.files.find(x=>x.kind==='onay_formu').id;
   assert.equal((await f.post(`/surumler/${a.id}/onay`,{fileId},f.managerToken)).status,409);
@@ -305,6 +308,26 @@ test('G14-4 open vector quality blocks both submit and approval until resolved',
   f.db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('vektor_kalite','files',?,'review')").run(vector.id);
   assert.equal((await f.post(`/surumler/${a.id}/onay`,{fileId},f.managerToken)).status,409);
   await resolveQuality(f);ok(await f.post(`/surumler/${a.id}/onay`,{fileId},f.managerToken));
+});
+test('G14-4 pending preview is reassessed from source at target size and blocks final approval',async t=> {
+  const f=await fixture(t),o=await f.order(),id=o.version.id;
+  const canvas=require('@napi-rs/canvas').createCanvas(200,100),ctx=canvas.getContext('2d');
+  ctx.fillStyle='#102060';ctx.fillRect(10,10,180,3);ctx.fillRect(10,10,3,80);ctx.fillRect(80,10,3,80);
+  const source=ok(await f.upload(id,{buffer:canvas.toBuffer('image/png')}),201);
+  await documents.settled();
+  const preview=f.db.prepare('SELECT report_json FROM document_vector_previews WHERE source_file_id=?').get(source.id);
+  assert.equal(JSON.parse(preview.report_json).quality,'beklemede');
+  assert.equal(f.db.prepare("SELECT count(*) n FROM confirmations WHERE kind='vektor_kalite' AND status='acik'").get().n,0);
+  ok(await f.measure(o.version.lines[0].id,{kind:'nakis',position:'gogus',desenDosyaId:source.id,
+    refLengthPx:180,refLengthCm:1.8,designBoxPx:{w:180,h:80}}),201);
+  const files=ok(await f.post(`/surumler/${id}/hazirla`));
+  const confirmation=f.db.prepare("SELECT message FROM confirmations WHERE kind='vektor_kalite' AND status='acik'").get();
+  assert.ok(confirmation);const report=JSON.parse(confirmation.message.slice(confirmation.message.indexOf('{')));
+  assert.equal(report.rasterQuality.measurementSize,'target');
+  assert.equal(report.rasterQuality.applicationType,'nakis');
+  assert.ok(report.rasterQuality.minLineMm<=.31);
+  assert.equal((await f.post(`/surumler/${id}/gonder`)).status,409);
+  assert.equal((await f.post(`/surumler/${id}/onay`,{fileId:files.find(x=>x.kind==='onay_formu').id},f.managerToken)).status,409);
 });
 test('G14-4 manual vector source replaces traced artwork without an automatic quality confirmation',async t=> {
   const f=await fixture(t), a=await prepared(f,{both:false});

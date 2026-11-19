@@ -80,29 +80,63 @@ function svgPdf(svg, source, target) {
   });
 }
 
-async function trace(buffer, source, target) {
+function alphaBounds({width,height,pixels}) {
+  let left=width,top=height,right=-1,bottom=-1;
+  for (let y=0;y<height;y++) for (let x=0;x<width;x++) if (pixels[(y*width+x)*4+3]>8) {
+    left=Math.min(left,x);right=Math.max(right,x);top=Math.min(top,y);bottom=Math.max(bottom,y);
+  }
+  return right<0 ? null : {x:left,y:top,w:right-left+1,h:bottom-top+1};
+}
+
+async function rasterInput(buffer, source, assessRaster = false) {
   const jpeg=buffer[0]!==137;
   imageSize(buffer,jpeg ? 'image/jpeg' : 'image/png');
   const decoded = await tracer.readImage(buffer);
   // Lossy JPEG halos on white margins are background, not physical artwork.
   // Keep a pale-only design measurable as well; raster output still needs review.
-  const bounds = pixelBounds(decoded,jpeg ? 235 : 250) || (jpeg ? pixelBounds(decoded,250) : null);
+  const transparent = assessRaster && decoded.pixels.some((v,i) => i%4 === 3 && v < 250);
+  const bounds = pixelBounds(decoded,jpeg ? 235 : 250) || (jpeg ? pixelBounds(decoded,250) : null)
+    || (transparent ? alphaBounds(decoded) : null);
   if (!bounds) throw new Error('Desen içerik kutusu boş');
   const cropped = new PNG({width:bounds.w,height:bounds.h});
   const pixels = Buffer.from(decoded.pixels);
   for (let y=0;y<bounds.h;y++) pixels.copy(cropped.data,y*bounds.w*4,
     ((bounds.y+y)*decoded.width+bounds.x)*4,((bounds.y+y)*decoded.width+bounds.x+bounds.w)*4);
   buffer=PNG.sync.write(cropped);
-  const image={width:bounds.w,height:bounds.h,pixels:cropped.data};
+  const image={width:bounds.w,height:bounds.h,pixels:cropped.data, transparent};
   const dimensions = source ? {width:image.width*source.width/decoded.width,height:image.height*source.height/decoded.height}
     : {width:image.width*0.75,height:image.height*0.75};
+  return {buffer,image,dimensions};
+}
+async function trace(buffer, source, target, assessRaster = false) {
+  const decoded=await rasterInput(buffer,source,assessRaster);
+  const {image,dimensions}=decoded;buffer=decoded.buffer;
+  if (assessRaster) {
+    const colors=perceptualPalette(image.pixels,image.width,image.height,image.transparent);
+    if (colors.colorCount>0 && colors.colorCount<=qualityLimits().maxColors) {
+      const normalized=PNG.sync.read(buffer), remap=new Map();
+      colors.clusters.forEach((cluster,index)=> {
+        let nearest=colors.significant[0];
+        for(const candidate of colors.significant) if(delta(candidate.lab,cluster.lab)<delta(nearest.lab,cluster.lab)) nearest=candidate;
+        if (!cluster.core || delta(nearest.lab,cluster.lab)<=qualityLimits().colorDeltaE) remap.set(index+1,nearest.rgb);
+      });
+      for(let i=0;i<colors.ids.length;i++) {
+        const rgb=remap.get(colors.ids[i]);
+        if(rgb) for(let c=0;c<3;c++) normalized.data[i*4+c]=rgb[c];
+        // Boundary alpha is coverage, not a translucent ink; vtracer traces a binary silhouette.
+        if(normalized.data[i*4+3]<128) normalized.data[i*4+3]=0;
+        else normalized.data[i*4+3]=255;
+      }
+      buffer=PNG.sync.write(normalized);
+    }
+  }
   const svg = await tracer.vectorize(buffer, {
     colorMode: tracer.ColorMode.Color, hierarchical: tracer.Hierarchical.Stacked,
-    mode: tracer.PathSimplifyMode.Spline, filterSpeckle: 0, colorPrecision: 6,
+    mode: tracer.PathSimplifyMode.Spline, filterSpeckle: assessRaster ? 4 : 0, colorPrecision: 6,
     pathPrecision: 5, cornerThreshold: 60, lengthThreshold: 3.5,
     spliceThreshold: 45, layerDifference: 16, maxIterations: 10,
   });
-  return { pdf: await svgPdf(svg, dimensions, target), image };
+  return { pdf: await svgPdf(svg, dimensions, target), image, svg, dimensions: target || dimensions };
 }
 
 // Operator lists expand Form XObjects, so paths inside forms are counted as well.
@@ -171,6 +205,302 @@ async function inspectPdf(buffer) {
   } finally { await doc.destroy(); }
 }
 
+// PNG/JPEG quality is advisory, measured on the cropped artwork at its output size.
+// Invalid environment settings fall back to conservative defaults, never disable a check.
+function qualityLimits(applicationType) {
+  const value = (key, fallback, max = 1e6) => {
+    const raw = process.env[`SIPARIS_VECTOR_${key}`];
+    const n = raw == null || raw.trim() === '' ? NaN : Number(raw);
+    return Number.isFinite(n) && n > 0 && n <= max ? n : fallback;
+  };
+  const embroidery = applicationType === 'nakis';
+  return { colorDeltaE:value('COLOR_DELTA_E',10,100),minColorAreaRatio:value('MIN_COLOR_AREA_RATIO',.005,1), maxColors: value('MAX_COLORS', 6), minLineMm: embroidery
+    ? value('NAKIS_MIN_LINE_MM', 1.2, 100) : value('BASKI_MIN_LINE_MM', 0.8, 100),
+    minGapMm: embroidery ? value('NAKIS_MIN_GAP_MM', 1.2, 100) : value('BASKI_MIN_GAP_MM', 0.8, 100),
+    minShapeMm2: embroidery ? value('NAKIS_MIN_SHAPE_MM2', 1.44) : value('BASKI_MIN_SHAPE_MM2', 0.64),
+    minIou: value('MIN_IOU', 0.97, 1), maxPixelDifference: value('MAX_PIXEL_DIFFERENCE', 0.03, 1),
+    maxSemiTransparentRatio: value('MAX_SEMI_TRANSPARENT_RATIO', 0.02, 1),
+    maxPaths: value('MAX_PATHS', 500), maxNodes: value('MAX_NODES', 10000) };
+}
+
+// Exact squared Euclidean distance transform with physical, anisotropic pixel spacing.
+function distances(mask, width, height, sx, sy) {
+  const field = new Float64Array(mask.length);
+  for (let i = 0; i < mask.length; i++) field[i] = mask[i] ? 1e20 : 0;
+  const size = Math.max(width, height), f = new Float64Array(size), out = new Float64Array(size);
+  const v = new Int32Array(size), z = new Float64Array(size + 1);
+  function line(n, spacing) {
+    const a = spacing * spacing;
+    let k = 0; v[0] = 0; z[0] = -Infinity; z[1] = Infinity;
+    for (let q = 1; q < n; q++) {
+      let s;
+      do {
+        const p = v[k]; s = ((f[q] + a*q*q) - (f[p] + a*p*p)) / (2*a*(q-p));
+        if (s <= z[k]) k--; else break;
+      } while (k >= 0);
+      k++; v[k] = q; z[k] = s; z[k+1] = Infinity;
+    }
+    k = 0;
+    for (let q = 0; q < n; q++) {
+      while (z[k+1] < q) k++;
+      out[q] = a*(q-v[k])**2 + f[v[k]];
+    }
+  }
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) f[x] = field[y*width+x];
+    line(width, sx);
+    for (let x = 0; x < width; x++) field[y*width+x] = out[x];
+  }
+  for (let x = 0; x < width; x++) {
+    for (let y = 0; y < height; y++) f[y] = field[y*width+x];
+    line(height, sy);
+    for (let y = 0; y < height; y++) field[y*width+x] = out[y];
+  }
+  return field;
+}
+
+// Zhang–Suen thinning removes rectangle corners rather than treating short scanline
+// runs at rounded boundaries as fine detail. The distance on the skeleton estimates width.
+function skeletonWidth(mask, width, height, sx, sy, trim = 0) {
+  const distance = distances(mask, width, height, sx, sy), skeleton = mask.slice();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let pass = 0; pass < 2; pass++) {
+      const remove = [];
+      for (let y = 1; y < height-1; y++) for (let x = 1; x < width-1; x++) {
+        const i = y*width+x;
+        if (!skeleton[i]) continue;
+        const p = [skeleton[i-width],skeleton[i-width+1],skeleton[i+1],skeleton[i+width+1],
+          skeleton[i+width],skeleton[i+width-1],skeleton[i-1],skeleton[i-width-1]];
+        const count = p.reduce((a,b) => a+b, 0);
+        if (count < 2 || count > 6) continue;
+        let transitions = 0;
+        for (let j = 0; j < 8; j++) if (!p[j] && p[(j+1)%8]) transitions++;
+        if (transitions !== 1) continue;
+        if (pass ? p[0]*p[2]*p[6] || p[0]*p[4]*p[6] : p[0]*p[2]*p[4] || p[2]*p[4]*p[6]) continue;
+        remove.push(i);
+      }
+      for (const i of remove) skeleton[i] = 0;
+      if (remove.length) changed = true;
+    }
+  }
+  // Short tapered terminals are boundary corners, not a sustained narrow channel.
+  for(let step=0;step<trim;step++) {
+    const remove=[];
+    for(let y=1;y<height-1;y++) for(let x=1;x<width-1;x++) {
+      const i=y*width+x;if(!skeleton[i]) continue;
+      const count=[-width-1,-width,-width+1,-1,1,width-1,width,width+1].reduce((n,d)=>n+skeleton[i+d],0);
+      if(count<=1) remove.push(i);
+    }
+    if(!remove.length) break;
+    for(const i of remove) skeleton[i]=0;
+  }
+  let min = Infinity;
+  for (let i = 0; i < mask.length; i++) if (skeleton[i]) {
+    // Distance is to background pixel centres; subtract one pixel pitch to estimate edges.
+    min = Math.min(min, Math.max(Math.min(sx,sy), 2*Math.sqrt(distance[i])-Math.max(sx,sy)));
+  }
+  return Number.isFinite(min) ? min : null;
+}
+
+function components(mask, width, height, excludeBorder = false) {
+  const remaining = mask.slice(), interior = new Uint8Array(mask.length), queue = new Int32Array(mask.length);
+  let minArea = Infinity;
+  for (let start = 0; start < mask.length; start++) {
+    if (!remaining[start]) continue;
+    let head = 0, tail = 1, border = false; queue[0] = start; remaining[start] = 0;
+    while (head < tail) {
+      const i = queue[head++], x = i%width, y = Math.floor(i/width);
+      if (!x || !y || x === width-1 || y === height-1) border = true;
+      for (const next of [x ? i-1 : -1,x < width-1 ? i+1 : -1,y ? i-width : -1,y < height-1 ? i+width : -1]) {
+        if (next >= 0 && remaining[next]) {remaining[next] = 0; queue[tail++] = next;}
+      }
+    }
+    if (!excludeBorder || !border) {
+      minArea = Math.min(minArea, tail);
+      for (let j = 0; j < tail; j++) interior[queue[j]] = 1;
+    }
+  }
+  return { mask: interior, minArea: Number.isFinite(minArea) ? minArea : null };
+}
+
+// CIE76 Delta E in D65 Lab: alpha and antialias boundary mixtures are not inks.
+function lab(rgb) {
+  const [r,g,b] = rgb.map(v => {v/=255;return v>.04045 ? ((v+.055)/1.055)**2.4 : v/12.92;});
+  const f = v => v>.008856 ? Math.cbrt(v) : 7.787*v+16/116;
+  const x=f((.4124564*r+.3575761*g+.1804375*b)/.95047),
+    y=f(.2126729*r+.7151522*g+.072175*b),z=f((.0193339*r+.119192*g+.9503041*b)/1.08883);
+  return [116*y-16,500*(x-y),200*(y-z)];
+}
+const delta = (a,b) => Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2]);
+function perceptualPalette(data,width,height,transparent,limits=qualityLimits()) {
+  const histogram=new Map(), keys=new Int32Array(width*height);keys.fill(-1);
+  let visible=0;
+  for(let i=0;i<keys.length;i++) {
+    const p=i*4;
+    if(data[p+3]<247 || (!transparent && Math.min(data[p],data[p+1],data[p+2])>=245)) continue;
+    visible++;
+    const key=(data[p]>>3)*1024+(data[p+1]>>3)*32+(data[p+2]>>3);keys[i]=key;
+    let bin=histogram.get(key);
+    if(!bin) histogram.set(key,bin={key,rgb:[data[p],data[p+1],data[p+2]],count:0,core:0});
+    bin.count++;
+    const x=i%width,y=Math.floor(i/width);
+    let core=true;
+    for(const n of [x ? i-1:i,x<width-1 ? i+1:i,y ? i-width:i,y<height-1 ? i+width:i]) {
+      const q=n*4;
+      if(data[q+3]<247 || Math.max(...[0,1,2].map(c=>Math.abs(data[p+c]-data[q+c])))>24) core=false;
+    }
+    if(core) bin.core++;
+  }
+  const clusters=[];
+  // Most frequent stable interior colours anchor the clusters; small JPEG/AA shades join them.
+  for(const bin of [...histogram.values()].sort((a,b)=>b.core-a.core || b.count-a.count)) {
+    bin.lab=lab(bin.rgb);
+    let id=clusters.findIndex(c=>delta(c.lab,bin.lab)<=limits.colorDeltaE);
+    if(id<0) {id=clusters.length;clusters.push({lab:bin.lab,rgb:bin.rgb,count:0,core:0});}
+    bin.id=id+1;clusters[id].count+=bin.count;clusters[id].core+=bin.core;
+  }
+  const significant=clusters.filter(c=>c.core>0 && c.count>=visible*limits.minColorAreaRatio);
+  const ids=new Int32Array(keys.length);
+  for(let i=0;i<ids.length;i++) if(keys[i]>=0) ids[i]=histogram.get(keys[i]).id;
+  return {ids,clusters,significant,colorCount:significant.length};
+}
+// A one-pixel opening removes isolated resampling/codec noise before physical measurement.
+function opening(mask,width,height) {
+  const eroded=new Uint8Array(mask.length),out=new Uint8Array(mask.length);
+  for(let y=1;y<height-1;y++) for(let x=1;x<width-1;x++) {
+    const i=y*width+x;
+    if(mask[i] && mask[i-1] && mask[i+1] && mask[i-width] && mask[i+width]) eroded[i]=1;
+  }
+  for(let y=1;y<height-1;y++) for(let x=1;x<width-1;x++) {
+    const i=y*width+x;
+    if(eroded[i] || eroded[i-1] || eroded[i+1] || eroded[i-width] || eroded[i+width]) out[i]=1;
+  }
+  return out;
+}
+
+async function rasterQuality(image, pdf, svg, dimensions, applicationType, target, priorMetrics) {
+  const limits = qualityLimits(applicationType), originalWidth = image.width, originalHeight = image.height;
+  const scale = Math.min(1, Math.sqrt(1_000_000/(originalWidth*originalHeight)),
+    target ? dimensions.width/PT_PER_MM*300/25.4/originalWidth : 1,
+    target ? dimensions.height/PT_PER_MM*300/25.4/originalHeight : 1);
+  const width = Math.max(1, Math.round(originalWidth*scale)), height = Math.max(1, Math.round(originalHeight*scale));
+  const sourceCanvas = canvasLib.createCanvas(width, height), ctx = sourceCanvas.getContext('2d');
+  const full = canvasLib.createCanvas(originalWidth, originalHeight);
+  full.getContext('2d').putImageData(new canvasLib.ImageData(Uint8ClampedArray.from(image.pixels),originalWidth,originalHeight),0,0);
+  ctx.drawImage(full,0,0,width,height);
+  const data = ctx.getImageData(0,0,width,height).data;
+  const transparent = image.transparent;
+  const palette = perceptualPalette(data,width,height,transparent,limits), colorIds=palette.ids;
+  let alphaEdgePixels = 0, semi = 0;
+  // Coverage classification is bounded to the analysis grid (at most 1 MP).
+  for (let y=0;y<height;y++) for (let x=0;x<width;x++) {
+    const i=(y*width+x)*4, alpha=data[i+3];
+    if (alpha<=8 || alpha>=247) continue;
+    let coverage=false;
+    for(let dy=-2;dy<=2 && !coverage;dy++) for(let dx=-2;dx<=2;dx++) {
+      const xx=x+dx,yy=y+dy;
+      if(xx>=0 && yy>=0 && xx<width && yy<height && data[(yy*width+xx)*4+3]>=247) {coverage=true;break;}
+    }
+    alphaEdgePixels++;
+    if(!coverage) semi++;
+  }
+  const w = width+2, h = height+2, mask = new Uint8Array(w*h);
+  for (let i = 0; i < width*height; i++) {
+    const p = i*4, alpha = data[p+3];
+    if (alpha <= 8) continue;
+
+    const ink = transparent ? alpha > 127 : Math.min(data[p],data[p+1],data[p+2]) < 245;
+    if (ink) mask[(Math.floor(i/width)+1)*w+i%width+1] = 1;
+  }
+  const sx = dimensions.width/PT_PER_MM/width, sy = dimensions.height/PT_PER_MM/height;
+  let minLineMm = null, minShapeMm2 = null;
+  // Complex palettes already require review; avoid unbounded per-colour skeleton work.
+  if (target && palette.colorCount <= limits.maxColors && palette.clusters.length <= 64) {
+    for (let id=1;id<=palette.clusters.length;id++) {
+      if (!palette.clusters[id-1].core) continue;
+      const region = new Uint8Array(mask.length);
+      for (let i = 0; i < colorIds.length; i++) if (colorIds[i] === id) region[(Math.floor(i/width)+1)*w+i%width+1] = 1;
+      const clean=opening(region,w,h), component = components(clean,w,h);
+      if (component.minArea === null) continue;
+      const line = skeletonWidth(clean,w,h,sx,sy), area = component.minArea*sx*sy;
+      if (line !== null) minLineMm = Math.min(minLineMm ?? Infinity,line);
+      minShapeMm2 = Math.min(minShapeMm2 ?? Infinity,area);
+    }
+  }
+  const cleanMask=opening(mask,w,h);
+  const background = Uint8Array.from(cleanMask, x => 1-x), holes = components(background,w,h,true);
+  // A background pixel bracketed by ink in either axis belongs to a gap,
+  // including channels open to the exterior. Outer blank margins never qualify.
+  const gaps = holes.mask.slice();
+  for (let y=1;y<h-1;y++) {
+    let first=-1,last=-1;
+    for (let x=1;x<w-1;x++) if(cleanMask[y*w+x]) {if(first<0) first=x;last=x;}
+    for (let x=first+1;first>=0 && x<last;x++) if(!cleanMask[y*w+x]) gaps[y*w+x]=1;
+  }
+  for (let x=1;x<w-1;x++) {
+    let first=-1,last=-1;
+    for (let y=1;y<h-1;y++) if(cleanMask[y*w+x]) {if(first<0) first=y;last=y;}
+    for (let y=first+1;first>=0 && y<last;y++) if(!cleanMask[y*w+x]) gaps[y*w+x]=1;
+  }
+  const minGapMm = target ? skeletonWidth(opening(gaps,w,h),w,h,sx,sy,Math.ceil(limits.minGapMm/Math.min(sx,sy))) : null;
+  const cleanHoles=components(opening(holes.mask,w,h),w,h);
+  if (target && cleanHoles.minArea !== null) minShapeMm2 = Math.min(minShapeMm2 ?? Infinity,cleanHoles.minArea*sx*sy);
+  const output = canvasLib.createCanvas(width,height), outputCtx = output.getContext('2d');
+  const doc = await openPdf(pdf);
+  try {
+    const page = await doc.getPage(1), viewport = page.getViewport({scale:1});
+    await page.render({canvasContext:outputCtx,viewport,background:transparent ? 'rgba(0,0,0,0)' : 'white',
+      transform:[width/viewport.width,0,0,height/viewport.height,0,0]}).promise;
+  } finally {await doc.destroy();}
+  const rendered = outputCtx.getImageData(0,0,width,height).data;
+  const outputMask=new Uint8Array(mask.length);
+  for(let i=0;i<width*height;i++) {
+    const p=i*4;
+    outputMask[(Math.floor(i/width)+1)*w+i%width+1]=transparent ? rendered[p+3]>127 : Math.min(rendered[p],rendered[p+1],rendered[p+2])<245;
+  }
+  const nearby=(m,i)=>m[i] || m[i-1] || m[i+1] || m[i-w] || m[i+w]
+    || m[i-w-1] || m[i-w+1] || m[i+w-1] || m[i+w+1];
+  let mismatch = 0, union = 0, difference = 0;
+  for (let i = 0; i < width*height; i++) {
+    const p = i*4, a = !!mask[(Math.floor(i/width)+1)*w+i%width+1];
+    const b = transparent ? rendered[p+3] > 127 : Math.min(rendered[p],rendered[p+1],rendered[p+2]) < 245;
+    const index=(Math.floor(i/width)+1)*w+i%width+1;
+    if ((a && !nearby(outputMask,index)) || (b && !nearby(mask,index))) mismatch++;
+    if (a || b) union++;
+    for (let c = 0; c < 3; c++) difference += Math.abs((data[p+c]*data[p+3]/255+255-data[p+3])
+      -(rendered[p+c]*rendered[p+3]/255+255-rendered[p+3]))/255;
+  }
+  const pathCount = priorMetrics?.pathCount ?? (svg.match(/<path\b/g)||[]).length;
+  const arity = {M:2,L:2,C:6,Q:4,A:7,S:4,T:2,H:1,V:1};
+  let nodeCount = 0;
+  for (const match of svg.matchAll(/\bd=["']([^"']*)["']/g)) {
+    for (const command of match[1].matchAll(/([MLCQASTHVZ])([^MLCQASTHVZ]*)/gi)) {
+      const name=command[1].toUpperCase(), args=command[2].match(/[-+]?(?:\d*\.\d+|\d+\.?\d*)(?:e[-+]?\d+)?/gi)||[];
+      if (arity[name]) nodeCount += Math.ceil(args.length/arity[name])*(name==='C' ? 3 : ['Q','S'].includes(name) ? 2 : 1);
+    }
+  }
+  const metrics = { colorCount:palette.colorCount, minLineMm, minGapMm, minShapeMm2, pathCount, nodeCount:priorMetrics?.nodeCount ?? nodeCount,
+    iou:union ? 1-mismatch/union : 0, pixelDifference:difference/(width*height*3),
+    semiTransparentRatio:alphaEdgePixels ? semi/alphaEdgePixels : 0, alphaEdgePixels, semiTransparentPixels:semi, measurementSize:target ? 'target' : 'pending', analysisDpi:target ? Math.min(25.4/sx,25.4/sy) : null, noiseFilter:'one-pixel-opening', colorDeltaE:limits.colorDeltaE, minColorAreaRatio:limits.minColorAreaRatio, iouTolerancePx:1,
+    widthMm:target ? dimensions.width/PT_PER_MM : null,heightMm:target ? dimensions.height/PT_PER_MM : null,
+    applicationType, analysisWidth:width, analysisHeight:height, limits };
+  const reasons = [];
+  if (!metrics.colorCount) reasons.push('Algısal renk kümeleri güvenilir ayrıştırılamadı; fotoğraf veya geçiş için teyit gerekir.');
+  if (metrics.colorCount > limits.maxColors) reasons.push(`Renk sayısı ${metrics.colorCount}; sınır ${limits.maxColors}.`);
+  if (minLineMm === null) reasons.push('En ince çizgi güvenilir ölçülemedi.');
+  else if (minLineMm < limits.minLineMm) reasons.push(`En ince çizgi ${minLineMm.toFixed(3)} mm; ${applicationType==='nakis' ? 'nakış' : 'baskı'} sınırı ${limits.minLineMm} mm.`);
+  if (minGapMm !== null && minGapMm < limits.minGapMm) reasons.push(`En küçük boşluk ${minGapMm.toFixed(3)} mm; sınır ${limits.minGapMm} mm.`);
+  if (minShapeMm2 !== null && minShapeMm2 < limits.minShapeMm2) reasons.push(`En küçük kapalı şekil ${minShapeMm2.toFixed(3)} mm²; sınır ${limits.minShapeMm2} mm².`);
+  if (metrics.iou < limits.minIou) reasons.push(`Vektör benzerliği ${metrics.iou.toFixed(4)}; gerekli IoU ${limits.minIou}.`);
+  if (metrics.pixelDifference > limits.maxPixelDifference) reasons.push(`Piksel farkı ${metrics.pixelDifference.toFixed(4)}; sınır ${limits.maxPixelDifference}.`);
+  if (metrics.semiTransparentRatio > limits.maxSemiTransparentRatio) reasons.push(`Alfa kenarında yarı saydam piksel oranı ${metrics.semiTransparentRatio.toFixed(4)}; sınır ${limits.maxSemiTransparentRatio}.`);
+  if (pathCount > limits.maxPaths) reasons.push(`Yol sayısı ${pathCount}; sınır ${limits.maxPaths}.`);
+  if (metrics.nodeCount > limits.maxNodes) reasons.push(`Düğüm sayısı ${metrics.nodeCount}; sınır ${limits.maxNodes}.`);
+  return {metrics,reasons};
+}
+
 // One-pixel foreground runs estimate fine raster details; not a production measurement.
 function rasterMinDetail(image, widthMm) {
   const { width, height, pixels: data } = image;
@@ -228,20 +558,22 @@ function resizePage(page, target, crop) {
 }
 
 /** Local only. targetMm is the artwork content boundary in millimetres. */
-async function vectorize({ buffer, mime, targetMm, manualVector = false } = {}) {
+async function vectorize({ buffer, mime, targetMm, manualVector = false, applicationType = 'baski', qualitySource } = {}) {
   if (!Buffer.isBuffer(buffer) || !buffer.length) throw new TypeError('buffer gerekli');
   const target = targetSize(targetMm);
   mime = String(mime || '').split(';')[0].toLowerCase();
-  let pdf, kind, inputPages, rasterDetails = [], reasons = [], aspectRatioError = 0;
+  let pdf, kind, inputPages, rasterQualityReport, rasterDetails = [], reasons = [], aspectRatioError = 0;
+  if (!['baski','nakis'].includes(applicationType)) throw new TypeError('applicationType baski veya nakis olmalı');
   if (manualVector && mime!=='application/pdf') throw new Error('Hazır vektör PDF gerekli');
   if (['image/png', 'image/jpeg', 'image/jpg'].includes(mime)) {
-    const result = await trace(buffer, null, target);
+    const result = await trace(buffer, null, target, true);
     pdf = result.pdf; kind = 'raster';
     inputPages = [{ width: result.image.width, height: result.image.height }];
     const source = { width: result.image.width * 0.75, height: result.image.height * 0.75 };
     if (target) aspectRatioError=Math.abs((target.width/target.height)/(source.width/source.height)-1);
-    rasterDetails.push(rasterMinDetail(result.image, (target || source).width / PT_PER_MM));
-    reasons.push('raster_detay_ve_metin_gorsel_teyidi');
+    rasterQualityReport = await rasterQuality(result.image,pdf,result.svg,result.dimensions,applicationType,target);
+    rasterDetails.push(rasterQualityReport.metrics.minLineMm);
+    reasons.push(...rasterQualityReport.reasons);
   } else if (mime === 'application/pdf') {
     inputPages = await inspectPdf(buffer);
     if (manualVector && inputPages.some(p=>p.imageCount || (!p.vectorPaintCount && !p.textCount)))
@@ -267,7 +599,9 @@ async function vectorize({ buffer, mime, targetMm, manualVector = false } = {}) 
             if (target) aspectRatioError=Math.max(aspectRatioError,Math.abs((target.width/target.height)/(source.width/source.height)-1));
             rasterDetails.push(rasterMinDetail(result.image,(target || source).width/PT_PER_MM));
           } else if (target) aspectRatioError=Math.max(aspectRatioError,
-            resizePage(original.getPage(i),target,await pageContentBox(await rendered.getPage(i+1))));
+            resizePage(original.getPage(i),target,qualitySource
+              ? {x:0,y:0,width:inputPages[i].width,height:inputPages[i].height}
+              : await pageContentBox(await rendered.getPage(i+1))));
         }
         pdf = Buffer.from(await original.save({ updateFieldAppearances: false }));
       } finally { if (rendered) await rendered.destroy(); }
@@ -276,6 +610,19 @@ async function vectorize({ buffer, mime, targetMm, manualVector = false } = {}) 
     if (inputPages.some((x, i) => x.imageCount && !rasterPages[i])) reasons.push('karma_sayfada_raster_korundu');
   } else throw new TypeError('Desteklenen MIME: image/png, image/jpeg, application/pdf');
 
+  // A cached preview is resized as vector paths; assess its final PDF against the original raster.
+  if (qualitySource) {
+    if (!manualVector || !target || !Buffer.isBuffer(qualitySource.buffer)
+      || !['image/png','image/jpeg','image/jpg'].includes(qualitySource.mime)) throw new TypeError('Geçerli kalite kaynağı gerekli');
+    const original=await rasterInput(qualitySource.buffer,null,true);
+    aspectRatioError=Math.abs((target.width/target.height)/(original.image.width/original.image.height)-1);
+    rasterQualityReport=await rasterQuality(original.image,pdf,'',target,applicationType,target,qualitySource.metrics);
+    rasterDetails.push(rasterQualityReport.metrics.minLineMm);reasons.push(...rasterQualityReport.reasons);
+    if (![qualitySource.metrics?.pathCount,qualitySource.metrics?.nodeCount].every(n=>Number.isFinite(n) && n>=0)) {
+      rasterQualityReport.metrics.pathCount=null;rasterQualityReport.metrics.nodeCount=null;
+      reasons.push('Önizlemenin yol ve düğüm ölçümleri eksik; özgün kaynaktan yeniden hazırlama gerekir.');
+    }
+  }
   const pages = await inspectPdf(pdf);
   const colors = new Set(pages.flatMap(x => [...x.colors]));
   const minValues = pages.map(x => x.minLineWidth).filter(Number.isFinite)
@@ -283,16 +630,19 @@ async function vectorize({ buffer, mime, targetMm, manualVector = false } = {}) 
   const minLineWidth = minValues.length ? Math.min(...minValues) : null;
   const pathCount = pages.reduce((sum, x) => sum + x.pathCount, 0);
   // Both stored dimensions are authoritative; report any aspect change for visual review.
-  if (pathCount > 2000) reasons.push('cok_yol');
-  if (minLineWidth !== null && minLineWidth < 0.2) reasons.push('ince_cizgi');
+  if (!rasterQualityReport && pathCount > 2000) reasons.push('cok_yol');
+  if (!rasterQualityReport && minLineWidth !== null && minLineWidth < 0.2) reasons.push('ince_cizgi');
   if (pages.some(x => x.textCount)) reasons.push('metin');
-  if (pathCount && minLineWidth === null) reasons.push('dolgu_detay_kalinligi_olculemedi');
-  if (inputPages.some(x => !Number.isFinite(x.width / x.height) || x.width / x.height > 20 || x.width / x.height < 0.05)) reasons.push('supheli_oran');
-  if (aspectRatioError > 0.01) reasons.push('oran_bozuldu');
-  return { pdf, kind, report: { pathCount, colorCount: colors.size, minLineWidth,
+  if (!rasterQualityReport && pathCount && minLineWidth === null) reasons.push('dolgu_detay_kalinligi_olculemedi');
+  if (inputPages.some(x => !Number.isFinite(x.width / x.height) || x.width / x.height > 20 || x.width / x.height < 0.05)) reasons.push(rasterQualityReport ? 'Desenin en boy oranı olağan sınırların dışında.' : 'supheli_oran');
+  if (aspectRatioError > 0.01) reasons.push(rasterQualityReport ? 'Hedef ölçü desenin en boy oranını değiştiriyor.' : 'oran_bozuldu');
+  return { pdf, kind, report: { pathCount, colorCount: rasterQualityReport?.metrics.colorCount ?? colors.size, minLineWidth,
     minLineWidthUnit: 'mm', minLineWidthEstimated: true, aspectRatioPreserved: aspectRatioError <= 0.01,
     aspectRatioError, aspectRatioMethod: 'content-boundary-transform',
-    quality: manualVector ? 'iyi' : reasons.length ? 'teyit' : 'iyi', reasons: [...new Set(reasons)],
+    rasterQuality: rasterQualityReport?.metrics,
+    quality: manualVector && !qualitySource ? 'iyi' : rasterQualityReport && !target ? 'beklemede' : reasons.length ? 'teyit' : 'iyi',
+    qualityLabel: rasterQualityReport && !target ? 'Kalite ölçüden sonra değerlendirilecek' : undefined,
+    reasons: rasterQualityReport && !target ? [] : [...new Set(reasons)],
     pageCount: pages.length, pages: pages.map(x => ({ pathCount: x.pathCount,
       imageCount: x.imageCount, textCount: x.textCount, widthMm: x.width / PT_PER_MM,
       heightMm: x.height / PT_PER_MM })), rasterPdfMethod: kind === 'raster' && mime === 'application/pdf'
