@@ -26,11 +26,14 @@ module.exports = function documentRouter({db,dataDir}) {
     if (!req.is('multipart/form-data')) return next('route');
     next();
   },receive,wrap(async(req,res)=> {
-    const file=await documents.upload(db,dataDir,id(req),req.body,documents.validateUpload(req.file),req.user);
-    documents.queuePreview(db,dataDir,file,req.user);
-    res.status(201).json(file);
+    // upload() commits the vector record with the file and queues its preview itself.
+    res.status(201).json(await documents.upload(db,dataDir,id(req),req.body,documents.validateUpload(req.file),req.user));
   }));
-  router.get('/surumler/:id/vektor-durum',wrap((req,res)=>res.json(documents.vectorStatus(db,id(req)))));
+  router.get('/surumler/:id/vektor-durum',wrap((req,res)=> {
+    // The first read repairs sources without a record (uploaded before G25) or with a job lost to a restart.
+    documents.ensureVectorRecords(db,dataDir,id(req),req.user);
+    res.json(documents.vectorStatus(db,id(req)));
+  }));
   router.get('/dosyalar/:id',wrap((req,res)=> {
     const file=db.prepare('SELECT * FROM files WHERE id=?').get(id(req));
     if (!file) fail('Dosya bulunamadı',404);
@@ -49,7 +52,8 @@ module.exports = function documentRouter({db,dataDir}) {
   router.patch('/uygulamalar/:id',wrap(async(req,res)=>res.json(await documents.editApplication(db,dataDir,id(req),req.body,req.user))));
   router.delete('/uygulamalar/:id',wrap((req,res)=>res.json(documents.deleteApplication(db,id(req),req.user))));
   router.post('/surumler/:id/hazirla',wrap(async(req,res)=>res.json(await documents.prepare(db,dataDir,id(req),req.user,req.query.yeniden==='1'))));
-  router.post('/surumler/:id/otomatik-olc',wrap(async(req,res)=>res.json(await documents.automaticMeasure(db,dataDir,id(req),req.user,req.query.yeniden==='1'))));
+  // degisen=1 measures only applications whose inputs changed or that were never measured.
+  router.post('/surumler/:id/otomatik-olc',wrap(async(req,res)=>res.json(await documents.automaticMeasure(db,dataDir,id(req),req.user,req.query.yeniden==='1',req.query.degisen==='1'))));
   router.post('/surumler/:id/gonder',wrap((req,res,next)=> {
     const v=orders.snapshot(db,id(req));
     documents.unlocked(db,v.id);

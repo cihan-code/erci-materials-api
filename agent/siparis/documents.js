@@ -20,7 +20,13 @@ const GENERATED = ['uretim_formu','onay_formu','baski_formu','nakis_formu','dese
 const WORKSHOP = ['baski_formu','nakis_formu','desen_vektor'];
 // Derived from an uploaded source right after upload; never an input of the forms and never sent to the workshop.
 const PREVIEW = 'desen_vektor_onizleme';
+// Product image views. 'kol' is a reference close-up only: sleeve positions are measured on the front image.
+const VIEWS = ['on','arka','kol'];
 const pending = new Set();
+// Source files whose preview job is queued or running in this process (per database); a 'hazirlaniyor'
+// row outside this set was lost with a restart and is queued again on the next status read.
+const previewingByDb = new WeakMap();
+const previewing = db => { let ids=previewingByDb.get(db); if (!ids) previewingByDb.set(db,ids=new Set()); return ids; };
 const roots = new WeakMap();
 const sha256 = buffer => crypto.createHash('sha256').update(buffer).digest('hex');
 
@@ -31,12 +37,15 @@ function init(db) {
     DROP TRIGGER IF EXISTS document_workshop_key;
     DROP TRIGGER IF EXISTS document_workshop_manual;
     DROP TABLE IF EXISTS document_workshop_results;`);
-  db.exec(`CREATE TABLE IF NOT EXISTS document_file_meta (
-    file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
-    line_id INTEGER REFERENCES order_lines(id), application_id INTEGER REFERENCES applications(id),
-    gorunum TEXT CHECK(gorunum IN ('on','arka')), mime TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS document_application_sources (
+  db.exec(fileMetaTable('document_file_meta',true));
+  // SQLite cannot widen a CHECK in place: rebuild once so a sleeve ('kol') image can be stored.
+  if (!db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='document_file_meta'").get().sql.includes("'kol'")) tx(db,()=> {
+    db.exec(`${fileMetaTable('document_file_meta_kol')};
+      INSERT INTO document_file_meta_kol(file_id,line_id,application_id,gorunum,mime) SELECT file_id,line_id,application_id,gorunum,mime FROM document_file_meta;
+      DROP TABLE document_file_meta;
+      ALTER TABLE document_file_meta_kol RENAME TO document_file_meta;`);
+  });
+  db.exec(`CREATE TABLE IF NOT EXISTS document_application_sources (
     application_id INTEGER PRIMARY KEY REFERENCES applications(id),
     file_id INTEGER NOT NULL REFERENCES files(id)
   );
@@ -53,6 +62,13 @@ function init(db) {
   `);
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS document_file_path ON files(version_id,path)');
   flats.init(db);
+}
+function fileMetaTable(name,ifMissing=false) {
+  return `CREATE TABLE ${ifMissing?'IF NOT EXISTS ':''}${name} (
+    file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    line_id INTEGER REFERENCES order_lines(id), application_id INTEGER REFERENCES applications(id),
+    gorunum TEXT CHECK(gorunum IN (${VIEWS.map(v=>`'${v}'`).join(',')})), mime TEXT NOT NULL
+  )`;
 }
 function safeSegment(value) {
   if (typeof value === 'string' && value.includes('~')) fail('Dosya yolunda geçersiz sipariş numarası',400);
@@ -145,16 +161,20 @@ async function upload(db, dataDir, versionId, input, file, user) {
     const v=draft(db,versionId); unlocked(db,versionId);
     const lineId=input.lineId == null ? null : integer(Number(input.lineId),'lineId',1);
     if (lineId && !v.lines.some(l=>l.id===lineId)) fail('Satır bu sürüme ait değil');
-    if (input.gorunum != null && !['on','arka'].includes(input.gorunum)) fail('gorunum on/arka olmalı');
+    if (input.gorunum != null && !VIEWS.includes(input.gorunum)) fail('gorunum on/arka/kol olmalı');
     if (input.kind==='urun_gorsel' && (!lineId || !input.gorunum)) fail('Ürün görseli için lineId ve gorunum gerekli');
     const applicationId=input.applicationId==null?null:integer(Number(input.applicationId),'applicationId',1);
     const app=applicationId==null?null:v.lines.flatMap(l=>l.applications).find(a=>a.id===applicationId);
     if(applicationId!=null && (!app || (lineId && app.line_id!==lineId))) fail('Uygulama bu satır/sürüme ait değil');
     const saved=saveFile(db,dataDir,v,input.kind,file.buffer,user,{...file,lineId:lineId??app?.line_id,applicationId,gorunum:input.gorunum},written);
     if(app && input.kind==='desen_kaynak') db.prepare('INSERT INTO document_application_sources(application_id,file_id) VALUES(?,?) ON CONFLICT(application_id) DO UPDATE SET file_id=excluded.file_id').run(app.id,saved.id);
+    // The vector record is committed with the file: a slow measurement or a restart can never leave it unknown.
+    if (SOURCE_KINDS.includes(input.kind)) db.prepare("INSERT INTO document_vector_previews(source_file_id,status,updated_at) VALUES(?,'hazirlaniyor',?)").run(saved.id,Date.now());
     return saved;
   }); } catch (e) { for (const f of written) fs.unlinkSync(f); throw e; }
+  if (SOURCE_KINDS.includes(saved.kind)) previewing(db).add(saved.id);
   const olcuHatasi=await measureAfterSave(db,dataDir,versionId,user,true);
+  queuePreview(db,dataDir,saved,user);
   return olcuHatasi ? {...saved,olcuHatasi} : saved;
 }
 function measure(db, dataDir, input, user, applicationId = null) {
@@ -245,6 +265,18 @@ async function editApplication(db,dataDir,applicationId,changes,user) {
     if (changes.position!=null && !POSITIONS.includes(changes.position)) fail('Geçersiz uygulama konumu');
     const changedDimensions=['width_mm','height_mm'].some(k=>Object.hasOwn(changes,k));
     for (const k of ['width_mm','height_mm']) if (Object.hasOwn(changes,k) && (!Number.isSafeInteger(changes[k]) || changes[k]<=0)) fail('Geçersiz ölçü');
+    if (Object.hasOwn(changes,'elleTeyit')) {
+      // The person enters and vouches for this size in the manual editor, so its confirmation closes with the save.
+      if (changes.elleTeyit!==true) fail('elleTeyit yalnız true olabilir');
+      if (!['width_mm','height_mm'].every(k=>Object.hasOwn(changes,k))) fail('Elle teyit için en ve boy (mm) gerekli');
+      if (Object.keys(changes).some(k=>!['width_mm','height_mm','elleTeyit','lineId'].includes(k))) fail('Elle teyitle yalnız en ve boy kaydedilir');
+      const {reasons,...kept}=previous;
+      db.prepare('UPDATE applications SET width_mm=?,height_mm=?,measure_source=?,needs_confirmation=0 WHERE id=?')
+        .run(changes.width_mm,changes.height_mm,JSON.stringify({...kept,method:'elle',elleTeyit:true}),app.id);
+      db.prepare("UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='olcu' AND ref_table='applications' AND ref_id=? AND status='acik'").run(user.id,app.id);
+      audit(db,user.id,'uygulama_elle_olcu',app.id,{width_mm:changes.width_mm,height_mm:changes.height_mm,onceki:{width_mm:app.width_mm,height_mm:app.height_mm}});
+      return {application:db.prepare('SELECT * FROM applications WHERE id=?').get(app.id)};
+    }
     if (changes.desenDosyaId!=null) {
       const v=orders.snapshot(db,app.version_id), source=v.files.find(f=>f.id===Number(changes.desenDosyaId) && SOURCE_KINDS.includes(f.kind));
       const meta=source && db.prepare('SELECT line_id FROM document_file_meta WHERE file_id=?').get(source.id);
@@ -336,7 +368,8 @@ function formOrder(db,dataDir,v,sourceByApp) {
       const images={};
       for (const f of v.files.filter(f=>f.kind==='urun_gorsel')) {
         const meta=db.prepare('SELECT * FROM document_file_meta WHERE file_id=?').get(f.id);
-        if (meta?.line_id===l.id) images[meta.gorunum==='on'?'front':'back']=preview(f);
+        // A sleeve close-up is a reference only; the forms carry front and back views.
+        if (meta?.line_id===l.id && ['on','arka'].includes(meta.gorunum)) images[meta.gorunum==='on'?'front':'back']=preview(f);
       }
       const sizes=JSON.parse(l.sizes_json);
       if (Object.keys(sizes).length && Object.values(sizes).reduce((a,b)=>a+b,0)!==l.quantity) fail(`Satır ${l.id}: PDF için adetlere eşit beden dağılımı gerekli`,409);
@@ -407,29 +440,67 @@ function manuallyMeasured(app) {
   const source=provenance(app);
   return source.method==='elle' || (!['otomatik','otomatik_renk'].includes(source.method) && (app.width_mm!=null || app.height_mm!=null));
 }
+const POSITION_LABELS={gogus:'Göğüs',sol_gogus:'Sol göğüs',sag_gogus:'Sağ göğüs',kol:'Kol',sol_kol:'Sol kol',sag_kol:'Sağ kol',sirt:'Sırt',ense:'Ense',kapusan:'Kapüşon',kapuson:'Kapüşon'};
+const SLEEVES=['kol','sol_kol','sag_kol'];
+// Returns the measurement inputs, or {gap} with the concrete reason why the application cannot be measured yet.
 function autoInputs(db,v,line,app) {
-  const view=viewForPosition(app.position);
-  const images=v.files.filter(f=>f.kind==='urun_gorsel' && f.line_id===line.id && (view==='teyit'||f.gorunum===view));
+  const view=viewForPosition(app.position),label=POSITION_LABELS[app.position] || app.position;
+  // Measurement needs the whole garment; a sleeve close-up ('kol') carries no L scale.
+  const images=v.files.filter(f=>f.kind==='urun_gorsel' && f.line_id===line.id && (view==='teyit' ? ['on','arka'].includes(f.gorunum) : f.gorunum===view));
   // A replacement upload supersedes the previous immutable file in this view.
   const image=images.at(-1);
-  const sourceId=db.prepare('SELECT file_id FROM document_application_sources WHERE application_id=?').get(app.id)?.file_id;
-  const design=v.files.find(f=>f.id===sourceId && f.kind==='desen_kaynak');
+  const linked=db.prepare('SELECT file_id FROM document_application_sources WHERE application_id=?').get(app.id)?.file_id;
+  // Applications registered before G24 kept their design only in the panel's provenance.
+  const recorded=linked==null ? Number(provenance(app).desenDosyaId) : null;
+  const design=v.files.find(f=>f.id===(linked ?? recorded) && f.kind==='desen_kaynak');
   const meta=design && db.prepare('SELECT line_id FROM document_file_meta WHERE file_id=?').get(design.id);
-  if(!image || (meta?.line_id && meta.line_id!==line.id))return null;
+  if(meta?.line_id && meta.line_id!==line.id)return {gap:'Desen dosyası başka bir ürün satırına ait; bu satırın desenini bağlayın.'};
+  if(!image)return {gap:SLEEVES.includes(app.position) ? `${label} görünümü için ürün görseli yok: kol konumu ön görselde ölçülür ve bu satırda ön görsel yüklenmedi.`
+    : view==='teyit' ? `${label} konumu için ön veya arka ürün görseli yok.` : `${view==='on'?'Ön':'Arka'} görünüm için ürün görseli yok (${label} konumu ${view==='on'?'ön':'arka'} görselde ölçülür).`};
   const productFlats=flats.list(db).filter(f=>f.urun===line.product_key);
   const viewFlats=productFlats.filter(f=>f.gorunum===(view==='teyit'?image.gorunum:view));
   // A front library drawing also supplies the same garment's back chest width.
   const candidates=viewFlats.length?viewFlats:productFlats;
   const requested=provenance(app).flatId;
   const flat=requested ? productFlats.find(f=>f.id===requested)??null : candidates.length===1?candidates[0]:null;
-  return {image,design,flat,product:line.product_key,position:app.position};
+  // Two L patterns for one product (e.g. regular and oversize) differ in size: never pick one silently.
+  const flatNote=!requested && candidates.length>1 ? `Bu ürün için ${candidates.length} L kalıp kaydı var (${candidates.map(f=>f.ad).join(', ')}); hangisinin kullanılacağı belli değil.` : null;
+  return {image,design,flat,product:line.product_key,position:app.position,...(flatNote?{flatNote}:{}),...(design && linked==null?{linkDesign:true}:{})};
 }
 function autoFingerprint({desenDosyaId,...app},input) {return JSON.stringify({app,input});}
+// autoMeasure states these two when no single L pattern was passed; a known ambiguity replaces them.
+const NO_FLAT_REASONS=['Ürünün L kalıp referansı bulunamadı','Ürün için geçerli L beden kalıp ölçüleri bulunamadı'];
+function explain(result,input) {
+  let reasons=Array.isArray(result.reasons) ? result.reasons : result.reason ? [result.reason] : [];
+  if(input.flatNote)reasons=[input.flatNote,...reasons.filter(r=>!NO_FLAT_REASONS.some(prefix=>String(r).startsWith(prefix)))];
+  // The sleeve is measured on the front view; say so when that view did not yield a size.
+  if(SLEEVES.includes(input.position) && reasons.length && result.width_mm==null)reasons=[`Kol konumu ön görselde ölçülemedi: ${reasons.join(' ')}`];
+  return {...result,reasons,reason:reasons.join(' '),needs_confirmation:result.needs_confirmation || reasons.length>0};
+}
+// Replace a stale or generic open measurement confirmation with the concrete reason; nothing is measured.
+function noteReason(db,user,appId,reason) {
+  const open=db.prepare("SELECT id,message FROM confirmations WHERE kind='olcu' AND ref_table='applications' AND ref_id=? AND status='acik' ORDER BY id DESC LIMIT 1").get(appId);
+  if(open?.message===reason)return false;
+  if(open)db.prepare('UPDATE confirmations SET message=? WHERE id=?').run(reason,open.id);
+  else db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('olcu','applications',?,?)").run(appId,reason);
+  db.prepare('UPDATE applications SET needs_confirmation=1 WHERE id=?').run(appId);
+  audit(db,user.id,'uygulama_olcu_gerekce',appId,{reason});
+  return true;
+}
+const unmeasured=app=>!manuallyMeasured(app) && !['otomatik','otomatik_renk'].includes(provenance(app).method);
 
 // The record is already committed; a failing automatic measurement must not make the client retry and duplicate it.
 async function measureAfterSave(db,dataDir,versionId,user,changedOnly) {
   try { await automaticMeasure(db,dataDir,versionId,user,false,changedOnly); return null; }
-  catch (e) { return `Otomatik ölçü şimdi çalışmadı (${e.message}); kayıt oluşturuldu, ölçüyü sonra yeniden deneyin`; }
+  catch (e) {
+    // Persist the failure on applications that were never measured, so it survives a page reload.
+    try { tx(db,()=> {
+      if(orders.version(db,versionId).status!=='taslak')return;
+      for(const app of db.prepare('SELECT a.* FROM applications a JOIN order_lines l ON l.id=a.line_id WHERE l.version_id=?').all(versionId))
+        if(unmeasured(app))noteReason(db,user,app.id,`Otomatik ölçü çalışmadı: ${e.message}`);
+    }); } catch {}
+    return `Otomatik ölçü şimdi çalışmadı (${e.message}); kayıt oluşturuldu, ölçüyü sonra yeniden deneyin`;
+  }
 }
 async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,changedOnly=false) {
   assertUser(db,user.id);draft(db,versionId);unlocked(db,versionId);
@@ -441,7 +512,16 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
       const app=db.prepare('SELECT * FROM applications WHERE id=?').get(original.id);
       if(!app || (!regenerate && manuallyMeasured(app)))continue;
       const input=autoInputs(db,v,line,app);
-      if(!input)continue;
+      if(input.gap) {
+        tx(db,()=> {
+          draft(db,versionId);unlocked(db,versionId);
+          const current=db.prepare('SELECT * FROM applications WHERE id=?').get(app.id);
+          // Never overwrite a size: an earlier automatic result keeps its own confirmation.
+          if(current && !manuallyMeasured(current) && current.width_mm==null && noteReason(db,user,app.id,input.gap))
+            results.push({applicationId:app.id,width_mm:null,height_mm:null,needs_confirmation:true,reason:input.gap});
+        });
+        continue;
+      }
       const previous=provenance(app);
       if(changedOnly && ['otomatik','otomatik_renk'].includes(previous.method) && previous.gorselFileId===input.image.id && previous.desenFileId===(input.design?.id??null) &&
         previous.flatId===(input.flat?.id??null) && previous.refCm===(input.flat?.refLengthCm??null) && previous.refBeden===(input.flat?.refBeden??null) && JSON.stringify(previous.olculerL??null)===JSON.stringify(input.flat?.olculerL??null))continue;
@@ -450,12 +530,14 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
       try {
         const image={...input.image,...await vectorInput(dataDir,input.image)};
         const design=input.design?{...input.design,...await vectorInput(dataDir,input.design)}:null;
-        result=await generateInChild({type:'autoMeasure',input:{...input,image,design}},signal,{timeoutMs:15000});
+        const {flatNote,linkDesign,...job}=input;
+        result=await generateInChild({type:'autoMeasure',input:{...job,image,design}},signal,{timeoutMs:15000});
       } catch(e) {
         if(signal.aborted)throw e;
-        result={width_mm:null,height_mm:null,needs_confirmation:true,reason:`Otomatik ölçü tamamlanamadı: ${e.message}`,
+        result={width_mm:null,height_mm:null,needs_confirmation:true,reasons:[`Otomatik ölçü tamamlanamadı: ${e.message}`],
           measure_source:{method:'otomatik',flatId:input.flat?.id??null,flatAd:input.flat?.ad??null,refBeden:input.flat?.refBeden??null,refCm:input.flat?.refLengthCm??null,chestPx:null,designBoxPx:null,scale:null,confidence:0,gorselFileId:input.image.id,desenFileId:(input.design?.id??null)}};
       }
+      result=explain(result,input);
       signal.throwIfAborted();
       tx(db,()=> {
         const current=draft(db,versionId);unlocked(db,versionId);
@@ -463,6 +545,7 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
         // A manual edit, source replacement or reference change during rendering
         // invalidates this result. The subsequent save/upload queues fresh work.
         if(!currentApp || autoFingerprint(currentApp,autoInputs(db,current,currentLine,currentApp))!==fingerprint)return;
+        if(input.linkDesign)db.prepare('INSERT INTO document_application_sources(application_id,file_id) VALUES(?,?) ON CONFLICT(application_id) DO NOTHING').run(app.id,input.design.id);
         db.prepare('UPDATE applications SET width_mm=?,height_mm=?,measure_source=?,needs_confirmation=? WHERE id=?')
           .run(result.width_mm,result.height_mm,JSON.stringify(result.measure_source),result.needs_confirmation?1:0,app.id);
         db.prepare("UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='olcu' AND ref_table='applications' AND ref_id=? AND status='acik'").run(user.id,app.id);
@@ -612,10 +695,11 @@ function queuePreview(db,dataDir,file,user) {
     ON CONFLICT(source_file_id) DO UPDATE SET preview_file_id=excluded.preview_file_id,status=excluded.status,report_json=excluded.report_json,message=excluded.message,updated_at=excluded.updated_at`)
     .run(file.id,extra.previewId ?? null,status,extra.report ? JSON.stringify(extra.report) : null,message,Date.now());
   mark('hazirlaniyor');
+  previewing(db).add(file.id);
   const task=(async()=> {
     const written=[];
     try {
-      const result=await renderQueue(async signal=>generateInChild({type:'vector',input:await vectorInput(dataDir,file)},signal));
+      const result=await renderQueue(async signal=>generateInChild({type:'vector',designBox:true,input:await vectorInput(dataDir,file)},signal));
       tx(db,()=> {
         const v=draft(db,file.version_id);
         if (!db.prepare('SELECT 1 FROM files WHERE id=?').get(file.id)) fail('Kaynak dosya silindi',409);
@@ -630,9 +714,19 @@ function queuePreview(db,dataDir,file,user) {
       for (const f of written) try { fs.unlinkSync(f); } catch {}
       try { mark('hata',String(e.message || e).slice(0,300)); } catch {}
     }
-  })().finally(()=>pending.delete(task));
+  })().finally(()=>{pending.delete(task);previewing(db).delete(file.id);});
   pending.add(task);
   return task;
+}
+function ensureVectorRecords(db,dataDir,versionId,user) {
+  const v=orders.snapshot(db,integer(versionId,'versionId',1));
+  // A preview file can only be added to a draft; other versions report 'yok' in vectorStatus.
+  if (v.status!=='taslak') return;
+  for (const file of v.files.filter(f=>SOURCE_KINDS.includes(f.kind))) {
+    if (previewing(db).has(file.id)) continue;
+    const row=db.prepare('SELECT status FROM document_vector_previews WHERE source_file_id=?').get(file.id);
+    if (!row || row.status==='hazirlaniyor') queuePreview(db,dataDir,file,user);
+  }
 }
 // Once an application has a size, a preview that waited for it ('beklemede') is judged
 // against that target. Runs in the background on the shared render queue.
@@ -679,13 +773,21 @@ function requalifyVersion(db,dataDir,versionId,user) {
   return task;
 }
 function vectorStatus(db,versionId) {
-  return db.prepare(`SELECT p.source_file_id AS sourceFileId,p.preview_file_id AS previewFileId,p.status,p.message,p.report_json
+  const rows=db.prepare(`SELECT p.source_file_id AS sourceFileId,p.preview_file_id AS previewFileId,p.status,p.message,p.report_json
     FROM document_vector_previews p JOIN files f ON f.id=p.source_file_id WHERE f.version_id=? ORDER BY p.source_file_id`).all(versionId)
     .map(({report_json,...r})=> {
       const report=report_json ? JSON.parse(report_json) : {};
       return {...r,quality:report.quality ?? null,reasons:Array.isArray(report.reasons) ? report.reasons : [],
-        ...(report.targetMm ? {targetMm:report.targetMm} : {})};
+        ...(report.targetMm ? {targetMm:report.targetMm} : {}),
+        ...(report.sourceKind ? {sourceKind:report.sourceKind} : {}),...(report.designBox ? {designBox:report.designBox} : {})};
     });
+  // Every source file gets a row: a missing record is stated, never left for the client to guess.
+  const missing=db.prepare(`SELECT f.id FROM files f WHERE f.version_id=? AND f.kind IN ('desen_kaynak','desen_kaynak_vektor')
+    AND NOT EXISTS (SELECT 1 FROM document_vector_previews p WHERE p.source_file_id=f.id)`).all(versionId);
+  const draftVersion=orders.version(db,versionId).status==='taslak';
+  for (const {id} of missing) rows.push({sourceFileId:id,previewFileId:null,status:'yok',quality:null,reasons:[],
+    message:draftVersion ? 'Vektör kaydı yok; durum yeniden okununca hazırlanır.' : 'Sürüm taslak olmadığı için vektör önizlemesi hazırlanmadı.'});
+  return rows.sort((a,b)=>a.sourceFileId-b.sourceFileId);
 }
 const settled=()=>Promise.all([...pending]);
 function workshopPackage(db,versionId) {
@@ -717,7 +819,19 @@ function registerWorkshop(boundDb,dataDir) {
     return {providerRef:result.providerRef};
   });
 }
-module.exports={queuePreview,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+module.exports={queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+function vectorModule() {
+  // Native tracer/canvas binaries come from npm; a platform without them must say so, not fail anonymously.
+  try { return require('./vector'); }
+  catch (e) { throw new Error(`Vektörleştirme bu sunucuda yok: ${String(e.message).split('\n')[0]}`); }
+}
+async function designBoxOf(input) {
+  try {
+    const auto=require('./autoMeasure'),[page]=await auto.rasterPages(input,600,input.mime==='application/pdf'?[1]:null);
+    const box=page && auto.designContent(page).box;
+    return box ? {w:box.w,h:box.h} : null;
+  } catch { return null; }
+}
 if (require.main===module && process.argv[2]==='--vector-worker') {
   // A one-shot worker must not depend on PDF/native-library handles becoming
   // idle. Flush the entire IPC response before exiting; close drains it in the parent.
@@ -727,7 +841,12 @@ if (require.main===module && process.argv[2]==='--vector-worker') {
     try {
       let result;
       if (job.type==='autoMeasure') result=await require('./autoMeasure').autoMeasure(job.input);
-      else if (job.type==='vector') result=await require('./vector').vectorize(await normalizeVectorInput(job.input));
+      else if (job.type==='vector') {
+        const input=await normalizeVectorInput(job.input);
+        result=await vectorModule().vectorize(input);
+        // Upload previews also record the source kind and the artwork content box (ratio for manual sizing).
+        if (job.designBox) Object.assign(result.report,{sourceKind:result.kind,designBox:await designBoxOf(input)});
+      }
       else {
         const forms=require('./pdf'); result=[];
         for (const [kind,render] of [['uretim_formu',forms.renderProductionForm],['onay_formu',forms.renderApprovalForm],['baski_formu',forms.renderPrintForm],['nakis_formu',forms.renderEmbroideryForm]]) {
