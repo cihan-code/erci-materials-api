@@ -144,3 +144,55 @@ DATA_DIR="$TASK_SMOKE_DIR" npm run smoke -- test/fixtures/siparis/smoke-panel.js
 Smoke mevcut haliyle bir panel snapshot'ı gerektirir; sağlanan fixture tamamen uydurmadır. Gerçek `data/` veya `.env` kullanılmaz. Yerel HTTP testleri için loopback port açma izni gerekir.
 
 Çalışma zamanı notu: Node 24 + better-sqlite3 11.10, rastgele GC anlarında `RemoveEnvironmentCleanupHook ... env != nullptr` native hatasıyla süreci düşürüyordu (Worker Thread'de ve testlerde; fatura testlerinde 15 koşunun 11–12'sinde). better-sqlite3 12.11 ile aynı koşularda görülmedi (0/15, `fetch`'li eski test biçimiyle de). Bu yüzden `engines` `>=20` oldu. Sunucu tek iş parçacığında setInterval kullanır; eşzamanlılık testi iki ayrı Node sürecinde iki bağlantıyla yapılır.
+
+### Düz çizim hazırlama ve toplu yükleme
+
+`tools/duz-cizim-hazirla.js <kaynak> <çıktı> --ayar <ayar.json>` PNG'lerden
+`kirpilmis/`, özgün üstünde yeşil referans/mavi kırpma kutulu `onizleme/` ve
+`duz-cizimler.json` üretir. Kaynak PNG'leri, gerçek ölçü ayarını ve çıktıları
+repo dışında tutun. Hazırlama aracı yükleme yapmaz.
+
+Ayar bir dosya adı → nesne eşlemesidir. Örneğin **uydurma** bir çizim için:
+
+```json
+{"ornek.png":{"ad":"Örnek","urun":"tisort","refLengthCm":52,
+"refAciklama":"M / 1 - GÖĞÜS","bolge":{"x":50,"y":55,"w":260,"h":250},"refY":[135,145]}}
+```
+
+M beden cm değeri ve etiket görselden okunarak ayara yazılır; OCR veya cm
+tahmini yapılmaz. `bolge`, tablo/logo/açıklama dışındaki ürün arama alanıdır;
+`refY`, ilgili yatay ölçüyü diğer oklardan ayıran **manuel** y aralığıdır.
+Araç bu alanda kırmızı piksel maskesinden yatay gövdeyi, numara dairesi
+boşluğunu ve uç çizgisi/nokta merkezlerini bulur; uçlar veya px uzunluğu
+ayardan alınmaz. Yakındaki izole dikey çizgi yatay uca katılmaz. Genellikle
+1/göğüs seçilir; etiket farklıysa göğüs etiketi kullanılır. Alt giyimde anlamlı
+yatay bel/basen ölçüsü seçilir; bel oku ürünün 20 px payı dışında kalıyorsa
+basen seçimi açıklanır. Yalnız yatay tek cm/px ölçeği vardır.
+
+Kırpma koyu ürün çizgilerinin sınır kutusuna 20 px pay ekler. Kırmızı işaretler
+komşu açık arka plan rengiyle temizlenir, mevcut koyu ürün çizgileri korunur.
+Kaynakta numara dairesinin örttüğü ürün çizgisi görünmediğinden temiz çıktıdaki
+bu boşluklar yeniden çizilmez. Önizlemeyi kontrol edin. Belirsiz seçim/cm
+`belirsiz` alanıyla, null referansla raporlanır; okunabilir PNG için özgün
+önizleme yine üretilir. Başarılı kayıtta `refUcNoktalar` kırpılmış görüntü
+koordinatındadır ve `refLengthPx=x2-x1`; kırpmada yeniden boyutlandırma yoktur.
+
+`node agent/siparis/tools/duz-cizim-yukle.js --api http://127.0.0.1:3000 --json <çıktı>/duz-cizimler.json --kuru`
+yalnız liste verir; giriş veya ağ isteği yapmaz. `--kuru` kaldırıldığında araç
+TTY'den kullanıcı adını ve **gizli** şifreyi sorar, `/api/siparis/giris` ile
+aldığı token'ı yalnız bellekte tutar. Her kalıp için multipart `POST /duz-cizimler`
+ve JSON `PUT /duz-cizimler/:id/referans` kullanılır. Aynı adlı kalıp tekrar
+yüklenmez; önceki işlem referans kaydetmeden kesildiyse eksik referans onarılır.
+Uzak sunucuda HTTPS gerekir; yönlendirme takip edilmez. Canlı yüklemeyi ayrıca
+hedefleyip çalıştırmanız gerekir. `urun` yalnız `agent/operations/recipes.json`
+anahtarıdır; eşleşme yoksa `null` kalır ve API zorunlu ürün istediği için
+**atlanır**. Örneğin ceket için recipe yoktur; ölçüsü net olsa da yüklenmez.
+
+Bu kaynaklar yalnız ön görünümdür. Sırt baskısının ölçüsü aynı ön çizimin yatay
+referansından hesaplanır; arka görünüm türetilmez. `measure.js` hem en hem boya
+aynı ölçeği uygular. Bu worktree'de ekran placement kutusunu yöneten panel
+kodu yoktur; ekranda en-boy oranı kilidi doğrulanamamıştır.
+
+Test: `node --test test/siparis-duz-cizim-araclari.test.js`. Çizimler ve ayarlar
+uydurmadır; geçici DATA_DIR ve 127.0.0.1 API üzerinde yükleme, tekrar yükleme ve
+göğüs okunun yarısı genişliğinde desenin 26 cm ölçülmesi denetlenir.
