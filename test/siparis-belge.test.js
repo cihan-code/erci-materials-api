@@ -76,7 +76,12 @@ test('HTTP flat library uploads, lists and restricts reference saving to approva
   const body=new FormData();body.set('ad','Örnek ön');body.set('urun','tisort');body.set('gorunum','on');body.set('file',new Blob([designPng()],{type:'image/png'}),'ornek.png');
   const flat=ok(await f.request('/duz-cizimler',{method:'POST',body,token:f.token}),201);
   const reference={refLengthPx:280,refLengthCm:56,refAciklama:'Omuzdan eteğe'};
-  assert.equal((await f.request(`/duz-cizimler/${flat.id}/referans`,{method:'PUT',body:reference,token:f.token})).status,403);
+  assert.equal(f.team.onay_yetkisi,1);
+  ok(await f.request(`/duz-cizimler/${flat.id}/referans`,{method:'PUT',body:reference,token:f.token}));
+  const restricted=await require('../agent/siparis/auth').createUser(f.db,{name:'Örnek Kısıtlı',password:'synthetic-password',onayYetkisi:false});
+  assert.equal(restricted.onay_yetkisi,0);
+  const restrictedToken=ok(await f.post('/giris',{name:restricted.name,password:'synthetic-password'})).token;
+  assert.equal((await f.request(`/duz-cizimler/${flat.id}/referans`,{method:'PUT',body:reference,token:restrictedToken})).status,403);
   const saved=ok(await f.request(`/duz-cizimler/${flat.id}/referans`,{method:'PUT',body:reference,token:f.managerToken}));
   assert.equal(saved.refLengthCm,56);assert.match(saved.dosya,/siparis\/flats\//);
   assert.equal(ok(await f.request('/duz-cizimler',{token:f.token})).length,1);
@@ -152,6 +157,16 @@ test('HTTP approval package contains only workshop files, authenticated links an
     assert.equal((await f.request(file.url.replace('/api/siparis',''),{token:f.token})).status,200);
   }
   assert.equal(f.db.prepare("SELECT count(*) n FROM outbox WHERE kind='atolye_dosya'").get().n,4);
+  const vectors=bundle.files.filter(file=>file.kind==='desen_vektor');
+  assert.equal(vectors.length,2);
+  f.db.prepare("UPDATE outbox SET status='manuel_bekliyor' WHERE id=?").run(vectors[0].outbox.id);
+  f.db.prepare("UPDATE outbox SET status='tamam' WHERE id=?").run(vectors[1].outbox.id);
+  // A later legacy key with a matching payload must not override the canonical job.
+  f.db.prepare("INSERT INTO outbox(kind,version_id,idempotency_key,payload_json,status) VALUES('atolye_dosya',?,?,?,'basarisiz')")
+    .run(a.id,`legacy:${a.id}`,JSON.stringify({file:{id:vectors[0].id}}));
+  const updated=ok(await f.request(`/surumler/${a.id}/atolye-paketi`,{token:f.token}));
+  assert.equal(updated.files.find(file=>file.id===vectors[0].id).outbox.status,'manuel_bekliyor');
+  assert.equal(updated.files.find(file=>file.id===vectors[1].id).outbox.status,'tamam');
   assert.equal(f.db.pragma('foreign_key_check').length,0);
 });
 
@@ -198,7 +213,7 @@ test('HTTP regeneration rolls back registrations and removes partial new bytes o
   assert.equal(f.db.prepare('SELECT token FROM document_preparations WHERE version_id=?').get(a.id).token,null);
 });
 
-test('legacy file migration preserves existing approval references and is idempotent',async t=> {
+test('document initialization retires legacy queue shims idempotently and preserves core files',async t=> {
   const dir=fs.mkdtempSync(path.join(require('node:os').tmpdir(),'belge-migration-'));
   const {openDb}=require('../agent/siparis/db');
   const db=openDb(path.join(dir,'test.sqlite'));
@@ -208,7 +223,12 @@ test('legacy file migration preserves existing approval references and is idempo
   const o=orders.createOrder(db,{order_no:'MRC-MIGRATION',lines:[{product_key:'tisort',quantity:1}]},user);
   const file=orders.addFile(db,o.version.id,{kind:'onay_formu',path:'/synthetic/onay.pdf',sha256:'a'.repeat(64)},user);
   db.prepare('INSERT INTO approvals(version_id,approved_by,approved_file_id) VALUES(?,?,?)').run(o.version.id,user.id,file.id);
+  db.exec(`CREATE TABLE document_workshop_results(job_id INTEGER PRIMARY KEY, status TEXT);
+    CREATE TRIGGER document_workshop_allowlist BEFORE INSERT ON outbox BEGIN SELECT 1; END;
+    CREATE TRIGGER document_workshop_key AFTER INSERT ON outbox BEGIN SELECT 1; END;
+    CREATE TRIGGER document_workshop_manual AFTER UPDATE OF status ON outbox BEGIN SELECT 1; END;`);
   documents.init(db);documents.init(db);
+  assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE name IN ('document_workshop_allowlist','document_workshop_key','document_workshop_manual','document_workshop_results','document_files_migration')").all(),[]);
   assert.deepEqual(db.prepare('SELECT * FROM files WHERE id=?').get(file.id),file);
   assert.equal(db.prepare('SELECT approved_file_id FROM approvals').get().approved_file_id,file.id);
   assert.equal(db.pragma('foreign_keys',{simple:true}),1);assert.equal(db.pragma('foreign_key_check').length,0);

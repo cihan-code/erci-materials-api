@@ -17,25 +17,12 @@ const roots = new WeakMap();
 const sha256 = buffer => crypto.createHash('sha256').update(buffer).digest('hex');
 
 function init(db) {
-  // Old G1 databases allowed just one file per kind. Preserve IDs, approval FKs
-  // and bytes while enabling several source images and application vectors.
-  const legacy = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='files'").get();
-  if (/UNIQUE\s*\(\s*version_id\s*,\s*kind\s*\)/i.test(legacy?.sql || '')) {
-    db.pragma('foreign_keys = OFF');
-    try {
-      tx(db, () => {
-        db.exec(`CREATE TABLE IF NOT EXISTS document_files_migration (
-          id INTEGER PRIMARY KEY AUTOINCREMENT, version_id INTEGER NOT NULL REFERENCES order_versions(id),
-          kind TEXT NOT NULL, path TEXT NOT NULL, sha256 TEXT NOT NULL,
-          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-        );
-        INSERT INTO document_files_migration SELECT * FROM files;
-        DROP TABLE files;
-        ALTER TABLE document_files_migration RENAME TO files;`);
-        if (db.pragma('foreign_key_check').length) fail('Dosya şema geçişinde ilişki hatası', 409);
-      });
-    } finally { db.pragma('foreign_keys = ON'); }
-  }
+  // The core owns schema migrations and queue transitions. Retire the old
+  // document-layer shims on existing databases as well as fresh installs.
+  db.exec(`DROP TRIGGER IF EXISTS document_workshop_allowlist;
+    DROP TRIGGER IF EXISTS document_workshop_key;
+    DROP TRIGGER IF EXISTS document_workshop_manual;
+    DROP TABLE IF EXISTS document_workshop_results;`);
   db.exec(`CREATE TABLE IF NOT EXISTS document_file_meta (
     file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
     line_id INTEGER REFERENCES order_lines(id), application_id INTEGER REFERENCES applications(id),
@@ -49,26 +36,7 @@ function init(db) {
     version_id INTEGER PRIMARY KEY REFERENCES order_versions(id),
     token TEXT, started_at INTEGER, ready INTEGER NOT NULL DEFAULT 0, source_json TEXT
   );
-  CREATE TABLE IF NOT EXISTS document_workshop_results (
-    job_id INTEGER PRIMARY KEY REFERENCES outbox(id), status TEXT NOT NULL
-  );
-  -- Compatibility with the old G1 enqueue loop. New G10 inserts already have
-  -- the canonical kind and key; these triggers then make no changes.
-  CREATE TRIGGER IF NOT EXISTS document_workshop_allowlist
-    BEFORE INSERT ON outbox WHEN NEW.kind='atolye_dosya'
-    AND COALESCE(json_extract(NEW.payload_json,'$.file.kind'),'') NOT IN ('baski_formu','nakis_formu','desen_vektor')
-    BEGIN SELECT RAISE(IGNORE); END;
-  CREATE TRIGGER IF NOT EXISTS document_workshop_key
-    AFTER INSERT ON outbox WHEN NEW.kind='atolye_dosya'
-    AND NEW.idempotency_key <> 'atolye:' || NEW.version_id || ':' || json_extract(NEW.payload_json,'$.file.id')
-    BEGIN UPDATE outbox SET idempotency_key='atolye:' || NEW.version_id || ':' || json_extract(NEW.payload_json,'$.file.id') WHERE id=NEW.id; END;
-  CREATE TRIGGER IF NOT EXISTS document_workshop_manual
-    AFTER UPDATE OF status ON outbox WHEN OLD.status='isleniyor' AND NEW.status='tamam' AND EXISTS
-      (SELECT 1 FROM document_workshop_results WHERE job_id=NEW.id AND status='manuel_bekliyor')
-    BEGIN
-      UPDATE outbox SET status='manuel_bekliyor',provider_ref=NULL WHERE id=NEW.id;
-      INSERT INTO audit_log(action,ref,detail_json) VALUES('atolye_manuel_bekliyor',CAST(NEW.id AS TEXT),'{}');
-    END;`);
+  `);
   flats.init(db);
 }
 function safeSegment(value) {
@@ -336,15 +304,16 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
       const current=draft(db,versionId); assertMeasurements(db,current);
       if (JSON.stringify(current)!==start.fingerprint || inputFingerprint(db,current)!==start.sourceFingerprint || db.prepare('SELECT token FROM document_preparations WHERE version_id=?').get(versionId)?.token!==token)
         fail('Sürüm hazırlama sırasında değişti; yeniden deneyin',409);
-      // Old bytes remain immutable; only current draft registrations are replaced.
-      for (const f of current.files.filter(f=>GENERATED.includes(f.kind))) {
-        db.prepare("UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='vektor_kalite' AND ref_table='files' AND ref_id=? AND status='acik'").run(user.id,f.id);
-        db.prepare('DELETE FROM files WHERE id=?').run(f.id);
-      }
       for (const g of generated) {
         const file=saveFile(db,dataDir,v,g.kind,g.buffer,user,g.meta,written);
         if (g.report?.quality==='teyit') db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('vektor_kalite','files',?,?)")
           .run(file.id,`Vektör kalitesi görsel teyit gerektiriyor: ${JSON.stringify(g.report)}`);
+      }
+      // Register new files first so SQLite cannot reuse an old file ID.
+      // Old bytes remain immutable; only current draft registrations are replaced.
+      for (const f of current.files.filter(f=>GENERATED.includes(f.kind))) {
+        db.prepare("UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='vektor_kalite' AND ref_table='files' AND ref_id=? AND status='acik'").run(user.id,f.id);
+        db.prepare('DELETE FROM files WHERE id=?').run(f.id);
       }
       db.prepare('UPDATE document_preparations SET token=NULL,ready=1,source_json=? WHERE version_id=? AND token=?').run(start.sourceFingerprint,versionId,token);
       audit(db,user.id,'belgeler_hazirla',versionId,{regenerate});
@@ -358,8 +327,8 @@ function workshopPackage(db,versionId) {
   if (v.status!=='onaylandi') fail('Atölye paketi için sürüm onaylanmalı',409);
   const order=db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id);
   const files=v.files.filter(f=>WORKSHOP.includes(f.kind)).map(f=> {
-    const job=db.prepare("SELECT id,status,idempotency_key FROM outbox WHERE version_id=? AND kind='atolye_dosya' AND (idempotency_key=? OR json_extract(payload_json,'$.file.id')=?) ORDER BY id DESC LIMIT 1")
-      .get(versionId,`atolye:${versionId}:${f.id}`,f.id);
+    const job=db.prepare("SELECT id,status,idempotency_key FROM outbox WHERE version_id=? AND kind='atolye_dosya' AND idempotency_key=? ORDER BY id DESC LIMIT 1")
+      .get(versionId,`atolye:${versionId}:${f.id}`);
     return {...f,url:`/api/siparis/dosyalar/${f.id}`,outbox:job || null};
   });
   return {message:buildWorkshopMessage({...order,version_no:v.version_no,lines:v.lines},files),files};
@@ -377,12 +346,9 @@ function registerWorkshop(boundDb,dataDir) {
     const root=roots.get(db) || path.dirname(db.name);
     const buffer=readFile(root,file);
     const result=await handler({...job,payload_json:{...payload,order:{...order,version_no:orders.version(db,job.version_id).version_no,lines:orders.snapshot(db,job.version_id).lines},file:{...file,buffer,mime:'application/pdf'}}});
-    tx(db,()=> {
-      db.prepare(`INSERT INTO document_workshop_results(job_id,status) VALUES(?,?)
-        ON CONFLICT(job_id) DO UPDATE SET status=excluded.status`).run(job.id,result.status);
-      audit(db,null,'atolye_bagdastirici_sonucu',job.id,{status:result.status});
-    });
-    return result;
+    audit(db,null,'atolye_bagdastirici_sonucu',job.id,{status:result.status});
+    if (result.status==='manuel_bekliyor') return {status:'manuel_bekliyor'};
+    return {providerRef:result.providerRef};
   });
 }
 module.exports={init,validateUpload,upload,measure,prepare,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
