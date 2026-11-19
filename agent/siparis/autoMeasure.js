@@ -213,7 +213,7 @@ function matchDesignLocal(image,design,reference,initial=null,allowFine=true) {
 
 function silhouette(p, segmented=null) {
   const {mask,raw,background,box}=segmented||productMask(p),w=p.width,h=p.height;
-  if(!box || box.w<w*.16 || box.h<h*.3 || box.w*box.h<w*h*.10)return null;
+  if(!box || box.w<Math.max(16,w*.06) || box.h<Math.max(24,h*.12) || box.w*box.h<w*h*.006)return null;
   let area=0;for(const bit of mask)area+=bit;
   // Small logos and page typography have no substantial filled garment body.
   if(area<box.w*box.h*.3 || area>w*h*.94)return null;
@@ -228,7 +228,7 @@ function silhouette(p, segmented=null) {
   const band=rows.filter(r=>r.y>=hemY-box.h*.12 && r.y<=hemY-box.h*.075 && r.width>box.w*.2);
   let hemWidthPx=band.length?median(band.map(r=>r.width)):null;
   const bodyColor=dominant(p,Array.from(mask.keys()).filter(i=>mask[i]));
-  if(distance(bodyColor,background)>18) {
+  if(distance(bodyColor,background)>(segmented?.lowContrast?35:18)) {
     // Closing may bridge a cuff-to-body gap. The original foreground evidence
     // in the hem band keeps hanging sleeves out of the central torso width.
     const widths=[];
@@ -260,7 +260,12 @@ function silhouette(p, segmented=null) {
     }
   }
   const symmetry=1-mismatch/Math.max(1,total);
-  if(symmetry<.75 || Math.max(...rows.slice(0,Math.ceil(rows.length*.5)).map(r=>r.width))<hemWidthPx*1.05)return null;
+  // Small sheet products still need visible shoulder/sleeve breadth. A framed
+  // cover logo can fill into a nearly rectangular body after closing.
+  const smallProduct=box.w*box.h<w*h*.10,shoulderBreadth=smallProduct?1.12:1.05;
+  const tail=rows.filter(r=>r.y>=hemY-Math.max(3,box.h*.035)&&r.y<hemY);
+  if(smallProduct&&(!tail.length||median(tail.map(r=>r.width))<hemWidthPx*.65))return null;
+  if(symmetry<.75 || Math.max(...rows.slice(0,Math.ceil(rows.length*.5)).map(r=>r.width))<hemWidthPx*shoulderBreadth)return null;
   return {mask,box,rows,bodyCenterX:median(band.map(r=>(r.l+r.r)/2)),hemWidthPx,chestPx:hemWidthPx,hemY,shoulderY:shoulder.y,shoulderMethod:'merkez gövdenin hızlı genişlediği ilk sürekli omuz satırı',bodyHeightPx:hemY-shoulder.y+1,symmetry,softEdgeFraction:soft/Math.max(1,edgeN),textureFraction:texture/Math.max(1,interior)};
 }
 function wrinkleFraction(p,ref,printBox) {
@@ -287,24 +292,57 @@ function components(mask,w,h,minArea=1) {
   return out;
 }
 
+function overlapFraction(a,b) {
+  const area=Math.max(0,Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x))*Math.max(0,Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y));
+  return area/Math.max(a.w*a.h,b.w*b.h);
+}
+
 function silhouettes(p) {
-  const base=productMask(p),w=p.width,h=p.height,closed=closeMask(base.raw,w,h);
-  let pieces=components(closed,w,h,w*h*.035).filter(c=>c.box.h>h*.3&&c.box.w>w*.15);
-  // Touching sleeves can connect two otherwise separate garments. Only split
-  // when two substantial, disconnected upper bodies provide independent seeds.
-  pieces=pieces.flatMap(c=>{
-    const top=new Uint8Array(w*h),cut=c.box.y+c.box.h*.32;
-    for(const i of c.pixels)if(Math.floor(i/w)<cut)top[i]=1;
-    const seeds=components(top,w,h,c.area*.025).filter(a=>a.box.h>c.box.h*.16&&a.box.w>c.box.w*.18).sort((a,b)=>a.box.x-b.box.x);
-    if(seeds.length!==2 || seeds[0].box.x+seeds[0].box.w>=seeds[1].box.x)return [c];
-    const boundary=Math.round((seeds[0].box.x+seeds[0].box.w+seeds[1].box.x)/2);
-    return [false,true].map(right=>({pixels:c.pixels.filter(i=>(i%w>=boundary)===right)}));
-  });
-  return pieces.map(c=>{
-    let mask=new Uint8Array(w*h);for(const i of c.pixels)mask[i]=1;
-    mask=fillHoles(mask,w,h);
-    return silhouette(p,{...base,mask,box:bounds(mask,w,h)});
-  }).filter(Boolean);
+  const base=productMask(p),w=p.width,h=p.height;
+  // A white product may contribute only a thin boundary before hole filling.
+  // Judge body area in silhouette(), rather than discarding that outline here.
+  const minInk=Math.max(24,Math.min(w*h*.006,Math.min(w,h)*.5));
+  const collect=(raw,lowContrast=false)=>{
+    const closed=closeMask(raw,w,h);
+    let pieces=components(closed,w,h,minInk).filter(c=>c.box.h>h*.12&&c.box.w>w*.06);
+    // Touching sleeves can connect two otherwise separate garments. Only split
+    // when two substantial, disconnected upper bodies provide independent seeds.
+    pieces=pieces.flatMap(c=>{
+      const top=new Uint8Array(w*h),cut=c.box.y+c.box.h*.32;
+      for(const i of c.pixels)if(Math.floor(i/w)<cut)top[i]=1;
+      const seeds=components(top,w,h,c.area*.025).filter(a=>a.box.h>c.box.h*.16&&a.box.w>c.box.w*.18).sort((a,b)=>a.box.x-b.box.x);
+      if(seeds.length!==2 || seeds[0].box.x+seeds[0].box.w>=seeds[1].box.x)return [c];
+      const boundary=Math.round((seeds[0].box.x+seeds[0].box.w+seeds[1].box.x)/2);
+      return [false,true].map(right=>({pixels:c.pixels.filter(i=>(i%w>=boundary)===right)}));
+    });
+    return pieces.map(c=>{
+      let mask=new Uint8Array(w*h);for(const i of c.pixels)mask[i]=1;
+      mask=fillHoles(mask,w,h);
+      const ref=silhouette(p,{...base,raw,mask,lowContrast,box:bounds(mask,w,h)});
+      if(ref)ref.maskMethod=lowContrast?'acik_zemin_bolge':'renk_kenar';
+      return ref;
+    }).filter(Boolean);
+  };
+  const refs=collect(base.raw);
+  // Keep established silhouettes unchanged. On a light background, a weaker
+  // boundary separates the exterior flood region from pale fabric and shadows;
+  // filling each closed component keeps internal print and folds out of geometry.
+  if(Math.min(...base.background)>235) {
+    const raw=new Uint8Array(w*h),covered=new Uint8Array(w*h);
+    // Do not segment a known product twice. Pale products elsewhere on the
+    // same page still get the weaker boundary, including on mixed-color sheets.
+    for(const {box:b} of refs)for(let y=Math.max(0,b.y-5);y<Math.min(h,b.y+b.h+5);y++)covered.fill(1,y*w+Math.max(0,b.x-5),y*w+Math.min(w,b.x+b.w+5));
+    let area=0;
+    for(let i=0;i<raw.length;i++)if(!covered[i]) {
+      const d=p.data,b=base.background;
+      raw[i]=d[i*4+3]>64&&Math.max(Math.abs(d[i*4]-b[0]),Math.abs(d[i*4+1]-b[1]),Math.abs(d[i*4+2]-b[2]))>6?1:0;
+      area+=raw[i];
+    }
+    if(area<minInk)return refs;
+    const recovered=collect(raw,true);
+    for(const ref of recovered)if(!refs.some(r=>overlapFraction(r.box,ref.box)>.5))refs.push(ref);
+  }
+  return refs;
 }
 
 // Rectangular dilation via an integral image joins letters without scanning a
@@ -385,47 +423,75 @@ async function autoMeasure({image,design,flat,product,position}) {
       }
       for(let k=0;k<refs.length;k++) {
         const ref=refs[k],cue=cues[k],scale=scaleFor(ref,measurements);
-        allViews.push({page:i+1,index:k,view:cue.view,hooded:cue.hooded,viewEvidence:{lining:cue.lining,cords:cue.cords},productBoxPx:ref.box,shoulderY:ref.shoulderY,hemY:ref.hemY,hemWidthPx:ref.hemWidthPx,bodyHeightPx:ref.bodyHeightPx,...scale});
-        if((refs.length>1||cue.view!=='teyit')&&cue.view!==viewForPosition(position))continue;
+        allViews.push({page:i+1,index:k,view:cue.view,hooded:cue.hooded,viewEvidence:{lining:cue.lining,cords:cue.cords},maskMethod:ref.maskMethod,productBoxPx:ref.box,shoulderY:ref.shoulderY,hemY:ref.hemY,hemWidthPx:ref.hemWidthPx,bodyHeightPx:ref.bodyHeightPx,...scale});
+        if(cue.view!=='teyit'&&cue.view!==viewForPosition(position))continue;
+        if(refs.length>1&&cue.view==='teyit'&&!designs.length)continue;
         if(designs.length)for(let j=0;j<designs.length;j++) {
           const match=matchDesign(pages[i],designs[j],ref,false);
           if(match.box)candidates.push({p:pages[i],ref,match,page:i+1,designPage:j+1,index:k});
         }
         // Also retain the color hypothesis: refinement may reject the template.
-        const match=['gogus','sol_gogus','sag_gogus','sirt'].includes(position)?colorDesign(pages[i],ref):{box:null};
+        // Unknown sheet products need the supplied design. An independently
+        // identified front/back view keeps the established color fallback.
+        const match=(!designs.length||refs.length===1||cue.view!=='teyit')&&['gogus','sol_gogus','sag_gogus','sirt'].includes(position)?colorDesign(pages[i],ref):{box:null};
         if(match.box)candidates.push({p:pages[i],ref,match,page:i+1,designPage:null,index:k});
       }
     }
     source.views=allViews;
-    if(allViews.some(v=>allViews.filter(q=>q.page===v.page).length>1&&v.view==='teyit'))reasons.push(`Ürün görünümü eşleştirme güveni düşük: ${allViews.filter(v=>v.view==='teyit').length} görünüm ayrılamadı; görünüm teyit edilmeli.`);
+    const unknownViews=allViews.filter(v=>allViews.filter(q=>q.page===v.page).length>1&&v.view==='teyit');
+    const unknownViewReason=()=>`Ürün görünümü eşleştirme güveni düşük: ${unknownViews.length} görünüm ayrılamadı; görünüm teyit edilmeli.`;
     // A strong template takes precedence over the independent color fallback.
     candidates.sort((a,b)=>(!!b.designPage-!!a.designPage)||b.match.confidence-a.match.confidence);
-    source.pageCandidates=candidates.slice(0,5).map(c=>({page:c.page,designPage:c.designPage,confidence:Math.round(c.match.confidence*1000)/1000}));
+    source.pageCandidates=candidates.slice(0,5).map(c=>({page:c.page,productIndex:c.index,designPage:c.designPage,confidence:Math.round(c.match.confidence*1000)/1000}));
     timings.scan=performance.now()-started-timings.raster;
     let finalists=[...candidates.filter(c=>c.designPage).slice(0,3),...candidates.filter(c=>!c.designPage).slice(0,3)];
+    // Every product on a sheet needs a refined template hypothesis; otherwise
+    // a fourth repeated print could be discarded before the ambiguity check.
+    const represented=new Set(finalists.filter(c=>c.designPage).map(c=>`${c.page}:${c.index}`));
+    for(const c of candidates.filter(c=>c.designPage&&allViews.filter(v=>v.page===c.page).length>1)) {
+      const key=`${c.page}:${c.index}`;
+      if(!represented.has(key)){finalists.push(c);represented.add(key);}
+    }
     if(image.mime==='application/pdf' && finalists.length) {
       const numbers=[...new Set(finalists.map(c=>c.page))].sort((a,b)=>a-b),high=await rasterPages(image,640,numbers);
-      finalists=finalists.map(candidate=>{const p=high[numbers.indexOf(candidate.page)];const sx=p.width/candidate.p.width,sy=p.height/candidate.p.height;return {...candidate,p,ref:silhouettes(p)[candidate.index],match:{...candidate.match,box:{x:candidate.match.box.x*sx,y:candidate.match.box.y*sy,w:candidate.match.box.w*sx,h:candidate.match.box.h*sy}}};}).filter(c=>c.ref);
+      const refs=high.map(p=>silhouettes(p));
+      finalists=finalists.map(candidate=>{
+        const n=numbers.indexOf(candidate.page),p=high[n],sx=p.width/candidate.p.width,sy=p.height/candidate.p.height;
+        const scaled=b=>({x:b.x*sx,y:b.y*sy,w:b.w*sx,h:b.h*sy}),box=scaled(candidate.ref.box);
+        // Component ordering can change when a pale outline appears at 640px.
+        const ref=refs[n].slice().sort((a,b)=>overlapFraction(b.box,box)-overlapFraction(a.box,box)).find(r=>overlapFraction(r.box,box)>.5);
+        return {...candidate,p,ref,match:{...candidate.match,box:scaled(candidate.match.box)}};
+      }).filter(c=>c.ref);
     }
     const refined=finalists.map(candidate=>({...candidate,match:candidate.designPage?matchDesign(candidate.p,designs[candidate.designPage-1],candidate.ref,true,candidate.match):colorDesign(candidate.p,candidate.ref)}));
     timings.refine=performance.now()-started-timings.raster-timings.scan;
     refined.sort((a,b)=>((!!b.designPage&&b.match.confidence>=.78?1:0)-(!!a.designPage&&a.match.confidence>=.78?1:0))||b.match.confidence-a.match.confidence);
     const chosen=refined[0];
-    if(!chosen)reasons.push(`Ürün maskesi veya görselde desen bulunamadı (${allViews.length} ürün, 0 uygun desen adayı).`);
+    if(!chosen) {
+      if(unknownViews.length)reasons.push(unknownViewReason());
+      reasons.push(`Ürün maskesi veya görselde desen bulunamadı (${allViews.length} ürün, 0 uygun desen adayı).`);
+    }
     else {
       const {ref,match,page,designPage}=chosen;
       source.method=match.method||'otomatik';source.selectedView=viewForPosition(position);
       source.rasterWidth=chosen.p.width;source.rasterHeight=chosen.p.height;
       const competing=refined.find(c=>c.page!==page||c.index!==chosen.index);
       const placementAmbiguous=match.ambiguous || !!competing&&Math.abs(match.confidence-competing.match.confidence)<.045;
-      const samePage=allViews.filter(v=>v.page===page&&v.mean);
-      for(const v of allViews.filter(v=>v.page===page&&v.difference>.15&&v.index!==chosen.index))reasons.push(`${v.view==='arka'?'Arka':'Diğer'} görünümün boy/etek ölçek farkı %${percent(v.difference)}; %15 sınırını aşıyor (${v.vertical.toFixed(3)} ve ${v.horizontal.toFixed(3)} mm/px).`);
+      const templateSelectsProduct=designPage&&match.confidence>=MIN_MATCH_CONFIDENCE&&!placementAmbiguous;
+      if(unknownViews.some(v=>v.page===page)&&!templateSelectsProduct)reasons.push(unknownViewReason());
+      source.productSelection=templateSelectsProduct?'desen':'gorunum';
+      const pageViews=allViews.filter(v=>v.page===page);
+      // Independent products can be drawn at different sizes. Compare scales
+      // only for the identified front/back pair, as in the two-view workflow.
+      const paired=pageViews.length===2&&pageViews.some(v=>v.view==='on')&&pageViews.some(v=>v.view==='arka');
+      const samePage=paired?pageViews.filter(v=>v.mean):[];
+      for(const v of paired?pageViews.filter(v=>v.difference>.15&&v.index!==chosen.index):[])reasons.push(`${v.view==='arka'?'Arka':'Diğer'} görünümün boy/etek ölçek farkı %${percent(v.difference)}; %15 sınırını aşıyor (${v.vertical.toFixed(3)} ve ${v.horizontal.toFixed(3)} mm/px).`);
       if(samePage.length>1) {
         source.viewScaleDifference=(Math.max(...samePage.map(v=>v.mean))-Math.min(...samePage.map(v=>v.mean)))/(samePage.reduce((s,v)=>s+v.mean,0)/samePage.length);
         if(source.viewScaleDifference>.05)reasons.push(`Ön/arka ortalama ölçek farkı %${percent(source.viewScaleDifference)}; %5 sınırını aşıyor (${samePage.map(v=>v.mean.toFixed(3)).join(' ve ')} mm/px).`);
       }
       source.wrinkleFraction=wrinkleFraction(chosen.p,ref,match.box);
-      Object.assign(source,{selectedPage:page,selectedDesignPage:designPage,chestPx:ref.hemWidthPx,hemWidthPx:ref.hemWidthPx,bodyHeightPx:ref.bodyHeightPx,shoulderY:ref.shoulderY,hemY:ref.hemY,shoulderMethod:ref.shoulderMethod,productBoxPx:ref.box,symmetry:ref.symmetry,textureFraction:ref.textureFraction,softEdgeFraction:ref.softEdgeFraction});
+      Object.assign(source,{selectedPage:page,selectedDesignPage:designPage,selectedProductIndex:chosen.index,maskMethod:ref.maskMethod,chestPx:ref.hemWidthPx,hemWidthPx:ref.hemWidthPx,bodyHeightPx:ref.bodyHeightPx,shoulderY:ref.shoulderY,hemY:ref.hemY,shoulderMethod:ref.shoulderMethod,productBoxPx:ref.box,symmetry:ref.symmetry,textureFraction:ref.textureFraction,softEdgeFraction:ref.softEdgeFraction});
       source.matchConfidence=Math.round(Math.max(0,Math.min(1,match.confidence))*1000)/1000;
       source.textureConfidencePenalty=(ref.softEdgeFraction>.35 || ref.textureFraction>.16 || source.wrinkleFraction>.06)?.05:0;
       source.confidence=Math.round(Math.max(0,source.matchConfidence-source.textureConfidencePenalty)*1000)/1000;
@@ -435,6 +501,7 @@ async function autoMeasure({image,design,flat,product,position}) {
       if(ref.symmetry<MIN_SYMMETRY)reasons.push(`Ürün maskesinin sol-sağ simetrisi %${percent(ref.symmetry)}; %${percent(MIN_SYMMETRY)} sınırının altında.`);
       if(placementAmbiguous)reasons.push(`Desen/ürün eşleşme güveni düşük: birden fazla aday var (en iyi güven %${percent(match.confidence)}${competing?`, diğer ürün güveni %${percent(competing.match.confidence)}`:''}); tek yerleşim teyit edilmeli.`);
       const {vertical,horizontal}=scaleFor(ref,measurements);
+      if((ref.maskMethod==='acik_zemin_bolge'||ref.box.w*ref.box.h<chosen.p.width*chosen.p.height*.10)&&(!vertical||!horizontal))reasons.push('Yeni bulunan ürün için boy ve etek ölçekleri birlikte doğrulanamadı; iki L ölçüsüyle teyit edilmeli.');
       source.verticalMmPerPx=vertical;source.horizontalMmPerPx=horizontal;
       source.scaleDifference=vertical&&horizontal?Math.abs(vertical-horizontal)/((vertical+horizontal)/2):null;
       if(vertical&&horizontal&&source.scaleDifference>.15)reasons.push(`Boy/etek ölçek farkı %${percent(source.scaleDifference)}; %15 sınırını aşıyor (${vertical.toFixed(3)} ve ${horizontal.toFixed(3)} mm/px).`);
