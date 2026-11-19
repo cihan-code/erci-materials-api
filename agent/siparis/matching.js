@@ -51,8 +51,10 @@ const COLOR_PRE = new Set(['acik', 'koyu', 'neon', 'pastel']);
 const COLOR_POST = new Set(['melanj', 'tonu']);
 const UNITS = { kg: 'kg', kgs: 'kg', kilo: 'kg', kilogram: 'kg', g: 'g', gr: 'g', gram: 'g',
   m: 'm', mt: 'm', mtr: 'm', metre: 'm', adet: 'adet', ad: 'adet' };
-// Words that say nothing about the fabric item; anything else unread blocks the default fabric fallback.
-const FILLER = new Set(['kumas', 'kumasi', 'renk', 'rengi', 'top', 'rulo', 've', 'ile', 'x']);
+// Supplier-invoice noise that says nothing about which fabric item it is (packaging, width, grammage, units).
+// Any other unread word makes the line 'teyit': it may be a shade or variant ("petrol mavi"). Listed in README.
+const FILLER = new Set(['kumas', 'kumasi', 'renk', 'rengi', 'top', 'rulo', 've', 'ile', 'x', 'adet', 'ad', 'en', 'boy',
+  'g', 'gr', 'gram', 'gramaj', 'gsm', 'gr/m', 'g/m', 'kg', 'kilo', 'm', 'mt', 'metre', 'cm', 'mm']);
 const SWEAT_FABRIC = 'sardonlu_3_iplik';
 const PRODUCT_DEFAULTS = { sweat: SWEAT_FABRIC, sweatshirt: SWEAT_FABRIC, hoodie: SWEAT_FABRIC, kapusonlu: SWEAT_FABRIC,
   polo: 'lakost', polo_yaka: 'lakost', tisort: 'supren_30_1', tshirt: 'supren_30_1', t_shirt: 'supren_30_1' };
@@ -161,6 +163,8 @@ function parseInvoiceDescription(text) {
     const unit = UNITS[toks[i + 1]];
     if (!unit || !/^\d[\d.,]*$/.test(t)) return;
     used[i] = used[i + 1] = true;
+    // "gramaj 300 gr" is weight per square metre, not an amount of fabric.
+    if (unit === 'g' && (toks[i - 1] === 'gramaj' || toks[i + 2] === 'gramaj')) return;
     found.push({ raw: t + ' ' + toks[i + 1], value: parseNumber(t), unit, times: toks[i - 1] === 'x' || toks[i + 2] === 'x' });
   });
   const amounts = found.map(f => f.value == null ? null : f.unit === 'g'
@@ -226,6 +230,10 @@ function matchInvoiceLine({ line, openNeeds, purchaseAllocations } = {}) {
   if (issueOf('colorName') && !own.color && !colorKey(line.colorName)) return fail(issueOf('colorName').message);
   lineType = types[0] || null;
   lineColor = colors[0] || null;
+  // A word the dictionaries do not know may change the item ("petrol mavi" is not "mavi"); only a person's explicit
+  // type and colour outrank it.
+  if (parsed.unknownWords.length && !(own.type && (own.color || colorKey(line.colorName))))
+    return fail(`Açıklamada tanınmayan sözcük var ("${parsed.unknownWords.join(' ')}"); kumaş ya da renk eksik okunmuş olabilir.`);
 
   // Quantity: kg only; the description, when it states an amount, must match the line amount.
   const lineUnit = line.unit == null || line.unit === '' ? null : UNITS[tokens(line.unit).join(' ')] || String(line.unit);
@@ -284,9 +292,6 @@ function matchInvoiceLine({ line, openNeeds, purchaseAllocations } = {}) {
     reasons.push(`Kumaş ve renk açık ihtiyaçla eşleşti (${labels(candidates)}).`);
   }
 
-  // Missing fabric or colour may come from the need only when nothing in the text was left unread.
-  if ((!lineType || !lineColor) && parsed.unknownWords.length)
-    return fail(`Açıklamada tanınmayan sözcük var ("${parsed.unknownWords.join(' ')}"); eksik kumaş bilgisi siparişten tamamlanmaz.`);
   const keys = uniq(candidates.map(p => fabricKey(lineType || p.type, lineColor || p.color)));
   if (keys.length !== 1) return fail(`Adaylar farklı kumaş kalemlerine ait: ${keys.join(', ')}.`);
   const key = keys[0];

@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const { tx, audit, fail } = require('./db');
 const { assertUser } = require('./auth');
 const { matchInvoiceLine, parseInvoiceDescription, splitFabricKey } = require('./matching');
-const { receive } = require('./stock');
+const { receive, storedAllocations } = require('./stock');
 
 const UNITS = { kg: 'kg', kgm: 'kg', kgs: 'kg', kilo: 'kg', kilogram: 'kg', g: 'g', gr: 'g', grm: 'g', gram: 'g',
   m: 'm', mt: 'm', mtr: 'm', metre: 'm', meter: 'm', adet: 'adet', ad: 'adet', c62: 'adet', nar: 'adet', pcs: 'adet' };
@@ -43,8 +43,10 @@ function readLine(raw) {
     supplier: text(raw.supplier, 300), supplierVkn: text(raw.supplierVkn, 20), purchaseRef: text(raw.purchaseRef, 100),
     unitPrice: typeof raw.unitPrice === 'number' && Number.isFinite(raw.unitPrice) ? raw.unitPrice : null,
     deliveryConfirmed: raw.deliveryConfirmed === true,
-    hash: crypto.createHash('sha256').update(JSON.stringify([description, qtyMilli, unit])).digest('hex') };
+    // The reference decides the match, so it is content; the price does not touch stock and is not.
+    hash: sha([description, qtyMilli, unit, text(raw.purchaseRef, 100)]), legacyHash: sha([description, qtyMilli, unit]) };
 }
+const sha = parts => crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 
 const meaningful = key => typeof key === 'string' && key.includes('|') && !key.startsWith('legacy:');
 // A bound item's key is the fact. For an unbound or legacy-bound need the main fabric may fall back to the product
@@ -109,6 +111,15 @@ function applyMatch(db, line, match, userId) {
   openConfirmation(db, line, `Fatura satırı teyit bekliyor (${label(line)}): ${match.reasons.join(' ')}`);
   return null;
 }
+// The suggestion was computed at match time; a need that has since shrunk or moved needs a person to redistribute.
+function suggestedPlan(db, line, itemId) {
+  const suggested = json(line.allocation_json, []);
+  for (const s of suggested) {
+    const a = db.prepare('SELECT * FROM allocations WHERE id=?').get(s.allocationId);
+    if (!a || a.item_id !== itemId || a.shortage_milli < s.qtyMilli) return null;
+  }
+  return perOrderLine(suggested);
+}
 // receive() takes one entry per order line; two materials of one line on the same item are summed.
 function perOrderLine(allocations) {
   const sums = new Map();
@@ -144,8 +155,25 @@ function ingestLine(db, input, { source, userId }) {
         .run(...fields, input.sourceInvoiceId, input.sourceLineId, now(), now()).lastInsertRowid);
       audit(db, userId, 'fatura_satiri_al', id, { source, invoiceNo: input.invoiceNo });
       line = get(db, id); status = 'yeni';
-    } else if (line.content_hash === input.hash) {
-      return outcome(line, 'ayni', json(line.match_reasons_json, []));
+    } else if (line.content_hash === input.hash || (line.content_hash === input.legacyHash && (line.purchase_ref ?? null) === input.purchaseRef)) {
+      if (line.content_hash !== input.hash) db.prepare('UPDATE invoice_lines SET content_hash=? WHERE id=?').run(input.hash, line.id);
+      const reasons = json(line.match_reasons_json, []);
+      // Same content, but the delivery may be confirmed only now: receive it in this transaction, never guess.
+      if (input.deliveryConfirmed && line.delivery_status === 'teslim_bekliyor') {
+        const plan = line.match_status === 'eslesti' && line.item_id != null ? suggestedPlan(db, line, line.item_id) : null;
+        if (plan) {
+          receive(db, { invoiceLineId: line.id, itemId: line.item_id, qtyMilli: line.qty_milli, allocations: plan, userId });
+          closeConfirmations(db, line.id, userId);
+          reasons.push('Teslim doğrulandı; miktar stoğa girdi.');
+        } else {
+          const message = line.match_status === 'eslesti'
+            ? `Teslim doğrulandı ama eşleşmedeki öneri artık geçerli değil (${label(line)}); dağıtımı ekip vermeli.`
+            : `Teslim doğrulandı ama eşleşme teyit bekliyor (${label(line)}); stoğa girmedi.`;
+          openConfirmation(db, line, message);
+          reasons.push(message);
+        }
+      }
+      return outcome(get(db, line.id), 'ayni', reasons);
     } else if (line.delivery_status === 'teslim_alindi') {
       const message = `Teslim alınmış fatura satırının içeriği değişti (${label(line)}); kayıt değiştirilmedi, ekip kontrol etmeli.`;
       openConfirmation(db, line, message);
@@ -202,14 +230,11 @@ function deliver(db, id, { itemId, allocations } = {}, userId) {
     }
     let plan = allocations;
     if (plan === undefined && waiting && chosen === line.item_id && line.match_status === 'eslesti' && line.allocation_json) {
-      const suggested = json(line.allocation_json, []);
-      // The suggestion was computed at match time; a need that has since shrunk or moved needs a person to redistribute.
-      for (const s of suggested) {
-        const a = db.prepare('SELECT * FROM allocations WHERE id=?').get(s.allocationId);
-        if (!a || a.item_id !== chosen || a.shortage_milli < s.qtyMilli) fail('Eşleşme önerisi artık geçerli değil; dağıtımı elle verin.', 409);
-      }
-      plan = perOrderLine(suggested);
+      plan = suggestedPlan(db, line, chosen);
+      if (!plan) fail('Eşleşme önerisi artık geçerli değil; dağıtımı elle verin.', 409);
     }
+    // A repeat without a body asks for what was done the first time.
+    if (plan === undefined && !waiting) plan = storedAllocations(line.delivery_request_json);
     const movement = receive(db, { invoiceLineId: id, itemId: chosen, qtyMilli: line.qty_milli, allocations: plan, userId });
     if (waiting) closeConfirmations(db, id, userId);
     return { line: view(db, get(db, id)), movement };

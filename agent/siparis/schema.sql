@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS invoice_lines (
  delivery_status TEXT NOT NULL DEFAULT 'teslim_bekliyor' CHECK(delivery_status IN ('teslim_bekliyor','teslim_alindi')),
  match_status TEXT NOT NULL DEFAULT 'eslesmedi' CHECK(match_status IN ('eslesti','teyit','eslesmedi')),
  item_id INTEGER REFERENCES stock_items(id), allocation_json TEXT, source TEXT, invoice_no TEXT, invoice_date TEXT,
- supplier_vkn TEXT, unit_price REAL, content_hash TEXT, match_reasons_json TEXT, created_at TEXT, updated_at TEXT,
+ supplier_vkn TEXT, unit_price REAL, content_hash TEXT, match_reasons_json TEXT, created_at TEXT, updated_at TEXT, delivery_request_json TEXT,
  UNIQUE(source_invoice_id,source_line_id)
 );
 CREATE TABLE IF NOT EXISTS stock_movements (
@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS stock_movements (
  type TEXT NOT NULL CHECK(type IN ('acilis','giris','tahsis','tahsis_iade','cikis','duzeltme')),
  qty_milli INTEGER NOT NULL CHECK(typeof(qty_milli)='integer' AND (type IN ('acilis','duzeltme') OR qty_milli>0)),
  order_line_id INTEGER REFERENCES order_lines(id), invoice_line_id INTEGER REFERENCES invoice_lines(id), business_key TEXT NOT NULL UNIQUE,
- created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), note TEXT
+ created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), note TEXT,
+ allocation_id INTEGER REFERENCES allocations(id)
 );
 CREATE TABLE IF NOT EXISTS allocations (
  id INTEGER PRIMARY KEY, order_line_id INTEGER NOT NULL REFERENCES order_lines(id), material_key TEXT NOT NULL,

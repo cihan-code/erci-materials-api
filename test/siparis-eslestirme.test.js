@@ -203,3 +203,18 @@ test('ambiguous candidates: near colour, need without fabric, unread fabric word
   const dup = run('Siyah şardonlu 3 iplik 5 kg', [need(1, 'sweat', 'Siyah', 7000), need(1, 'sweat', 'Pembe', 7000)]);
   assert.match(said(dup), /aynı sipariş satırı birden çok kez/);
 });
+
+test('G13a-2: an unread word blocks a match even when type and colour were found; listed supplier noise does not', () => {
+  const needs = [need(1, 'polo', 'Mavi', 10000, { fabricKey: 'lakost|mavi' }), need(2, 'sweat', 'Siyah', 30000)];
+  const petrol = matchInvoiceLine({ line: line('Lakost petrol mavi 10 kg', { qtyMilli: 10000 }), openNeeds: needs });
+  assert.equal(petrol.status, 'teyit');
+  assert.match(said(petrol), /tanınmayan sözcük var \("petrol"\)/);
+  assert.deepEqual(parseInvoiceDescription('Lakost petrol mavi 10 kg').unknownWords, ['petrol']);
+  const noisy = 'Siyah şardonlu 3 iplik kumaş 2 top en 180 cm gramaj 300 gr 25 kg';
+  assert.deepEqual(parseInvoiceDescription(noisy).unknownWords, []);
+  assert.equal(parseInvoiceDescription(noisy).qtyMilli, 25000, 'grammage is not a quantity');
+  const ok = matchInvoiceLine({ line: line(noisy, { qtyMilli: 25000 }), openNeeds: needs });
+  assert.deepEqual([ok.status, ok.fabricKey, ok.allocations], ['eslesti', 'sardonlu_3_iplik|siyah', [{ orderLineId: 2, qtyMilli: 25000 }]]);
+  assert.deepEqual(parseInvoiceDescription('Siyah penye 1,5 metre en 160 cm 250 gr/m2 10 kg').unknownWords, []);
+  assert.equal(matchInvoiceLine({ line: line('Siyah %100 pamuk penye 10 kg', { qtyMilli: 10000 }), openNeeds: [] }).status, 'teyit', 'composition is not noise');
+});
