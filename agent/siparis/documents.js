@@ -544,7 +544,7 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
           ? {manualVector:true,buffer:prev.buffer,mime:'application/pdf',targetMm,applicationType:a.kind,
             ...(raster ? {qualitySource:{...original,metrics:prev.report.rasterQuality}} : {})}
           : {...original,targetMm,applicationType:a.kind}},signal);
-        const report=prev && !raster ? {...result.report,quality:prev.report.quality==='teyit' || result.report.aspectRatioError>0.01 ? 'teyit' : 'iyi',
+        const report=prev && !raster && !original.manualVector ? {...result.report,quality:prev.report.quality==='teyit' || result.report.aspectRatioError>0.01 ? 'teyit' : 'iyi',
           reasons:[...new Set([...(prev.report.reasons||[]),...(result.report.aspectRatioError>0.01 ? ['oran_bozuldu'] : [])])]} : result.report;
         generated.push({kind:'desen_vektor',buffer:result.pdf,meta:{applicationId:a.id},report});
       }

@@ -331,12 +331,15 @@ test('G14-4 pending preview is reassessed from source at target size and blocks 
 });
 test('G14-4 manual vector source replaces traced artwork without an automatic quality confirmation',async t=> {
   const f=await fixture(t), a=await prepared(f,{both:false});
+  const oldVector=a.files.find(x=>x.kind==='desen_vektor');
+  const oldConfirmation=f.db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('vektor_kalite','files',?,'old source review')").run(oldVector.id).lastInsertRowid;
   const pdf=await PDFDocument.create();pdf.addPage([300,200]).drawRectangle({x:100,y:75,width:100,height:50});
   const source=ok(await f.upload(a.id,{kind:'desen_kaynak_vektor',name:'vectorizer.pdf',mime:'application/pdf',buffer:Buffer.from(await pdf.save())}),201);
   const app=f.db.prepare('SELECT id FROM applications WHERE line_id=?').get(a.lineId);
   ok(await f.request(`/uygulamalar/${app.id}`,{method:'PATCH',token:f.token,body:{desenDosyaId:source.id}}));
   const files=ok(await f.post(`/surumler/${a.id}/hazirla?yeniden=1`));
   assert.equal(f.db.prepare("SELECT count(*) n FROM confirmations WHERE kind='vektor_kalite' AND status='acik'").get().n,0);
+  assert.equal(f.db.prepare('SELECT status FROM confirmations WHERE id=?').get(oldConfirmation).status,'cozuldu');
   ok(await f.post(`/surumler/${a.id}/gonder`));assert.ok(files.some(x=>x.kind==='desen_vektor'));
 });
 test('G14-5 automatic source box always needs confirmation despite a flat reference',async t=> {
