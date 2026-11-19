@@ -92,11 +92,11 @@ function prepare(source,output,settings={}) {
   fs.mkdirSync(path.join(output,'kirpilmis'),{recursive:true});fs.mkdirSync(path.join(output,'onizleme'),{recursive:true});
   const records=[];
   for(const name of fs.readdirSync(source).filter(n=>/\.png$/i.test(n)).sort()) {
-    const config=settings[name]||settings[name.normalize('NFC')],record={dosya:null,ad:config?.ad||path.basename(name,'.png'),urun:config?.urun??null,gorunum:'on',refLengthPx:null,refLengthCm:null,refAciklama:'',kirpma:null,refUcNoktalar:null};
+    const config=settings[name]||settings[name.normalize('NFC')],record={dosya:null,ad:config?.ad||path.basename(name,'.png'),urun:config?.urun??null,gorunum:'on',refLengthPx:null,refLengthCm:null,refBeden:null,refAciklama:'',kirpma:null,refUcNoktalar:null};
     try {
       if(!config)throw Error('Dış ayarda bu dosya yok');
       if(record.urun!==null&&!Object.hasOwn(recipes,record.urun))throw Error('Bilinmeyen recipe anahtarı');
-      if(!Number.isFinite(config.refLengthCm)||config.refLengthCm<=0||!config.refAciklama?.trim())throw Error('Görselden doğrulanmış M beden cm/açıklama gerekli');
+      if(!Number.isFinite(config.refLengthCm)||config.refLengthCm<=0||!config.refAciklama?.trim())throw Error('Görselden doğrulanmış referans beden cm/açıklama gerekli');
       const p=PNG.sync.read(fs.readFileSync(path.join(source,name)));checkRegion(config.bolge,p);
       const mask=redMask(p),ref=horizontalReference(p,mask,config.bolge,config.refY),b=bounds(p,config.bolge,dark);
       if(!b)throw Error('Koyu ürün sınırı bulunamadı');
@@ -110,7 +110,7 @@ function prepare(source,output,settings={}) {
       line(preview,ref.x1,ref.y1,ref.x2,ref.y2,[0,190,40,255]);
       for(const xx of [ref.x1,ref.x2])line(preview,xx,ref.y1-10,xx,ref.y1+10,[0,190,40,255]);
       fs.writeFileSync(path.join(output,'onizleme',outName),PNG.sync.write(preview));
-      Object.assign(record,{dosya:path.posix.join('kirpilmis',outName),refLengthPx:ref.x2-ref.x1,refLengthCm:config.refLengthCm,refAciklama:config.refAciklama+'; kırmızı maske yatay gövde + uç çizgisi/nokta merkezi; yalnız yatay tek ölçek',kirpma:r,refUcNoktalar:{x1:ref.x1-r.x,y1:ref.y1-r.y,x2:ref.x2-r.x,y2:ref.y2-r.y}});
+      Object.assign(record,{dosya:path.posix.join('kirpilmis',outName),refLengthPx:ref.x2-ref.x1,refLengthCm:config.refLengthCm,refBeden:config.refBeden??null,...(Number.isFinite(config.refLengthCmM)?{refLengthCmM:config.refLengthCmM}:{}),refAciklama:config.refAciklama+'; kırmızı maske yatay gövde + uç çizgisi/nokta merkezi; yalnız yatay tek ölçek',kirpma:r,refUcNoktalar:{x1:ref.x1-r.x,y1:ref.y1-r.y,x2:ref.x2-r.x,y2:ref.y2-r.y}});
     }catch(e){
       record.belirsiz=e.message;record.refAciklama='BELİRSİZ: '+e.message;
       // Still provide the original for review when configuration/detection is uncertain.

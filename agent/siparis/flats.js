@@ -9,8 +9,11 @@ function init(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS document_flats (
     id TEXT PRIMARY KEY, ad TEXT NOT NULL, urun TEXT NOT NULL,
     gorunum TEXT NOT NULL CHECK(gorunum IN ('on','arka')), dosya TEXT NOT NULL,
-    refLengthPx REAL, refLengthCm REAL, refAciklama TEXT
+    refLengthPx REAL, refLengthCm REAL, refAciklama TEXT, refBeden TEXT
   )`);
+  // Older databases predate the reference size column; missing values stay null.
+  if (!db.prepare('PRAGMA table_info(document_flats)').all().some(c => c.name === 'refBeden'))
+    db.exec('ALTER TABLE document_flats ADD COLUMN refBeden TEXT');
 }
 function get(db, id) {
   const row = db.prepare('SELECT * FROM document_flats WHERE id=?').get(id);
@@ -44,10 +47,12 @@ function saveReference(db, id, input, user) {
   for (const key of ['refLengthPx','refLengthCm'])
     if (!Number.isFinite(input[key]) || input[key] <= 0) fail('Pozitif referans px ve cm gerekli');
   if (typeof input.refAciklama !== 'string' || !input.refAciklama.trim()) fail('Referans açıklaması gerekli');
+  if (input.refBeden != null && (typeof input.refBeden !== 'string' || !input.refBeden.trim())) fail('Referans beden metin olmalı');
+  const refBeden = input.refBeden?.trim() || null;
   return tx(db, () => {
     get(db, id);
-    db.prepare('UPDATE document_flats SET refLengthPx=?,refLengthCm=?,refAciklama=? WHERE id=?')
-      .run(input.refLengthPx, input.refLengthCm, input.refAciklama.trim(), id);
+    db.prepare('UPDATE document_flats SET refLengthPx=?,refLengthCm=?,refAciklama=?,refBeden=? WHERE id=?')
+      .run(input.refLengthPx, input.refLengthCm, input.refAciklama.trim(), refBeden, id);
     audit(db, user.id, 'duz_cizim_referans', id, input);
     return get(db, id);
   });
