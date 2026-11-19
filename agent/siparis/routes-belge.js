@@ -25,7 +25,12 @@ module.exports = function documentRouter({db,dataDir}) {
     // Preserve the existing core interface for registered generated paths.
     if (!req.is('multipart/form-data')) return next('route');
     next();
-  },receive,wrap((req,res)=>res.status(201).json(documents.upload(db,dataDir,id(req),req.body,documents.validateUpload(req.file),req.user))));
+  },receive,wrap((req,res)=> {
+    const file=documents.upload(db,dataDir,id(req),req.body,documents.validateUpload(req.file),req.user);
+    documents.queuePreview(db,dataDir,file,req.user);
+    res.status(201).json(file);
+  }));
+  router.get('/surumler/:id/vektor-durum',wrap((req,res)=>res.json(documents.vectorStatus(db,id(req)))));
   router.get('/dosyalar/:id',wrap((req,res)=> {
     const file=db.prepare('SELECT * FROM files WHERE id=?').get(id(req));
     if (!file) fail('Dosya bulunamadı',404);

@@ -87,8 +87,10 @@ test('G20 HTTP timeout clears the lock, leaves no partial files and opens one co
   t.after(async()=> {await f.close();fs.rmSync(f.dir,{recursive:true,force:true});});
   const o=await f.order(), id=o.version.id;
   const source=await f.upload(id);assert.equal(source.status,201);
+  await documents.settled();
   assert.equal((await f.measure(o.version.lines[0].id,{desenDosyaId:source.data.id})).status,201);
   const children=interceptWorker(t,'hang');
+  const sourceFiles=f.db.prepare('SELECT count(*) n FROM files WHERE version_id=?').get(id).n;
   // Exercise the actual worker timer and HTTP error path without waiting two minutes.
   const setTimer=global.setTimeout;
   t.mock.method(global,'setTimeout',(fn,ms,...args)=>setTimer(fn,ms===120000 ? 100 : ms,...args));
@@ -97,7 +99,7 @@ test('G20 HTTP timeout clears the lock, leaves no partial files and opens one co
     assert.equal(response.status,504);assert.equal(response.data.error,'Hazırlama zaman aşımına uğradı');
     assert.equal(children[i].signalCode,'SIGKILL');
     assert.equal(f.db.prepare('SELECT token FROM document_preparations WHERE version_id=?').get(id).token,null);
-    assert.equal(f.db.prepare('SELECT count(*) n FROM files WHERE version_id=?').get(id).n,1);
+    assert.equal(f.db.prepare('SELECT count(*) n FROM files WHERE version_id=?').get(id).n,sourceFiles);
   }
   const confirmations=f.db.prepare("SELECT * FROM confirmations WHERE kind='baglanti_hatasi' AND ref_table='order_versions' AND ref_id=? AND status='acik'").all(id);
   assert.equal(confirmations.length,1);assert.equal(confirmations[0].message,'Hazırlama zaman aşımına uğradı');

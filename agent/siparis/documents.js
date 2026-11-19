@@ -16,6 +16,9 @@ const PREPARE_TIMEOUT_MS = 8*60e3;
 const PREPARE_LOCK_MS = 10*60e3;
 const GENERATED = ['uretim_formu','onay_formu','baski_formu','nakis_formu','desen_vektor'];
 const WORKSHOP = ['baski_formu','nakis_formu','desen_vektor'];
+// Derived from an uploaded source right after upload; never an input of the forms and never sent to the workshop.
+const PREVIEW = 'desen_vektor_onizleme';
+const pending = new Set();
 const roots = new WeakMap();
 const sha256 = buffer => crypto.createHash('sha256').update(buffer).digest('hex');
 
@@ -34,6 +37,12 @@ function init(db) {
   CREATE TABLE IF NOT EXISTS document_application_sources (
     application_id INTEGER PRIMARY KEY REFERENCES applications(id),
     file_id INTEGER NOT NULL REFERENCES files(id)
+  );
+  CREATE TABLE IF NOT EXISTS document_vector_previews (
+    source_file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    preview_file_id INTEGER REFERENCES files(id) ON DELETE SET NULL,
+    status TEXT NOT NULL CHECK(status IN ('hazirlaniyor','hazir','teyit','hata')),
+    report_json TEXT, message TEXT, updated_at INTEGER NOT NULL
   );
   CREATE TABLE IF NOT EXISTS document_preparations (
     version_id INTEGER PRIMARY KEY REFERENCES order_versions(id),
@@ -274,11 +283,13 @@ function assertMeasurements(db, v) {
 }
 function inputFingerprint(db,v) {
   return JSON.stringify({order:db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id),
-    lines:v.lines.map(({recipe_version,...line})=>line),files:v.files.filter(f=>!GENERATED.includes(f.kind)),
+    lines:v.lines.map(({recipe_version,...line})=>line),files:v.files.filter(f=>!GENERATED.includes(f.kind) && f.kind!==PREVIEW),
     sources:db.prepare(`SELECT s.application_id,s.file_id FROM document_application_sources s
       JOIN applications a ON a.id=s.application_id JOIN order_lines l ON l.id=a.line_id
       WHERE l.version_id=? ORDER BY s.application_id`).all(v.id)});
 }
+// A preview finishing in the background must not look like a draft change.
+function stableSnapshot(v) { return JSON.stringify({...v,files:v.files.filter(f=>f.kind!==PREVIEW)}); }
 function assertFresh(db,v) {
   const state=db.prepare('SELECT * FROM document_preparations WHERE version_id=?').get(v.id);
   if (state?.ready && state.source_json!==inputFingerprint(db,v))
@@ -412,7 +423,7 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
     if (state?.ready && !regenerate) { assertFresh(db,v); return {existing:v.files}; }
     db.prepare(`INSERT INTO document_preparations(version_id,token,started_at) VALUES(?,?,?)
       ON CONFLICT(version_id) DO UPDATE SET token=excluded.token,started_at=excluded.started_at`).run(versionId,token,Date.now());
-    return {v,fingerprint:JSON.stringify(v),sourceFingerprint:inputFingerprint(db,v)};
+    return {v,fingerprint:stableSnapshot(v),sourceFingerprint:inputFingerprint(db,v)};
   });
   if (start.existing) return start.existing;
   const written=[];
@@ -424,8 +435,14 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
       for (const source of v.files.filter(f=>SOURCE_KINDS.includes(f.kind)))
         if (!sourceByApp.size) fail(`Desen ${source.id}: ölçülü uygulama bağlantısı gerekli`,409);
       for (const a of v.lines.flatMap(l=>l.applications)) {
-        const result=await generateInChild({type:'vector',input:{...await vectorInput(dataDir,sourceByApp.get(a.id)),targetMm:{w:a.width_mm,h:a.height_mm}}},signal);
-        generated.push({kind:'desen_vektor',buffer:result.pdf,meta:{applicationId:a.id},report:result.report});
+        const targetMm={w:a.width_mm,h:a.height_mm}, source=sourceByApp.get(a.id), prev=readyPreview(db,dataDir,v,source);
+        // A ready preview of the same source is scaled instead of traced again.
+        const result=await generateInChild({type:'vector',input:prev
+          ? {manualVector:true,buffer:prev.buffer,mime:'application/pdf',targetMm}
+          : {...await vectorInput(dataDir,source),targetMm}},signal);
+        const report=prev ? {...result.report,quality:prev.report.quality==='teyit' || result.report.aspectRatioError>0.01 ? 'teyit' : 'iyi',
+          reasons:[...new Set([...(prev.report.reasons||[]),...(result.report.aspectRatioError>0.01 ? ['oran_bozuldu'] : [])])]} : result.report;
+        generated.push({kind:'desen_vektor',buffer:result.pdf,meta:{applicationId:a.id},report});
       }
       const model=formOrder(db,dataDir,v,sourceByApp);
       generated.push(...await generateInChild({type:'forms',model},signal));
@@ -433,7 +450,7 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
     });
     return tx(db,()=> {
       const current=draft(db,versionId); assertMeasurements(db,current);
-      if (JSON.stringify(current)!==start.fingerprint || inputFingerprint(db,current)!==start.sourceFingerprint || db.prepare('SELECT token FROM document_preparations WHERE version_id=?').get(versionId)?.token!==token)
+      if (stableSnapshot(current)!==start.fingerprint || inputFingerprint(db,current)!==start.sourceFingerprint || db.prepare('SELECT token FROM document_preparations WHERE version_id=?').get(versionId)?.token!==token)
         fail('Sürüm hazırlama sırasında değişti; yeniden deneyin',409);
       for (const g of generated) {
         const file=saveFile(db,dataDir,v,g.kind,g.buffer,user,g.meta,written);
@@ -446,6 +463,9 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
         db.prepare("UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='vektor_kalite' AND ref_table='files' AND ref_id=? AND status='acik'").run(user.id,f.id);
         db.prepare('DELETE FROM files WHERE id=?').run(f.id);
       }
+      // Preview confirmations are superseded by the confirmation on the generated vector.
+      db.prepare(`UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='vektor_kalite' AND status='acik' AND ref_table='files'
+        AND ref_id IN (SELECT id FROM files WHERE version_id=? AND kind=?)`).run(user.id,versionId,PREVIEW);
       db.prepare('UPDATE document_preparations SET token=NULL,ready=1,source_json=? WHERE version_id=? AND token=?').run(start.sourceFingerprint,versionId,token);
       audit(db,user.id,'belgeler_hazirla',versionId,{regenerate});
       return orders.snapshot(db,versionId).files;
@@ -460,6 +480,48 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
   }
   finally { db.prepare('UPDATE document_preparations SET token=NULL WHERE version_id=? AND token=?').run(versionId,token); }
 }
+function readyPreview(db,dataDir,v,source) {
+  if (!source || !SOURCE_KINDS.includes(source.kind)) return null;
+  const row=db.prepare("SELECT * FROM document_vector_previews WHERE source_file_id=? AND status IN ('hazir','teyit')").get(source.id);
+  const file=row?.preview_file_id && v.files.find(f=>f.id===row.preview_file_id && f.kind===PREVIEW);
+  if (!file) return null;
+  try { return {buffer:readFile(dataDir,file),report:JSON.parse(row.report_json || '{}')}; } catch { return null; }
+}
+// Fire-and-forget: the upload response never waits for the render queue.
+function queuePreview(db,dataDir,file,user) {
+  if (!file || !SOURCE_KINDS.includes(file.kind)) return null;
+  const mark=(status,message=null,extra={})=>db.prepare(`INSERT INTO document_vector_previews(source_file_id,preview_file_id,status,report_json,message,updated_at) VALUES(?,?,?,?,?,?)
+    ON CONFLICT(source_file_id) DO UPDATE SET preview_file_id=excluded.preview_file_id,status=excluded.status,report_json=excluded.report_json,message=excluded.message,updated_at=excluded.updated_at`)
+    .run(file.id,extra.previewId ?? null,status,extra.report ? JSON.stringify(extra.report) : null,message,Date.now());
+  mark('hazirlaniyor');
+  const task=(async()=> {
+    const written=[];
+    try {
+      const result=await renderQueue(async signal=>generateInChild({type:'vector',input:await vectorInput(dataDir,file)},signal));
+      tx(db,()=> {
+        const v=draft(db,file.version_id);
+        if (!db.prepare('SELECT 1 FROM files WHERE id=?').get(file.id)) fail('Kaynak dosya silindi',409);
+        const meta=db.prepare('SELECT line_id FROM document_file_meta WHERE file_id=?').get(file.id);
+        const saved=saveFile(db,dataDir,v,PREVIEW,result.pdf,user,{lineId:meta?.line_id},written);
+        const quality=result.report?.quality==='teyit' ? 'teyit' : 'hazir';
+        if (quality==='teyit') db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('vektor_kalite','files',?,?)")
+          .run(saved.id,`Vektör kalitesi görsel teyit gerektiriyor: ${JSON.stringify(result.report)}`);
+        mark(quality,null,{previewId:saved.id,report:result.report});
+      });
+    } catch (e) {
+      for (const f of written) try { fs.unlinkSync(f); } catch {}
+      try { mark('hata',String(e.message || e).slice(0,300)); } catch {}
+    }
+  })().finally(()=>pending.delete(task));
+  pending.add(task);
+  return task;
+}
+function vectorStatus(db,versionId) {
+  return db.prepare(`SELECT p.source_file_id AS sourceFileId,p.preview_file_id AS previewFileId,p.status,p.message,p.report_json
+    FROM document_vector_previews p JOIN files f ON f.id=p.source_file_id WHERE f.version_id=? ORDER BY p.source_file_id`).all(versionId)
+    .map(({report_json,...r})=>({...r,quality:report_json ? JSON.parse(report_json).quality ?? null : null}));
+}
+const settled=()=>Promise.all([...pending]);
 function workshopPackage(db,versionId) {
   const v=orders.snapshot(db,versionId);
   if (v.status!=='onaylandi') fail('Atölye paketi için sürüm onaylanmalı',409);
@@ -489,7 +551,7 @@ function registerWorkshop(boundDb,dataDir) {
     return {providerRef:result.providerRef};
   });
 }
-module.exports={init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+module.exports={queuePreview,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
 if (require.main===module && process.argv[2]==='--vector-worker') {
   // A one-shot worker must not depend on PDF/native-library handles becoming
   // idle. Flush the entire IPC response before exiting; close drains it in the parent.
