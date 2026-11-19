@@ -4,6 +4,8 @@
 let canvasLib; // Native canvas is loaded only in the child, never by HTTP routing.
 const { imageSize } = require('./measure');
 const MAX_EDGE = 2000;
+const MIN_SYMMETRY = .85, MIN_MATCH_CONFIDENCE = .78;
+const percent = n => (n*100).toLocaleString('tr-TR',{minimumFractionDigits:1,maximumFractionDigits:4});
 const VIEW = {gogus:'on',sol_gogus:'on',sag_gogus:'on',kol:'on',sol_kol:'on',sag_kol:'on',sirt:'arka',ense:'arka',kapusan:'arka'};
 const viewForPosition = position => VIEW[position] || 'teyit';
 const median = a => a.slice().sort((x,y)=>x-y)[Math.floor(a.length/2)];
@@ -365,9 +367,9 @@ async function autoMeasure({image,design,flat,product,position}) {
   let width=null,height=null;
   const positive=n=>Number.isFinite(n)&&n>0;
   const measurements=flat?.refBeden==='L' && flat?.olculerL && typeof flat.olculerL==='object' ? flat.olculerL : {};
-  if(flat?.refBeden!=='L')reasons.push('Kalıp referansı L beden değil veya belirtilmemiş; L ölçüsü teyit edilmeli.');
-  if(!positive(measurements.omuzdan_boy)&&!positive(measurements.etek))reasons.push('Ürün için geçerli L beden kalıp ölçüleri bulunamadı.');
-  if(viewForPosition(position)==='teyit')reasons.push('Uygulama konumu için görünüm eşlemesi bulunamadı.');
+  if(flat?.refBeden!=='L')reasons.push('Ürünün L kalıp referansı bulunamadı: kayıt L beden değil veya belirtilmemiş (geçerli referans sayısı 0).');
+  if(!positive(measurements.omuzdan_boy)&&!positive(measurements.etek))reasons.push('Ürün için geçerli L beden kalıp ölçüleri bulunamadı (boy ve etek ölçüsü sayısı 0).');
+  if(viewForPosition(position)==='teyit')reasons.push('Ürün görünümü uygulama konumuyla eşleştirilemedi (geçerli görünüm sayısı 0).');
   try {
     const pages=await rasterPages(image,image.mime==='application/pdf'?320:MAX_EDGE),candidates=[],allViews=[];
     let designs=[];
@@ -395,7 +397,7 @@ async function autoMeasure({image,design,flat,product,position}) {
       }
     }
     source.views=allViews;
-    if(allViews.some(v=>allViews.filter(q=>q.page===v.page).length>1&&v.view==='teyit'))reasons.push('Ön ve arka görünüm ipuçlarıyla ayrılamadı; görünüm teyit edilmeli.');
+    if(allViews.some(v=>allViews.filter(q=>q.page===v.page).length>1&&v.view==='teyit'))reasons.push(`Ürün görünümü eşleştirme güveni düşük: ${allViews.filter(v=>v.view==='teyit').length} görünüm ayrılamadı; görünüm teyit edilmeli.`);
     // A strong template takes precedence over the independent color fallback.
     candidates.sort((a,b)=>(!!b.designPage-!!a.designPage)||b.match.confidence-a.match.confidence);
     source.pageCandidates=candidates.slice(0,5).map(c=>({page:c.page,designPage:c.designPage,confidence:Math.round(c.match.confidence*1000)/1000}));
@@ -409,7 +411,7 @@ async function autoMeasure({image,design,flat,product,position}) {
     timings.refine=performance.now()-started-timings.raster-timings.scan;
     refined.sort((a,b)=>((!!b.designPage&&b.match.confidence>=.78?1:0)-(!!a.designPage&&a.match.confidence>=.78?1:0))||b.match.confidence-a.match.confidence);
     const chosen=refined[0];
-    if(!chosen)reasons.push('Ürün maskesi veya görselde desen bulunamadı.');
+    if(!chosen)reasons.push(`Ürün maskesi veya görselde desen bulunamadı (${allViews.length} ürün, 0 uygun desen adayı).`);
     else {
       const {ref,match,page,designPage}=chosen;
       source.method=match.method||'otomatik';source.selectedView=viewForPosition(position);
@@ -417,40 +419,42 @@ async function autoMeasure({image,design,flat,product,position}) {
       const competing=refined.find(c=>c.page!==page||c.index!==chosen.index);
       const placementAmbiguous=match.ambiguous || !!competing&&Math.abs(match.confidence-competing.match.confidence)<.045;
       const samePage=allViews.filter(v=>v.page===page&&v.mean);
-      if(allViews.some(v=>v.page===page&&v.difference>.15))reasons.push('Görünümün dikey ve yatay L ölçekleri %15 üzerinde ayrışıyor; ölçü teyit edilmeli.');
+      for(const v of allViews.filter(v=>v.page===page&&v.difference>.15&&v.index!==chosen.index))reasons.push(`${v.view==='arka'?'Arka':'Diğer'} görünümün boy/etek ölçek farkı %${percent(v.difference)}; %15 sınırını aşıyor (${v.vertical.toFixed(3)} ve ${v.horizontal.toFixed(3)} mm/px).`);
       if(samePage.length>1) {
         source.viewScaleDifference=(Math.max(...samePage.map(v=>v.mean))-Math.min(...samePage.map(v=>v.mean)))/(samePage.reduce((s,v)=>s+v.mean,0)/samePage.length);
-        if(source.viewScaleDifference>.05)reasons.push('Ön ve arka ortalama ölçekleri %5 üzerinde ayrışıyor; ölçü teyit edilmeli.');
+        if(source.viewScaleDifference>.05)reasons.push(`Ön/arka ortalama ölçek farkı %${percent(source.viewScaleDifference)}; %5 sınırını aşıyor (${samePage.map(v=>v.mean.toFixed(3)).join(' ve ')} mm/px).`);
       }
       source.wrinkleFraction=wrinkleFraction(chosen.p,ref,match.box);
       Object.assign(source,{selectedPage:page,selectedDesignPage:designPage,chestPx:ref.hemWidthPx,hemWidthPx:ref.hemWidthPx,bodyHeightPx:ref.bodyHeightPx,shoulderY:ref.shoulderY,hemY:ref.hemY,shoulderMethod:ref.shoulderMethod,productBoxPx:ref.box,symmetry:ref.symmetry,textureFraction:ref.textureFraction,softEdgeFraction:ref.softEdgeFraction});
-      source.confidence=Math.round(Math.max(0,Math.min(1,match.confidence))*1000)/1000;
+      source.matchConfidence=Math.round(Math.max(0,Math.min(1,match.confidence))*1000)/1000;
+      source.textureConfidencePenalty=(ref.softEdgeFraction>.35 || ref.textureFraction>.16 || source.wrinkleFraction>.06)?.05:0;
+      source.confidence=Math.round(Math.max(0,source.matchConfidence-source.textureConfidencePenalty)*1000)/1000;
       source.candidateBoxPx=match.box;
       source.designAspectRatio=match.content.box?match.content.box.w/match.content.box.h:null;
       source.aspectRatioError=match.box&&source.designAspectRatio?Math.abs(match.box.w/match.box.h/source.designAspectRatio-1):null;
-      if(ref.symmetry<.95 || ref.softEdgeFraction>.35 || ref.textureFraction>.16 || source.wrinkleFraction>.06)reasons.push('Görsel perspektifli, kırışık veya fotoğraf özellikleri taşıyor; ölçü teyit edilmeli.');
-      if(placementAmbiguous)reasons.push('Birden fazla desen veya ürün sayfası adayı birbirine yakın; yerleşim teyit edilmeli.');
+      if(ref.symmetry<MIN_SYMMETRY)reasons.push(`Ürün maskesinin sol-sağ simetrisi %${percent(ref.symmetry)}; %${percent(MIN_SYMMETRY)} sınırının altında.`);
+      if(placementAmbiguous)reasons.push(`Desen/ürün eşleşme güveni düşük: birden fazla aday var (en iyi güven %${percent(match.confidence)}${competing?`, diğer ürün güveni %${percent(competing.match.confidence)}`:''}); tek yerleşim teyit edilmeli.`);
       const {vertical,horizontal}=scaleFor(ref,measurements);
       source.verticalMmPerPx=vertical;source.horizontalMmPerPx=horizontal;
       source.scaleDifference=vertical&&horizontal?Math.abs(vertical-horizontal)/((vertical+horizontal)/2):null;
-      if(vertical&&horizontal&&source.scaleDifference>.15)reasons.push('Dikey ve yatay L ölçekleri %15 üzerinde ayrışıyor; ölçü teyit edilmeli.');
-      if((vertical&&!horizontal)||(!vertical&&horizontal))reasons.push('Tek L ölçeği bulundu; güven düşük, ikinci eksen teyit edilmeli.');
+      if(vertical&&horizontal&&source.scaleDifference>.15)reasons.push(`Boy/etek ölçek farkı %${percent(source.scaleDifference)}; %15 sınırını aşıyor (${vertical.toFixed(3)} ve ${horizontal.toFixed(3)} mm/px).`);
+      if((vertical&&!horizontal)||(!vertical&&horizontal))source.scaleNote='Tek L ölçeği bulundu (1 eksen); ikinci eksen ölçüsü yok.';
       source.scaleMethod=vertical&&horizontal?'omuzdan_boy ve etek ortalaması':vertical?'yalnız omuzdan_boy':horizontal?'yalnız etek':null;
       source.mmPerPx=vertical&&horizontal?(source.scaleDifference<=.15?(vertical+horizontal)/2:null):vertical||horizontal;
       if(vertical&&horizontal&&source.scaleDifference>.15)source.scaleMethod='çelişen L ölçekleri; ölçü yok';
       source.scale=source.mmPerPx?source.mmPerPx/10:null;
-      if(source.aspectRatioError>.01)reasons.push('Desen kutusunun en-boy oranı kaynakla uyuşmuyor; ölçü teyit edilmeli.');
-      if(match.confidence<.78)reasons.push('Desen eşleştirme güveni düşük; ölçü tahmin edilmedi.');
+      if(source.aspectRatioError>.01)source.aspectRatioNote=`Desen en-boy oranı farkı %${percent(source.aspectRatioError)}.`;
+      if(match.confidence<MIN_MATCH_CONFIDENCE)reasons.push(`Desen eşleştirme güveni %${percent(match.confidence)}; %${percent(MIN_MATCH_CONFIDENCE)} sınırının altında.`);
       else if(!placementAmbiguous) {
         source.designBoxPx=match.box;
         if(source.mmPerPx) {
           width=Math.round(match.box.w*source.mmPerPx);height=Math.round(match.box.h*source.mmPerPx);
-          if(match.box.w>ref.box.w || match.box.h>ref.box.h)reasons.push('Desen fiziksel ürün sınırlarını aşıyor; ölçü teyit edilmeli.');
-          if(!Number.isSafeInteger(width)||!Number.isSafeInteger(height)||width<=0||height<=0){width=height=null;reasons.push('Hesaplanan ölçü fiziksel olarak geçersiz.');}
+          if(match.box.w>ref.hemWidthPx)reasons.push(`Desen eni ${match.box.w.toFixed(1)} piksel, ürün gövde eninden (${ref.hemWidthPx} piksel) büyük; hesaplanan en ${width} mm.`);
+          if(!Number.isSafeInteger(width)||!Number.isSafeInteger(height)||width<=0||height<=0){reasons.push(`Hesaplanan ölçü fiziksel olarak geçersiz (${width} × ${height} mm); pozitif tam sayı ölçü bulunamadı.`);width=height=null;}
         }
       }
     }
-  } catch(e) {reasons.push(`Otomatik ölçü okunamadı: ${e.message}`);}
+  } catch(e) {reasons.push(`Ürün/desen okunamadı (ölçü sayısı 0): ${e.message}`);}
   source.timingsMs={...Object.fromEntries(Object.entries(timings).map(([k,v])=>[k,Math.round(v)])),total:Math.round(performance.now()-started)};
   return {width_mm:width,height_mm:height,measure_source:source,needs_confirmation:reasons.length>0,reasons,reason:reasons.join(' ')};
 }

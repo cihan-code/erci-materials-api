@@ -29,8 +29,8 @@ for(const position of ['gogus','sirt'])test(`G24 synthetic ${position} measures 
   assert.ok(Math.abs(r.height_mm-m.expectedHeight)<=5,JSON.stringify(r));
   assert.equal(r.needs_confirmation,false,JSON.stringify(r));assert.equal(r.measure_source.refBeden,'L');
 });
-test('G24 perspective, absent design, ambiguity, unknown view and missing flat require Turkish confirmation',async()=>{
-  for(const [m,extra] of [[mockup({perspective:true}),{}],[mockup({missing:true}),{}],[mockup({repeated:true}),{}],[mockup(),{position:'other'}],[mockup(),{flat:null}]]) {
+test('G24 absent design, ambiguity, unknown view and missing flat require Turkish confirmation',async()=>{
+  for(const [m,extra] of [[mockup({missing:true}),{}],[mockup({repeated:true}),{}],[mockup(),{position:'other'}],[mockup(),{flat:null}]]) {
     const r=await auto.autoMeasure(input(m,extra));assert.equal(r.needs_confirmation,true,JSON.stringify(r));assert.ok(r.reason.length>10);
   }
 });
@@ -108,7 +108,7 @@ test('G24 print size has no preset cap; non-L references and divergent scales re
   const large=await auto.autoMeasure(input(mockup({width:220})));assert.ok(large.width_mm>350,JSON.stringify(large));assert.doesNotMatch(large.reason,/olağandışı/);
   const other=await auto.autoMeasure(input(mockup(),{flat:{...flat,refBeden:'M'}}));assert.match(other.reason,/L beden değil/);assert.equal(other.width_mm,null);
   const check=await auto.autoMeasure(input(mockup(),{flat:{...flat,olculerL:{omuzdan_boy:80,etek:60}}}));assert.match(check.reason,/%15/);assert.equal(check.width_mm,null);assert.equal(check.measure_source.mmPerPx,null);
-  const single=await auto.autoMeasure(input(mockup(),{flat:{...flat,olculerL:{etek:60}}}));assert.match(single.reason,/Tek L ölçeği/);assert.ok(single.width_mm>0);
+  const single=await auto.autoMeasure(input(mockup(),{flat:{...flat,olculerL:{etek:60}}}));assert.match(single.measure_source.scaleNote,/Tek L ölçeği/);assert.equal(single.needs_confirmation,false);assert.ok(single.width_mm>0);
 });
 test('G24 white garments on transparent backgrounds use alpha as the product mask',async()=>{
   const {createCanvas}=require('@napi-rs/canvas'),c=createCanvas(400,500),x=c.getContext('2d');x.fillStyle='white';x.fillRect(100,40,200,420);x.fillRect(60,40,280,100);
@@ -163,10 +163,10 @@ test('G24b L measurements survive API and --guncelle roundtrips while old refere
   assert.deepEqual(await upload({api:f.base,json,update:true,getCredentials:async()=>({name:'fixture',password:'fixture'}),fetchImpl,log:()=>{}}),{uploaded:1,skipped:0});
   assert.deepEqual(ok(await f.request('/duz-cizimler',{token:f.token}))[0].olculerL,record.olculerL);
 });
-test('G24b fabric texture outside the print requires confirmation even on a symmetric front',async()=>{
+test('G24d fabric texture only lowers reported confidence and never requires confirmation',async()=>{
   const {silhouetteMockup}=require('./fixtures/siparis/oto-silhouette'),m=silhouetteMockup({wrinkles:true});
   const r=await auto.autoMeasure(input(m,{flat:{...flat,olculerL:{omuzdan_boy:72,etek:52}}}));
-  assert.ok(r.measure_source.wrinkleFraction>.06,JSON.stringify(r));assert.equal(r.needs_confirmation,true);assert.match(r.reason,/kırışık/);
+  assert.ok(r.measure_source.wrinkleFraction>.06,JSON.stringify(r));assert.equal(r.needs_confirmation,false,JSON.stringify(r));assert.equal(r.reason,'');assert.ok(r.measure_source.textureConfidencePenalty<=.05);assert.ok(r.measure_source.matchConfidence-r.measure_source.confidence<=.050001);
 });
 test('G24b large type, script marks and filled cover rectangles are not products',async()=>{
   const {createCanvas}=require('@napi-rs/canvas');
@@ -243,4 +243,29 @@ test('G24c API uploads the same two-view hoodie for both applications without a 
   ok(await f.request(`/uygulamalar/${apps[0].id}`,{method:'PATCH',token:f.token,body:{width_mm:155,height_mm:85}}));
   assert.equal(ok(await f.post(`/surumler/${v}/otomatik-olc`)).results.length,1);
   assert.equal(f.db.prepare('SELECT width_mm FROM applications WHERE id=?').get(apps[0].id).width_mm,155);
+});
+
+test('G24d mild perspective with compatible scales is accepted; physical print width is checked against the torso',async()=>{
+  const mild=await auto.autoMeasure(input(mockup({perspective:true})));
+  assert.ok(mild.measure_source.symmetry>=.85);assert.equal(mild.needs_confirmation,false,JSON.stringify(mild));
+  const {createCanvas,loadImage}=require('@napi-rs/canvas'),m=mockup({width:220}),c=createCanvas(600,650),x=c.getContext('2d');
+  x.drawImage(await loadImage(m.image),0,0);x.fillStyle='#fafafa';x.fillRect(150,450,50,156);x.fillRect(400,450,50,156);
+  const wide=await auto.autoMeasure(input({...m,image:c.toBuffer('image/png')},{flat:{...flat,olculerL:{omuzdan_boy:112,etek:40}}}));
+  assert.ok(wide.measure_source.designBoxPx.w>wide.measure_source.hemWidthPx,JSON.stringify(wide));
+  assert.equal(wide.needs_confirmation,true);assert.match(wide.reason,/Desen eni [0-9.,]+ piksel, ürün gövde eninden/);
+});
+test('G24d asymmetric product masks identify their measured symmetry and threshold',async()=>{
+  const {createCanvas,loadImage}=require('@napi-rs/canvas'),m=mockup(),c=createCanvas(600,650),x=c.getContext('2d');
+  x.drawImage(await loadImage(m.image),0,0);x.fillStyle='#fafafa';x.fillRect(150,360,65,240);
+  const r=await auto.autoMeasure(input({...m,image:c.toBuffer('image/png')}));
+  assert.ok(r.measure_source.symmetry<.85&&r.measure_source.symmetry>=.75,JSON.stringify(r));
+  assert.equal(r.needs_confirmation,true);assert.match(r.reason,/sol-sağ simetrisi %[0-9,]+; %85,0 sınırının altında/);
+});
+test('G24d axis scale threshold accepts the boundary and rejects a value above it',async()=>{
+  const m=mockup(),baseline=await auto.autoMeasure(input(m)),s=baseline.measure_source;
+  for(const difference of [.149999,.15,.15001]) {
+    const vertical=2*(2+difference)/(2-difference),r=await auto.autoMeasure(input(m,{flat:{...flat,olculerL:{omuzdan_boy:vertical*s.bodyHeightPx/10,etek:2*s.hemWidthPx/10}}}));
+    if(difference<=.15){assert.equal(r.needs_confirmation,false,JSON.stringify(r));assert.ok(r.width_mm>0);}
+    else {assert.equal(r.needs_confirmation,true);assert.equal(r.width_mm,null);assert.match(r.reason,/Boy\/etek ölçek farkı %15,001; %15 sınırını aşıyor/);}
+  }
 });
