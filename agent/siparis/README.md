@@ -122,6 +122,13 @@ Onay, düzeltme, sayım, tekrar gönderim, elle gönderildi işareti ve onaylı 
 # Şifreyi stdin'den verin veya SIPARIS_SIFRE ortam değişkenini ayarlayın.
 node agent/siparis/cli.js kullanici-ekle 'Örnek Kullanıcı' ekip            # onay yetkili (varsayılan)
 node agent/siparis/cli.js kullanici-ekle 'Örnek Stajyer' ekip --onaysiz    # kısıtlı
+node agent/siparis/cli.js kullanici-listele                               # ad, rol, onay yetkisi, tarih
+node agent/siparis/cli.js sifre-degistir 'Örnek Kullanıcı'                # yeni şifre; açık oturumlar kapanır
+node agent/siparis/cli.js kullanici-onaysiz 'Örnek Kullanıcı'             # onay yetkisini kapat (audit'li)
+node agent/siparis/cli.js kullanici-onayli 'Örnek Kullanıcı'              # onay yetkisini aç
+# DATA_DIR/stok-data.json içindeki eski kumaş kalemlerini aktarır (açılış bakiyesi aktarılmaz; sayım ayrıca girilir).
+node agent/siparis/cli.js eski-kumaslari-aktar --kuru                     # önce dene: hiçbir şey yazmaz, özeti verir
+node agent/siparis/cli.js eski-kumaslari-aktar                            # ikinci çalıştırma yeni kalem eklemez
 ```
 
 ## Doğrulama
