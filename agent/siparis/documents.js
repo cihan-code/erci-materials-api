@@ -154,8 +154,8 @@ async function upload(db, dataDir, versionId, input, file, user) {
     if(app && input.kind==='desen_kaynak') db.prepare('INSERT INTO document_application_sources(application_id,file_id) VALUES(?,?) ON CONFLICT(application_id) DO UPDATE SET file_id=excluded.file_id').run(app.id,saved.id);
     return saved;
   }); } catch (e) { for (const f of written) fs.unlinkSync(f); throw e; }
-  await automaticMeasure(db,dataDir,versionId,user,false,true);
-  return saved;
+  const olcuHatasi=await measureAfterSave(db,dataDir,versionId,user,true);
+  return olcuHatasi ? {...saved,olcuHatasi} : saved;
 }
 function measure(db, dataDir, input, user, applicationId = null) {
   const result=measureNow(db,dataDir,input,user,applicationId);
@@ -262,8 +262,9 @@ async function editApplication(db,dataDir,applicationId,changes,user) {
     return {application:db.prepare('SELECT * FROM applications WHERE id=?').get(app.id)};
   });
   const line=db.prepare('SELECT version_id FROM order_lines WHERE id=?').get(result.application.line_id);
-  await automaticMeasure(db,dataDir,line.version_id,user);
+  const olcuHatasi=await measureAfterSave(db,dataDir,line.version_id,user,true);
   result.application=db.prepare('SELECT * FROM applications WHERE id=?').get(applicationId);
+  if (olcuHatasi) result.olcuHatasi=olcuHatasi;
   return result;
 }
 function deleteApplication(db,applicationId,user) {
@@ -424,6 +425,11 @@ function autoInputs(db,v,line,app) {
 }
 function autoFingerprint({desenDosyaId,...app},input) {return JSON.stringify({app,input});}
 
+// The record is already committed; a failing automatic measurement must not make the client retry and duplicate it.
+async function measureAfterSave(db,dataDir,versionId,user,changedOnly) {
+  try { await automaticMeasure(db,dataDir,versionId,user,false,changedOnly); return null; }
+  catch (e) { return `Otomatik ölçü şimdi çalışmadı (${e.message}); kayıt oluşturuldu, ölçüyü sonra yeniden deneyin`; }
+}
 async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,changedOnly=false) {
   assertUser(db,user.id);draft(db,versionId);unlocked(db,versionId);
   return renderQueue(async signal=> {
@@ -481,8 +487,9 @@ async function addApplication(db,dataDir,lineId,input,user) {
     }
     return {...app,version_id:line.version_id};
   });
-  await automaticMeasure(db,dataDir,app.version_id,user);
-  return db.prepare('SELECT * FROM applications WHERE id=?').get(app.id);
+  const olcuHatasi=await measureAfterSave(db,dataDir,app.version_id,user,true);
+  const saved=db.prepare('SELECT * FROM applications WHERE id=?').get(app.id);
+  return olcuHatasi ? {...saved,olcuHatasi} : saved;
 }
 function generateInChild(input,signal,{timeoutMs=120000}={}) {
   if (!(Number.isFinite(timeoutMs) && timeoutMs>0)) throw new TypeError('Geçerli render süresi gerekli');
