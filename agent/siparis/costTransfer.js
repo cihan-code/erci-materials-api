@@ -29,8 +29,11 @@ const now = () => new Date().toISOString();
 const uid = user => user && typeof user === 'object' ? user.id : user;
 // Same comparison commitProductionForm uses to find an existing job by job_no.
 const jobKey = value => String(value || '').trim().toLowerCase();
-const kdvText = v => v === 1 ? 'KDV dahil' : v === 0 ? 'KDV hariç' : 'KDV durumu belirtilmedi';
+// Patron: unit sale prices are excluding VAT unless the entry explicitly says otherwise.
+const kdvText = v => v === 1 ? 'KDV dahil' : 'KDV hariç';
 const techLabel = type => type === 'baski' ? 'Baskı' : 'Nakış';
+// Bad or ambiguous data fails the same way on every attempt; the core parks it as basarisiz with an eksik_alan teyit.
+function dataError(message) { const err = new Error(message); err.permanent = true; return err; }
 
 function ensureSchema(db) {
   if (!ready.has(db)) { db.exec(SCHEMA); ready.add(db); }
@@ -44,7 +47,7 @@ function checkDataDir(L, dataDir) {
   if (dataDir == null) return;
   const root = path.resolve(dataDir);
   if (path.resolve(L.store.DATA_DIR) !== root || path.resolve(L.docs.DOCS_DIR) !== path.join(root, 'agent', 'documents'))
-    throw new Error('Maliyet akışının veri klasörü sipariş veri klasörüyle aynı değil; aktarım yapılmadı');
+    throw dataError('Maliyet akışının veri klasörü sipariş veri klasörüyle aynı değil; aktarım yapılmadı');
 }
 function getRow(db, versionId) { return db.prepare('SELECT * FROM cost_transfers WHERE version_id=?').get(versionId); }
 function upsert(db, versionId, orderId, fields) {
@@ -81,10 +84,10 @@ function applicationUnits(lines) {
 // Structured production-form input built from the approved order; replaces the Sonnet reading of our own PDF.
 function orderFacts(db, v, recipes) {
   const lines = snapshot(db, v.id).lines;
-  if (!lines.length) throw new Error('Sürümde sipariş satırı yok');
+  if (!lines.length) throw dataError('Sürümde sipariş satırı yok');
   const products = [...new Set(lines.map(l => l.product_key))];
   // One İşler record carries one product type and one cost template.
-  if (products.length !== 1) throw new Error(`Birden çok ürün tipi (${products.join(', ')}) tek İşler kaydına aktarılamaz; maliyeti elle girin`);
+  if (products.length !== 1) throw dataError(`Birden çok ürün tipi (${products.join(', ')}) tek İşler kaydına aktarılamaz; maliyeti elle girin`);
   const label = recipes?.products?.[products[0]]?.label || products[0];
   const total = lines.reduce((s, l) => s + l.quantity, 0);
   const sizeList = lines.map(l => JSON.parse(l.sizes_json));
@@ -147,13 +150,13 @@ function resolveJob(jobs, { orderNo, jobNo, storedId }) {
   const byNo = no => jobs.filter(j => jobKey(j.job_no) === jobKey(no));
   const key = jobNo || orderNo;
   const hits = byNo(key);
-  if (hits.length > 1) throw new Error(`İşler'de "${key}" iş numaralı birden fazla kayıt var; hangisinin güncelleneceği belirsiz`);
+  if (hits.length > 1) throw dataError(`İşler'de "${key}" iş numaralı birden fazla kayıt var; hangisinin güncelleneceği belirsiz`);
   if (jobNo && jobKey(jobNo) !== jobKey(orderNo) && byNo(orderNo).length)
-    throw new Error(`İşler'de hem "${jobNo}" hem "${orderNo}" kaydı var; hangisinin güncelleneceği belirsiz`);
+    throw dataError(`İşler'de hem "${jobNo}" hem "${orderNo}" kaydı var; hangisinin güncelleneceği belirsiz`);
   const own = storedId != null ? jobs.find(j => String(j.id) === String(storedId)) : null;
-  if (own && hits[0] !== own) throw new Error(`Daha önce aktarılan İşler kaydının (${storedId}) iş numarası artık "${key}" değil; elle kontrol edin`);
+  if (own && hits[0] !== own) throw dataError(`Daha önce aktarılan İşler kaydının (${storedId}) iş numarası artık "${key}" değil; elle kontrol edin`);
   if (hits.length) return hits[0];
-  if (jobNo) throw new Error(`Siparişin iş numarası "${jobNo}" İşler'de bulunamadı; yeni kayıt açılmadı`);
+  if (jobNo) throw dataError(`Siparişin iş numarası "${jobNo}" İşler'de bulunamadı; yeni kayıt açılmadı`);
   return null;
 }
 
@@ -171,7 +174,7 @@ function finalize(db, v, jobId, jobNo, documentId) {
 function recoverCommitted(db, L, v, doc) {
   const created = doc.committedRecord?.created?.find(c => c.kind === 'job');
   const job = created && (L.store.readPanelRaw()?.data?.jobs || []).find(j => String(j.id) === String(created.id));
-  if (!job) throw new Error(`Üretim formu belgesi (${doc.id}) işlenmiş ama İşler kaydı bulunamadı; elle kontrol edin`);
+  if (!job) throw dataError(`Üretim formu belgesi (${doc.id}) işlenmiş ama İşler kaydı bulunamadı; elle kontrol edin`);
   return { providerRef: finalize(db, v, job.id, String(job.job_no).trim(), doc.id) };
 }
 
@@ -179,12 +182,12 @@ async function transfer(payload, context, { dataDir, recipes } = {}) {
   const db = ensureSchema(context?.db);
   const { versionId, orderNo, versionNo } = payload || {};
   const v = loadVersion(db, versionId);
-  if (v.order_no !== orderNo || v.version_no !== versionNo) throw new Error('Kuyruk yükü sürüm kaydıyla uyuşmuyor');
+  if (v.order_no !== orderNo || v.version_no !== versionNo) throw dataError('Kuyruk yükü sürüm kaydıyla uyuşmuyor');
   const done = getRow(db, v.id);
   if (done?.done_at) return { providerRef: done.panel_job_id };
   if (done?.skipped_reason) return { providerRef: STALE_REF };
   if (v.status !== 'onaylandi') {
-    // A superseded version must never overwrite the newer version's İşler data.
+    // Fallback: revision already cancels pending jobs, but a superseded version must never overwrite the newer İşler data.
     tx(db, () => { upsert(db, v.id, v.order_id, { skipped_reason: `Sürüm durumu: ${v.status}` }); audit(db, null, 'maliyet_atlandi', v.id, { status: v.status }); });
     return { providerRef: STALE_REF };
   }
@@ -193,10 +196,10 @@ async function transfer(payload, context, { dataDir, recipes } = {}) {
 
   // 1. yükle: the approved production PDF, verified against the recorded hash.
   const file = db.prepare("SELECT * FROM files WHERE version_id=? AND kind='uretim_formu'").get(v.id);
-  if (!file) throw new Error('Onaylı sürümde uretim_formu dosyası yok');
-  if (!path.isAbsolute(file.path)) throw new Error('uretim_formu dosya yolu mutlak olmalı');
+  if (!file) throw dataError('Onaylı sürümde uretim_formu dosyası yok');
+  if (!path.isAbsolute(file.path)) throw dataError('uretim_formu dosya yolu mutlak olmalı');
   const buffer = fs.readFileSync(file.path);
-  if (crypto.createHash('sha256').update(buffer).digest('hex') !== file.sha256) throw new Error('uretim_formu SHA256 kayıtla uyuşmuyor; dosya değişmiş');
+  if (crypto.createHash('sha256').update(buffer).digest('hex') !== file.sha256) throw dataError('uretim_formu SHA256 kayıtla uyuşmuyor; dosya değişmiş');
   const facts = orderFacts(db, v, recipes || recipeReader.load());
   let doc = done?.document_id ? L.docs.getDocument(done.document_id) : null;
   if (doc?.status === 'committed') return recoverCommitted(db, L, v, doc);
@@ -228,7 +231,9 @@ async function transfer(payload, context, { dataDir, recipes } = {}) {
     baskiNakisItems: cm.baskiNakisItems, applications: facts.apps, notes: cm.notes, warnings: q.warnings };
   const missing = missingInputs(cm, facts.apps, !!bnItems, row?.unit_price ?? null);
   tx(db, () => upsert(db, v.id, v.order_id, { computation_json: JSON.stringify(computation), missing_json: JSON.stringify(missing) }));
-  if (missing.length) return { status: 'fiyat_bekliyor' };
+  // Without a price the job parks until the fiyat endpoint requeues it; with a price, anything still missing is a data error.
+  if (row?.unit_price == null) return { status: 'fiyat_bekliyor' };
+  if (missing.length) throw dataError(`Maliyet aktarımı için eksik: ${missing.join('; ')}`);
 
   // 4. işle: commitDocument, using its "update" choice whenever an İşler record already exists.
   const raw = L.store.readPanelRaw();
@@ -252,7 +257,7 @@ async function transfer(payload, context, { dataDir, recipes } = {}) {
   const out = L.commit.commitDocument(doc.id, { confirm: true, fields, links: { customer_id: target ? target.customer_id ?? null : null },
     ...(target ? { existingJobAction: 'update' } : {}) });
   if (out.needsExistingJobDecision) throw new Error(`İşler'de "${key}" kaydı aktarım sırasında oluştu; tekrar denenecek`);
-  if (target && String(out.jobId) !== String(target.id)) throw new Error(`Beklenen İşler kaydı ${target.id}, güncellenen ${out.jobId}; elle kontrol edin`);
+  if (target && String(out.jobId) !== String(target.id)) throw dataError(`Beklenen İşler kaydı ${target.id}, güncellenen ${out.jobId}; elle kontrol edin`);
   return { providerRef: finalize(db, v, out.jobId, key, doc.id) };
 }
 
@@ -289,16 +294,16 @@ function setPrice(db, orderId, body, user) {
     const userId = assertUser(db, uid(user), true).id;
     if (!db.prepare('SELECT id FROM orders WHERE id=?').get(orderId)) fail('Sipariş bulunamadı', 404);
     const input = body && typeof body === 'object' ? body : {};
-    const { unitPrice, kdvDahil = null } = input;
+    const { unitPrice } = input, kdvDahil = input.kdvDahil ?? false;
     if (typeof unitPrice !== 'number' || !Number.isFinite(unitPrice) || unitPrice <= 0 || Math.round(unitPrice * 100) / 100 !== unitPrice)
       fail('unitPrice: en çok iki ondalıklı pozitif sayı olmalı');
-    if (kdvDahil !== null && typeof kdvDahil !== 'boolean') fail('kdvDahil: true veya false olmalı');
+    if (typeof kdvDahil !== 'boolean') fail('kdvDahil: true veya false olmalı');
     const v = db.prepare("SELECT * FROM order_versions WHERE order_id=? AND status='onaylandi' ORDER BY version_no DESC LIMIT 1").get(orderId);
     if (!v) fail('Onaylı sürüm yok; fiyat onaydan sonra girilir', 409);
     const job = db.prepare('SELECT * FROM outbox WHERE version_id=? AND kind=?').get(v.id, KIND);
     if (!job) fail('Maliyet aktarım işi bulunamadı', 409);
     if (['tamam', 'iptal'].includes(job.status)) fail('Maliyet aktarımı kapandı; fiyat İşler kaydından değiştirilmeli', 409);
-    const fields = { unit_price: unitPrice, kdv_dahil: kdvDahil == null ? null : kdvDahil ? 1 : 0, price_by: userId, price_at: now() };
+    const fields = { unit_price: unitPrice, kdv_dahil: kdvDahil ? 1 : 0, price_by: userId, price_at: now() };
     let bnItems;
     if (Object.hasOwn(input, 'bnItems')) {
       bnItems = input.bnItems == null ? null : validBnItems(input.bnItems, applicationUnits(snapshot(db, v.id).lines));
@@ -306,7 +311,8 @@ function setPrice(db, orderId, body, user) {
     }
     upsert(db, v.id, orderId, fields);
     audit(db, userId, 'maliyet_fiyat', v.id, { orderId, unitPrice, kdvDahil, ...(bnItems !== undefined ? { bnItems } : {}) });
-    if (job.status === 'fiyat_bekliyor') outbox.retry(db, job.id, userId);
+    // fiyat_bekliyor waits for exactly this input; basarisiz may be a missing print size this entry now supplies.
+    if (['fiyat_bekliyor', 'basarisiz'].includes(job.status)) outbox.retry(db, job.id, userId);
     return costStatus(db, orderId);
   });
 }
