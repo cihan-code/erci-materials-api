@@ -40,19 +40,24 @@ module.exports = function documentRouter({db,dataDir}) {
   router.post('/duz-cizimler',receive,wrap((req,res)=>res.status(201).json(flats.upload(db,dataDir,req.body,documents.validateUpload(req.file),req.user))));
   router.put('/duz-cizimler/:id/referans',requireUser('onay'),wrap((req,res)=>res.json(flats.saveReference(db,req.params.id,req.body,req.user))));
   router.post('/uygulamalar/olc',wrap((req,res)=>res.status(201).json(documents.measure(db,dataDir,req.body,req.user))));
+  router.patch('/uygulamalar/:id',wrap((req,res)=>res.json(documents.editApplication(db,dataDir,id(req),req.body,req.user))));
+  router.delete('/uygulamalar/:id',wrap((req,res)=>res.json(documents.deleteApplication(db,id(req),req.user))));
   router.post('/surumler/:id/hazirla',wrap(async(req,res)=>res.json(await documents.prepare(db,dataDir,id(req),req.user,req.query.yeniden==='1'))));
   router.post('/surumler/:id/gonder',wrap((req,res,next)=> {
     const v=orders.snapshot(db,id(req));
     documents.unlocked(db,v.id);
     documents.assertMeasurements(db,v);
+    documents.assertVectorQuality(db,v);
     documents.assertFresh(db,v);
     if (!v.files.some(f=>f.kind==='onay_formu')) fail('Onay formu olmayan sürüm onaya gönderilemez; önce hazırlayın',409);
     next();
   }));
   router.post('/surumler/:id/onay',requireUser('onay'),wrap((req,res,next)=> {
     const v=orders.snapshot(db,id(req));
+    req.body.fileId=integer(Number(req.body.fileId),'fileId',1);
     if (!v.files.some(f=>f.id===req.body.fileId && f.kind==='onay_formu')) fail('Onay dosyası bu sürümün onay_formu olmalı',409);
     documents.assertMeasurements(db,v);
+    documents.assertVectorQuality(db,v);
     documents.assertFresh(db,v);
     next();
   }));
