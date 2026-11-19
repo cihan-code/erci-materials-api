@@ -195,7 +195,9 @@ test('ambiguous candidates: near colour, need without fabric, unread fabric word
   const unread = run('Siyah viskon 5 kg', [need(1, 'sweat', 'Siyah', 7000)]);
   assert.equal(unread.status, 'teyit');
   assert.match(said(unread), /tanınmayan sözcük var \("viskon"\)/);
-  assert.match(said(run('Siyah polar 5 kg', [need(1, 'sweat', 'Siyah', 7000)])), /Kumaş türü net değil: "polar"/);
+  // Polar is a fabric type since G19; "pike" alone (lakost or raşel?) is the open partial name now.
+  assert.match(said(run('Siyah pike 5 kg', [need(1, 'sweat', 'Siyah', 7000)])), /Kumaş türü net değil: "pike"/);
+  assert.deepEqual(run('Siyah polar 5 kg', [need(1, 'sweat', 'Siyah', 7000)]).allocations, [], 'polar never fills a şardonlu need');
   assert.match(said(run('Siyah lakost 5 kg', [need(1, 'sweat', 'Siyah', 7000)], { fabricKey: 'sardonlu_3_iplik|siyah' })), /Kumaş türü çelişiyor/);
   assert.match(said(run('Siyah şardonlu 3 iplik 5 kg', [need(1, 'sweat', 'Siyah', 7000)], { colorName: 'Pembe' })), /Renk çelişiyor/);
   // Two needs with different default fabrics share a colour: a typeless line cannot pick one.
@@ -265,4 +267,26 @@ test('G16: added colours read as one key; shade words outside the dictionary sti
     ['ekru', 'haki', 'hardal', 'indigo', 'saks_mavi', 'kiremit', 'vizon', 'tas', 'fume', 'bebe_mavi', 'acik_gri', 'koyu_gri']);
   assert.equal(colour('30/1 süprem koyu lacivert 5 kg'), null);
   assert.equal(colour('30/1 süprem mürdüm 5 kg'), 'murdum');
+});
+
+test('G19: live stock names (name + colour field) read to clean keys; a name/colour clash stays teyit', () => {
+  // importLegacyFabrics reads `${name} ${colorName}`, so the colour usually appears twice.
+  const read = (name, colour) => { const p = parseInvoiceDescription(`${name} ${colour}`); return { key: p.fabricType && p.colorKey ? fabricKey(p.fabricType, p.colorKey) : null, p }; };
+  const clean = (name, colour) => { const { key, p } = read(name, colour); assert.deepEqual([p.issues, p.unknownWords], [[], []], name); return key; };
+  assert.equal(clean('30/1 Süprem Açık Mavi', 'Açık Mavi'), 'supren_30_1|acik_mavi');
+  assert.equal(clean('30/1 Süprem Grimelanj', 'Grimelanj'), 'supren_30_1|gri_melanj');
+  assert.equal(clean('Şardonlu 3 İplik Açık Mavi', 'Açık Mavi'), 'sardonlu_3_iplik|acik_mavi');
+  assert.equal(clean('Şardonlu 3 İplik Nefti', 'Nefti'), 'sardonlu_3_iplik|nefti');
+  assert.equal(clean('Şardonlu 3 İplik Nefti Yeşil', 'Nefti Yeşil'), 'sardonlu_3_iplik|nefti');
+  assert.deepEqual([['Polar Siyah', 'Siyah'], ['Polar Mor', 'Mor'], ['Polar Kahverengi', 'Kahverengi'], ['İndigo Polar', 'İndigo']].map(([n, c]) => clean(n, c)),
+    ['polar|siyah', 'polar|mor', 'polar|kahverengi', 'polar|indigo']);
+  assert.equal(clean('Pike Raşel Siyah', 'Siyah'), 'pike_rasel|siyah');
+  assert.equal(clean('Raşel Pike Siyah', 'Siyah'), 'pike_rasel|siyah');
+  assert.notEqual(clean('Lakost Siyah', 'Siyah'), 'pike_rasel|siyah', 'lakost is a different knit');
+  const clash = read('Pike Raşel Lacivert', 'İndigo');
+  assert.equal(clash.key, null);
+  assert.match(clash.p.issues.map(i => i.message).join(' '), /birden çok renk var: lacivert, indigo/);
+  assert.match(parseInvoiceDescription('Pike siyah 10 kg').issues.map(i => i.message).join(' '), /Kumaş türü net değil: "pike"/);
+  assert.equal(parseInvoiceDescription('Raşel siyah 10 kg').unknownWords.join(), 'rasel', 'raşel alone names no fabric either');
+  assert.equal(parseInvoiceDescription('30/1 süprem açık lacivert').colorKey, null, 'only listed shades become colours');
 });

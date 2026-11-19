@@ -85,14 +85,15 @@ Onay, son onaylı sürümle sabit `line_key` üzerinden karşılaştırır. Ayr�
   - İplik numarası `30/1` ya da `30 1` biçiminde yazılır. Süpremde zorunludur, numarasız süprem `teyit`tir. Ribana ve interlokta numara yazılmışsa anahtara girer, yazılmamışsa girmez. Farklı numaralar ayrı kalemdir: `supren_24_1`, `supren_30_1` ihtiyacını karşılamaz.
   - `likralı`, `likra` ve `elastan` esneklik niteliğidir.
   - `penye` ve `örme` yalnız niteleyicidir: örme bir tabanla gelirse okunur, tek başına `penye` `teyit`tir. Bitişik "SÜPREMÖRME" yazımı da tanınır.
-- **Diğer türler** sabit adla tanınır: `sardonlu_3_iplik`, `sardonsuz_3_iplik`, `lakost`, `kaskorse`, `astar`.
+- **Diğer türler** sabit adla tanınır: `sardonlu_3_iplik`, `sardonsuz_3_iplik`, `lakost`, `kaskorse`, `astar`, `polar`, `pike_rasel` ("pike raşel" ya da "raşel pike"). Pike raşel lakosttan ayrı bir kalemdir. Tek başına "pike" ya da "raşel" `teyit` olur.
 - **İçerik bilgisi** gürültüdür; yalnız yüzdeli yazım bu kapsama girer ("%100 pamuk", "%95 pamuk %5 elastan"). İçerikte elastan varsa örme kumaş likralı sayılır. "%100 pamuk" ile "likralı" birlikte yazılırsa çelişki sayılır ve satır `teyit` olur. Örme olmayan bir kumaşın içeriğinde elastan varsa satır yine `teyit` olur. Yüzdesiz lif sözcüğü ("pamuklu") tanınmayan sözcüktür.
 - **Renkler:**
   - siyah, beyaz, kırık beyaz, ekru, lacivert, bordo, pembe;
-  - gri melanj, gri, açık gri, koyu gri, antrasit, füme, taş, vizon;
+  - gri melanj (bitişik "grimelanj" de), gri, açık gri, koyu gri, antrasit, füme, taş, vizon;
   - kırmızı, kiremit, mürdüm, mor, lila;
-  - saks mavi, bebe mavi, mavi, indigo, yeşil, haki;
+  - saks mavi, bebe mavi, açık mavi, mavi, indigo, nefti ("nefti yeşil" de), yeşil, haki;
   - sarı, hardal, turuncu, kahverengi, bej.
+- **Tekrar eden renk:** Stok aktarımı `ad + ' ' + renk` okur. Aynı rengin iki kez geçmesi çelişki değildir; iki farklı renk geçmesi (ör. "Pike Raşel Lacivert" + "İndigo") `teyit` olur.
 - **Renk tonu:** Sözlükte olmayan bir ton sözcüğü (`açık`, `koyu`, `neon`, `pastel`, `melanj`, `tonu`) rengi açık bırakır; örneğin "koyu lacivert" `teyit` olur.
 
 **Tanınmayan sözcük:** Tür ve renk bulunsa bile açıklamada sözlükte olmayan bir sözcük varsa satır `teyit` olur; örneğin "Lakost petrol mavi" `lakost|mavi` sayılmaz. Kişinin açıkça verdiği tür ve renk bu kuralın önüne geçer.
