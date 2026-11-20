@@ -14,7 +14,8 @@ const USAGE = [
   '  sifre-degistir <ad>            (terminalde gizli giriş; pipe/stdin ya da SIPARIS_SIFRE)',
   '  kullanici-onaysiz <ad> | kullanici-onayli <ad>',
   '  eski-kumaslari-aktar [--kuru]',
-  '  kartela-uygula [--kuru]         (kartelalı kalemlere renk no, hex ve standart ad yazar)'
+  '  kartela-uygula [--kuru]         (kartelalı kalemlere renk no, hex ve standart ad yazar)',
+  '  kalip-l-tamamla <L-listesi.json> [--kuru]  (kalıpların yalnız boş refBeden/olculerL alanlarını doldurur)'
 ].join('\n');
 const dataDir = () => process.env.DATA_DIR || path.join(__dirname, '../../data');
 async function readPassword() {
@@ -88,8 +89,27 @@ function findUser(db, name) {
   if (!user) fail(`Kullanıcı bulunamadı: ${name}`);
   return user;
 }
+// The L list stays outside the public repository; only empty fields are filled.
+function fillFlatsL(args) {
+  const files = args.filter(a => a !== '--kuru');
+  if (files.length !== 1 || args.length > 2 || files[0].startsWith('--')) throw new Error(USAGE);
+  const records = JSON.parse(fs.readFileSync(files[0], 'utf8')), dry = args.includes('--kuru');
+  const db = openDb(path.join(dataDir(), 'siparis.sqlite'));
+  try {
+    require('./flats').init(db);
+    const result = require('./flats').fillMissingL(db, records, { dry });
+    if (dry) console.log('[KURU ÇALIŞTIRMA, hiçbir şey yazılmadı]');
+    const label = { dolduruldu: dry ? 'doldurulacak' : 'dolduruldu', tam: 'zaten tam', atlandi: 'atlandı' };
+    console.log('kalıp\tdurum\tayrıntı');
+    for (const r of result.rows) console.log(`${r.ad}\t${label[r.durum]}\t${r.alanlar.join(', ') || r.neden || ''}`);
+    for (const ad of result.unused) console.log(`${ad}\tatlandı\tkütüphanede bu adla kalıp yok`);
+    console.log(`${dry ? 'Doldurulacak' : 'Doldurulan'} kalıp: ${result.filled}`);
+    return result;
+  } finally { db.close(); }
+}
 async function main(argv = process.argv.slice(2)) {
   const [command, name, role, ...flags] = argv;
+  if (command === 'kalip-l-tamamla') return fillFlatsL(argv.slice(1));
   const needsName = ['kullanici-ekle', 'sifre-degistir', 'kullanici-onaysiz', 'kullanici-onayli'];
   const dryCapable = ['eski-kumaslari-aktar', 'kartela-uygula'];
   if (!['kullanici-listele', ...dryCapable, ...needsName].includes(command) || (needsName.includes(command) && !name)) throw new Error(USAGE);

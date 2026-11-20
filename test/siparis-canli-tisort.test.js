@@ -1,0 +1,203 @@
+'use strict';
+const test=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');const os=require('node:os');const path=require('node:path');
+const {PDFDocument,StandardFonts}=require('pdf-lib');
+const {createCanvas}=require('@napi-rs/canvas');
+const {autoMeasure,extractArtwork}=require('../agent/siparis/autoMeasure');
+const documents=require('../agent/siparis/documents');
+const flats=require('../agent/siparis/flats');
+const {openDb}=require('../agent/siparis/db');
+const {setup}=require('./fixtures/siparis/belge-fixture');
+
+// G47 (live order): a front and a back of one dark tee side by side, a small
+// letter-spaced word on the chest, the line colour naming another fabric.
+// Invented garments, lettering and measurements only.
+const BODY=[[200,45],[400,45],[540,175],[475,250],[450,215],[450,605],[150,605],[150,215],[125,250],[60,175]];
+const CLOTH='#262626';
+function tee(ctx,dx,fill=CLOTH) {
+  ctx.fillStyle=fill;ctx.beginPath();
+  BODY.forEach(([x,y],i)=>i?ctx.lineTo(dx+x,y):ctx.moveTo(dx+x,y));
+  ctx.closePath();ctx.fill();
+}
+// The inside of the back neck shows through the front opening as a shadow.
+function neckShadow(ctx,dx) {ctx.fillStyle='#050505';ctx.beginPath();ctx.ellipse(dx+300,50,60,24,0,0,Math.PI);ctx.fill();}
+// Eight thin letters with wide gaps: 6 px strokes, 9 px tall, 10 px apart.
+const LETTERS=8,LETTER_W=6,GAP=10,TEXT_H=9,TEXT_W=LETTERS*LETTER_W+(LETTERS-1)*GAP;
+function lettering(ctx,x,y,k=1,color='#f4f4f4') {
+  ctx.fillStyle=color;
+  for(let n=0;n<LETTERS;n++) {
+    const left=x+n*(LETTER_W+GAP)*k;
+    ctx.fillRect(left,y,LETTER_W*k,1.5*k);ctx.fillRect(left,y+(TEXT_H-1.5)*k,LETTER_W*k,1.5*k);ctx.fillRect(left,y,1.5*k,TEXT_H*k);
+  }
+}
+function pair({front=0,shadow=front,print=front,line=true}={}) {
+  const c=createCanvas(1200,650),x=c.getContext('2d');
+  x.fillStyle='#ffffff';x.fillRect(0,0,1200,650);
+  tee(x,0);tee(x,600);
+  if(shadow!=null)neckShadow(x,shadow*600);
+  if(line&&print!=null)lettering(x,print*600+300-TEXT_W/2,250);
+  return c.toBuffer('image/png');
+}
+// The linked source: the same word, white on a black proof background.
+function source({w=TEXT_W,h=TEXT_H}={}) {
+  const k=10,c=createCanvas(w*k+400,h*k+300),x=c.getContext('2d');
+  x.fillStyle='#000000';x.fillRect(0,0,c.width,c.height);
+  if(w===TEXT_W)lettering(x,200,150,k);else {x.fillStyle='#ffffff';x.fillRect(200,150,w*k,h*k);}
+  return c.toBuffer('image/png');
+}
+const FLAT={id:'tee',ad:'UYDURMA TİŞÖRT',refBeden:'L',refLengthCm:54,olculerL:{omuzdan_boy:56,etek:30}};
+const measure=(image,options={})=>autoMeasure({image:{buffer:image,mime:'image/png'},design:{buffer:source(options.source),mime:'image/png'},flat:FLAT,product:'tisort',position:'gogus',...options});
+
+test('G47 a small letter-spaced word on the front of a dark pair is found as one print and measured', async()=> {
+  const r=await measure(pair());
+  assert.deepEqual(r.reasons,[],r.reason);
+  const s=r.measure_source;
+  assert.deepEqual(s.views.map(v=>v.view),['on','arka']);
+  assert.equal(s.selectedProductIndex,0);assert.equal(s.method,'otomatik_renk');
+  // The letters join into one box of the whole word.
+  assert.ok(Math.abs(s.candidateBoxPx.w-TEXT_W)<=2&&Math.abs(s.candidateBoxPx.h-TEXT_H)<=2,JSON.stringify(s.candidateBoxPx));
+  assert.ok(s.aspectRatioError<=.3);
+  assert.equal(r.width_mm,Math.round(s.candidateBoxPx.w*s.mmPerPx));
+  // The neck shadow and the design on one garment agree on the front.
+  assert.equal(s.views[0].viewEvidence.pairVotes,2);
+});
+
+test('G47 the same pair with the front on the right: evidence, not order, names the front', async()=> {
+  const r=await measure(pair({front:1}));
+  assert.deepEqual(r.reasons,[],r.reason);
+  assert.deepEqual(r.measure_source.views.map(v=>v.view),['arka','on']);
+  assert.equal(r.measure_source.selectedProductIndex,1);
+});
+
+test('G47 the design on one garment alone is not evidence of the front; a contradiction stays open', async()=> {
+  // No neck shadow on either garment: only the design points at the left one.
+  const alone=await measure(pair({shadow:null}));
+  assert.equal(alone.width_mm,null);
+  assert.match(alone.reason,/2 görünüm ayrılamadı/);
+  assert.match(alone.reason,/Desen yalnız 1\. üründe bulundu.*tek başına görünüm kanıtı sayılmadı/);
+  // The shadow names the left garment, the design sits on the right one.
+  const conflict=await measure(pair({shadow:0,print:1}));
+  assert.equal(conflict.width_mm,null);
+  assert.match(conflict.reason,/görünüm ayrılamadı/);
+});
+
+test('G47 thin lettering needs the linked design ratio; without it nothing is measured', async()=> {
+  // A square source does not describe a 13:1 word.
+  const square=await measure(pair(),{source:{w:20,h:20}});
+  assert.equal(square.width_mm,null);
+  // Extraction has no source ratio: the word stays below the anonymous print limits.
+  const c=createCanvas(600,650),x=c.getContext('2d');
+  x.fillStyle='#ffffff';x.fillRect(0,0,600,650);tee(x,0);lettering(x,300-TEXT_W/2,250);
+  const extracted=await extractArtwork({image:{buffer:c.toBuffer('image/png'),mime:'image/png'},position:'gogus',product:'tisort'});
+  assert.equal(extracted.buffer,undefined);
+});
+
+test('G47 a line colour no garment shows is an information note, never a filter', async()=> {
+  const r=await measure(pair(),{color:'Ekru'});
+  assert.deepEqual(r.reasons,[],r.reason);assert.equal(r.needs_confirmation,false);
+  assert.equal(r.measure_source.colorNote,'Satır rengi (Ekru) görseldeki ürün rengiyle uyuşmuyor');
+  const black=await measure(pair(),{color:'Siyah'});
+  assert.equal(black.measure_source.colorNote,undefined);
+});
+
+async function titledPdf(title) {
+  const c=createCanvas(600,650),x=c.getContext('2d');
+  x.fillStyle='#ffffff';x.fillRect(0,0,600,650);tee(x,0,'#1d2c5e');
+  x.fillStyle='#f2f2f2';for(let k=0;k<4;k++)x.fillRect(240+k*30,250,26,40);
+  const doc=await PDFDocument.create(),page=doc.addPage([600,650]);
+  page.drawImage(await doc.embedPng(c.toBuffer('image/png')),{x:0,y:0,width:600,height:650});
+  page.drawText(title,{x:20,y:630,size:10,font:await doc.embedFont(StandardFonts.Helvetica)});
+  return Buffer.from(await doc.save());
+}
+test('G47 extraction keeps a sheet whose title and garment both miss the line colour, with a note', async()=> {
+  const sheet=await titledPdf('Siyah T-Shirt');
+  const r=await extractArtwork({image:{buffer:sheet,mime:'application/pdf'},position:'gogus',product:'tisort',color:'Ekru'});
+  assert.ok(r.buffer,r.reason);
+  assert.deepEqual(r.notes,['Satır rengi (Ekru) görseldeki ürün rengiyle uyuşmuyor']);
+  assert.ok(!r.warnings.some(w=>/Satır rengi/.test(w)));
+  // A colour the sheet names needs no note.
+  const named=await extractArtwork({image:{buffer:sheet,mime:'application/pdf'},position:'gogus',product:'tisort',color:'Siyah'});
+  assert.ok(named.buffer,named.reason);assert.deepEqual(named.notes,[]);
+});
+
+// L pattern library: an actionable reason and a fill-only command.
+function library(t) {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'g47-'));const db=openDb(path.join(dir,'siparis.sqlite'));flats.init(db);
+  t.after(()=>{db.close();fs.rmSync(dir,{recursive:true,force:true});});
+  const add=(id,ad,urun,refBeden=null,refLengthCm=null,olculerL=null)=>db.prepare('INSERT INTO document_flats(id,ad,urun,gorunum,dosya,refBeden,refLengthCm,olculerL) VALUES(?,?,?,?,?,?,?,?)')
+    .run(id,ad,urun,'on','uydurma.png',refBeden,refLengthCm,olculerL&&JSON.stringify(olculerL));
+  return {db,dir,add};
+}
+const L_LIST=[
+  {ad:'UYDURMA TİŞÖRT',urun:'tisort',refBeden:'L',refLengthCm:50,olculerL:{gogus:50,omuzdan_boy:70,etek:48}},
+  {ad:'UYDURMA SWEAT',urun:'sweat',refBeden:'L',refLengthCm:58,olculerL:{gogus:58,omuzdan_boy:69,etek:50}},
+  {ad:'UYDURMA ŞORT',urun:'sort',refBeden:'L',refLengthCm:50,olculerL:{bel:36,basen:50,yan_boy:35}},
+  {ad:'UYDURMA POLO',urun:'polo',refBeden:'L',refLengthCm:52,olculerL:{gogus:52,omuzdan_boy:70,etek:52}},
+  {ad:'UYDURMA CEKET',urun:null,refBeden:'L',refLengthCm:60,olculerL:{gogus:60}}
+];
+
+test('G47 a pattern without L sizes gives an actionable reason', t=> {
+  const {db,add}=library(t);
+  assert.equal(flats.missingLNote(db,{product_key:'tisort'},null),'Bu ürün için kalıp kütüphanesinde kalıp yok; L ölçüleriyle kalıp ekleyin');
+  add('t','TİŞÖRT','tisort');
+  assert.equal(flats.missingLNote(db,{product_key:'tisort'},null),'TİŞÖRT kalıbında L ölçüleri yok; kalıp kütüphanesini güncelleyin');
+  // An L record whose size table is empty is just as unusable.
+  const emptyL={id:'x',ad:'TİŞÖRT',urun:'tisort',refBeden:'L',olculerL:null};
+  assert.match(flats.missingLNote(db,{product_key:'tisort'},emptyL),/^TİŞÖRT kalıbında L ölçüleri yok/);
+  assert.equal(flats.missingLNote(db,{product_key:'tisort'},{...emptyL,olculerL:{omuzdan_boy:70,etek:48}}),null);
+});
+
+test('G47 the live order reason names the pattern instead of the generic L message', async t=> {
+  const f=await setup();
+  t.after(async()=>{await documents.settled();await f.close();fs.rmSync(f.dir,{recursive:true,force:true});});
+  f.db.prepare('INSERT INTO document_flats(id,ad,urun,gorunum,dosya) VALUES(?,?,?,?,?)').run('tee','TİŞÖRT','tisort','on','uydurma.png');
+  const o=await f.order({lines:[{product_key:'tisort',quantity:1,color_name:'Ekru',applications:[{kind:'baski',position:'gogus'}]}]});
+  const line=o.version.lines[0];
+  assert.equal((await f.upload(o.version.id,{kind:'urun_gorsel',lineId:line.id,gorunum:'on',buffer:pair()})).status,201);
+  const app=(await f.request(`/surumler/${o.version.id}`,{token:f.token})).data.lines[0].applications[0];
+  const message=f.db.prepare("SELECT message FROM confirmations WHERE ref_id=? AND kind='olcu' AND status='acik'").get(app.id).message;
+  assert.match(message,/^TİŞÖRT kalıbında L ölçüleri yok; kalıp kütüphanesini güncelleyin/);
+  assert.doesNotMatch(message,/L kalıp referansı bulunamadı|geçerli L beden/);
+});
+
+test('G47 kalip-l-tamamla fills only empty fields, is idempotent and leaves conflicts visible', t=> {
+  const {db,add}=library(t);
+  add('tee','UYDURMA TİŞÖRT','tisort');                                    // both empty
+  add('sweat','UYDURMA SWEAT','sweat','L',58);                             // olculerL empty
+  add('sort','UYDURMA ŞORT','sort',null,49);                               // old reference cm differs
+  add('polo','UYDURMA POLO','polo','L',52,{gogus:51,omuzdan_boy:71});      // already filled: never overwritten
+  add('m','UYDURMA M','tisort','M',48);                                    // not in the list
+  const dry=flats.fillMissingL(db,L_LIST,{dry:true});
+  assert.equal(dry.filled,2);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM document_flats WHERE olculerL IS NOT NULL").get().n,1);
+  const done=flats.fillMissingL(db,L_LIST);
+  const row=id=>flats.get(db,id),status=id=>done.rows.find(r=>r.id===id);
+  assert.deepEqual(status('tee').alanlar,['refBeden','olculerL']);assert.equal(row('tee').refBeden,'L');assert.deepEqual(row('tee').olculerL,L_LIST[0].olculerL);
+  assert.deepEqual(status('sweat').alanlar,['olculerL']);assert.equal(row('sweat').refLengthCm,58);
+  assert.equal(status('sort').durum,'atlandi');assert.match(status('sort').neden,/49 cm.*50 cm.*--guncelle/);assert.equal(row('sort').refBeden,null);
+  assert.equal(status('polo').durum,'tam');assert.deepEqual(row('polo').olculerL,{gogus:51,omuzdan_boy:71});
+  assert.equal(status('m').durum,'atlandi');assert.equal(row('m').refBeden,'M');
+  assert.deepEqual(done.unused,['UYDURMA CEKET']);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM audit_log WHERE action='kalip_l_tamamla'").get().n,2);
+  const again=flats.fillMissingL(db,L_LIST);
+  assert.equal(again.filled,0);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM audit_log WHERE action='kalip_l_tamamla'").get().n,2);
+  assert.throws(()=>flats.fillMissingL(db,[L_LIST[0],L_LIST[0]]),/tekil/);
+});
+
+test('G47 kalip-l-tamamla runs from the CLI against DATA_DIR, --kuru writes nothing', async t=> {
+  const {db,dir,add}=library(t);add('tee','UYDURMA TİŞÖRT','tisort');
+  const list=path.join(dir,'l-listesi.json');fs.writeFileSync(list,JSON.stringify(L_LIST));
+  const {main}=require('../agent/siparis/cli');
+  const before=process.env.DATA_DIR,log=console.log,lines=[];
+  process.env.DATA_DIR=dir;console.log=s=>lines.push(String(s));
+  try {
+    await main(['kalip-l-tamamla',list,'--kuru']);
+    assert.equal(flats.get(db,'tee').refBeden,null);
+    await main(['kalip-l-tamamla',list]);
+  } finally {console.log=log;if(before===undefined)delete process.env.DATA_DIR;else process.env.DATA_DIR=before;}
+  assert.match(lines.join('\n'),/KURU ÇALIŞTIRMA[\s\S]*UYDURMA TİŞÖRT\tdoldurulacak\trefBeden, olculerL[\s\S]*UYDURMA TİŞÖRT\tdolduruldu/);
+  assert.equal(flats.get(db,'tee').refBeden,'L');
+  await assert.rejects(main(['kalip-l-tamamla']),/Kullanım/);
+});
