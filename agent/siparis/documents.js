@@ -8,6 +8,7 @@ const orders = require('./orders');
 const flats = require('./flats');
 const { measureApplication, designBoxFromPng, imageSize } = require('./measure');
 const { viewForPosition } = require('./autoMeasure');
+const { reasonTexts } = require('./vectorReasons');
 const childProcess = require('node:child_process');
 const { buildWorkshopMessage, createWorkshopHandler } = require('./workshop');
 const { registerHandler } = require('./outbox');
@@ -1007,8 +1008,12 @@ function vectorStatus(db,versionId) {
     rows.push({extracted:true,applicationId:app.id,sourceFileId:input.image?.id??null,position:app.position,
       previewFileId:row?.preview_file_id??null,status:row?.status??(input.gap?'teyit':'hazirlaniyor'),message:row?.message??input.gap??null,
       quality:report.quality??null,reasons:report.reasons??[],...(report.placement?{placement:report.placement}:{}),
-      ...(report.sourceKind?{sourceKind:report.sourceKind}:{}),...(report.designBox?{designBox:report.designBox}:{})});
+      ...(report.sourceKind?{sourceKind:report.sourceKind}:{}),...(report.designBox?{designBox:report.designBox}:{}),
+      // Shown as the preview's origin: no separate artwork file was supplied.
+      ...(row?.preview_file_id?{sourceLabel:'Görselden ayrıldı'}:{})});
   }
+  // Stored reports keep short codes; every row also carries their Turkish text.
+  for(const row of rows)row.reasonTexts=reasonTexts(row.reasons);
   return rows.sort((a,b)=>a.sourceFileId-b.sourceFileId);
 }
 const settled=()=>Promise.all([...pending]);
