@@ -509,7 +509,8 @@ function hoodView(p,ref) {
   // A raised narrow crown followed by broad shoulders is hood geometry. A
   // broad neckline alone is insufficient evidence for front/back assignment.
   const raised=ref.shoulderY-ref.box.y>ref.bodyHeightPx*.08;
-  const lining=components(ink,w,h,ref.hemWidthPx).filter(c=>c.box.y<ref.shoulderY&&c.box.w>ref.hemWidthPx*.28&&c.box.h>ref.bodyHeightPx*.035&&Math.abs(c.box.x+c.box.w/2-cx)<ref.hemWidthPx*.2);
+  // A lining lies under the hood crown; ink at the silhouette top is a hanger or background (G47).
+  const lining=components(ink,w,h,ref.hemWidthPx).filter(c=>c.box.y<ref.shoulderY&&c.box.y>ref.box.y+ref.bodyHeightPx*.01&&c.box.w>ref.hemWidthPx*.28&&c.box.h>ref.bodyHeightPx*.035&&Math.abs(c.box.x+c.box.w/2-cx)<ref.hemWidthPx*.2);
   const cords=components(ink,w,h,4).filter(c=>c.box.y>=ref.shoulderY-ref.bodyHeightPx*.03&&c.box.y<ref.shoulderY+ref.bodyHeightPx*.25&&c.box.h>ref.bodyHeightPx*.15&&c.box.w<ref.hemWidthPx*.08&&Math.abs(c.box.x+c.box.w/2-cx)<ref.hemWidthPx*.22);
   return {hooded:raised,view:raised&&(lining.length||cords.length>=2)?'on':'teyit',lining:lining.length,cords:cords.length};
 }
@@ -554,6 +555,8 @@ function shirtViews(refs,cues) {
 
 function productViewCues(p,refs,product) {
   const cues=refs.map(ref=>ref.splitMethod?{hooded:false,view:'teyit',lining:0,cords:0}:hoodView(p,ref));
+  // A tee has no hood: the background inside its collar is not a lining (G47).
+  if(product==='tisort')for(const c of cues){c.view='teyit';c.hooded=false;}
   if(product==='tisort')shirtViews(refs,cues);
   // A visible hood opening or cords identify the front of a hooded pair.
   if(refs.length===2 && cues.filter(c=>c.view==='on').length===1) {
@@ -1110,16 +1113,16 @@ async function autoMeasure({image,design,flat,product,position,color}) {
       // A pair of one garment is settled by the extraction cues. The linked
       // design found on exactly one garment adds a vote for the view of its
       // position; it can confirm or contradict, never decide alone.
-      if(refs.length===2&&upper.includes(position)&&cues.every(c=>['on','teyit'].includes(c.view))) {
+      if(refs.length===2) {
         const matches=refs.map(ref=>colorDesign(pages[i],ref,tallBack,ratios));
         const carrying=matches.map(m=>!!m.box&&ratioMatches(m.box.w/m.box.h,ratios));
-        const carrier=ratios.length&&carrying.filter(Boolean).length===1&&matches.every((m,k)=>carrying[k]||!m.box)?carrying.indexOf(true):-1;
+        const carrier=upper.includes(position)&&ratios.length&&carrying.filter(Boolean).length===1&&matches.every((m,k)=>carrying[k]||!m.box)?carrying.indexOf(true):-1;
         pairViews(pages[i],refs,cues,matches,[],carrier<0?null:viewForPosition(position)==='on'?carrier:1-carrier);
         if(carrier>=0)cues.forEach((c,k)=>{c.designCarrier=k===carrier;});
       }
       for(let k=0;k<refs.length;k++) {
         const ref=refs[k],cue=cues[k],scale=scaleFor(ref,measurements,scalePair,pages[i],calK);
-        allViews.push({page:i+1,index:k,view:cue.view,garmentColor:garmentColor(dominant(pages[i],Array.from(ref.mask.keys()).filter(j=>ref.mask[j]))),hooded:cue.hooded,viewEvidence:{lining:cue.lining,cords:cue.cords,...(cue.neckDepth!==undefined?{neckDepth:cue.neckDepth}:{}),...(cue.pairEvidence?{pairVotes:cue.pairEvidence}:{}),...(cue.designCarrier!==undefined?{designCarrier:cue.designCarrier}:{})},maskMethod:ref.maskMethod,...(ref.splitMethod?{splitMethod:ref.splitMethod}:{}),productBoxPx:ref.box,shoulderY:ref.shoulderY,hemY:ref.hemY,hemWidthPx:ref.hemWidthPx,chestLinePx:ref.chestLine??null,bodyHeightPx:ref.bodyHeightPx,...scale});
+        allViews.push({page:i+1,index:k,view:cue.view,garmentColor:garmentColor(dominant(pages[i],Array.from(ref.mask.keys()).filter(j=>ref.mask[j]))),hooded:cue.hooded,viewEvidence:{lining:cue.lining,cords:cue.cords,...(cue.neckDepth!==undefined?{neckDepth:cue.neckDepth}:{}),...(cue.pairVotes?{pairVotes:cue.pairVotes}:{}),...(cue.viewConflict?{viewConflict:cue.viewConflict}:{}),...(cue.designCarrier!==undefined?{designCarrier:cue.designCarrier}:{})},maskMethod:ref.maskMethod,...(ref.splitMethod?{splitMethod:ref.splitMethod}:{}),productBoxPx:ref.box,shoulderY:ref.shoulderY,hemY:ref.hemY,hemWidthPx:ref.hemWidthPx,chestLinePx:ref.chestLine??null,bodyHeightPx:ref.bodyHeightPx,...scale});
         if(cue.view!=='teyit'&&cue.view!==viewForPosition(position))continue;
         if(refs.length>1&&cue.view==='teyit'&&!designs.length)continue;
         if(designs.length)for(let j=0;j<designs.length;j++) {
@@ -1138,15 +1141,11 @@ async function autoMeasure({image,design,flat,product,position,color}) {
     // is worth knowing (the fabric may be wrong) but does not block the size.
     const lineColor=named(color,COLOR_WORDS);
     if(lineColor.length===1&&allViews.length&&!allViews.some(v=>v.garmentColor===lineColor[0]))source.colorNote=colorMismatch(color);
-    // A tee has no collar rising well above the shoulders (mockups: 8-12% of
-    // the body height; a half-zip stand collar 16-17%, hoods more). Its L
-    // table on such a garment sized a chest logo 20% large (G47). Teyit only.
-    if(String(product??'').trim().toLowerCase()==='tisort'&&allViews.some(v=>(v.shoulderY-v.productBoxPx.y)/v.bodyHeightPx>=.15))
-      reasons.push('Satır ürünü tişört, görseldeki ürünün yakası omuzdan yükseliyor (dik yaka, fermuar veya kapüşon); ürünü ve kalıbı kontrol edin.');
+
     const unknownViews=allViews.filter(v=>allViews.filter(q=>q.page===v.page).length>1&&v.view==='teyit');
-    const carrierOnly=unknownViews.find(v=>v.viewEvidence.designCarrier);
+    const conflict=unknownViews.find(v=>v.viewEvidence.viewConflict)?.viewEvidence.viewConflict;
     const unknownViewReason=()=>`Ürün görünümü eşleştirme güveni düşük: ${unknownViews.length} görünüm ayrılamadı; görünüm teyit edilmeli.`+
-      (carrierOnly?` Desen yalnız ${carrierOnly.index+1}. üründe bulundu; yaka içi gölgesi veya ÖN/ARKA etiketi bunu doğrulamadığı için tek başına görünüm kanıtı sayılmadı.`:'');
+      (conflict?` Kanıtlar çelişiyor: ${conflict}.`:' Ön/arka kanıtı (kapüşon, yaka, etiket, ense işareti, desen konumu) bulunamadı.');
     // A strong template takes precedence over the independent color fallback.
     candidates.sort((a,b)=>(!!b.designPage-!!a.designPage)||b.match.confidence-a.match.confidence);
     source.pageCandidates=candidates.slice(0,5).map(c=>({page:c.page,productIndex:c.index,designPage:c.designPage,confidence:Math.round(c.match.confidence*1000)/1000}));
@@ -1201,6 +1200,11 @@ async function autoMeasure({image,design,flat,product,position,color}) {
       const templateSelectsProduct=designPage&&match.confidence>=MIN_MATCH_CONFIDENCE&&!placementAmbiguous;
       if(unknownViews.some(v=>v.page===page && (v.splitMethod || !templateSelectsProduct)))reasons.push(unknownViewReason());
       source.productSelection=templateSelectsProduct?'desen':'gorunum';
+      // A tee has no collar rising well above the shoulders (mockups: 8-12% of
+      // the body height; a half-zip stand collar 16-17%, hoods more). Its L
+      // table on such a garment sized a chest logo 20% large (G47). Teyit only.
+      if(String(product??'').trim().toLowerCase()==='tisort'&&(ref.shoulderY-ref.box.y)/ref.bodyHeightPx>=.15)
+        reasons.push('Satır ürünü tişört, görseldeki ürünün yakası omuzdan yükseliyor (dik yaka, fermuar veya kapüşon); ürünü ve kalıbı kontrol edin.');
       const pageViews=allViews.filter(v=>v.page===page);
       // Independent products can be drawn at different sizes. Compare scales
       // only for the identified front/back pair, as in the two-view workflow.
@@ -1441,47 +1445,66 @@ function pairedGarments(a,b) {
   if(Math.abs(a.hemWidthPx-b.hemWidthPx)>hem*.12||Math.abs(a.bodyHeightPx-b.bodyHeightPx)>height*.12)return false;
   return comparableShirts(a,b)||Math.abs(a.bodyCenterX-b.bodyCenterX)<=hem*.08;
 }
-// Settle front/back of a pair of the same garment. Each cue
-// is independent and any disagreement leaves both views unresolved:
+// A small mark on the centre line just under the collar (a neck label, an
+// "ense" print) is only seen on a back.
+function neckMark(p,ref) {
+  const ink=contrastInk(p,ref),cx=ref.bodyCenterX??(ref.box.x+ref.box.w/2);
+  return components(ink,p.width,p.height,3).some(c=>{
+    const o=(c.box.x+c.box.w/2-cx)/ref.hemWidthPx,y=(c.box.y-ref.shoulderY)/ref.bodyHeightPx;
+    return Math.abs(o)<.05&&y>=-.06&&y<=.05&&c.box.w<ref.hemWidthPx*.1&&c.box.h<ref.bodyHeightPx*.03;
+  });
+}
+// Settle front/back of a pair of the same garment, shared by extraction and
+// measurement (Patron, 21.11.2026: the system decides, the user is not asked).
+// Every cue below is a vote for the front; agreeing votes decide, any
+// disagreement leaves both views open with the conflicting cues named:
+// - hood lining/cords or a deeper front neckline (productViewCues),
 // - a printed label next to a garment ("ÖN", "ARKA"),
 // - on dark cloth, the shadowed neck/hood opening or a mirrored hood lining,
-// - a chest-side print, which only a front carries; the other garment then
-//   has a print on the centre line or none in the print band.
-// - the linked design found on one garment only (measurement): it supports
-//   the cues above but is not evidence alone, since a mockup may show that
-//   design on the other side of the garment.
+// - a chest-side print, which only a front carries,
+// - a small mark under the back collar (neck label or ense print),
+// - the linked design found on one garment only: its application position
+//   names that garment's side (chest → front, back → back).
 function pairViews(p,refs,cues,matches,labels=[],linkedFront=null) {
-  // A front already found by hood evidence must agree with these cues.
-  const known=cues.findIndex(c=>c.view==='on');
-  // Hood evidence naming both garments a front contradicts itself; the cues
-  // below must then settle the pair on their own.
-  if(refs.length!==2||!pairedGarments(...refs)||cues.some(c=>!['on','teyit'].includes(c.view)))return;
-  const hoodSaysBoth=cues.every(c=>c.view==='on');
+  if(refs.length!==2||!pairedGarments(...refs))return;
   const votes=[];
-  if(labels.includes('celiski'))return;
+  const front=cues.findIndex(c=>c.view==='on'),back=cues.findIndex(c=>c.view==='arka');
+  // Hood evidence naming both garments a front contradicts itself: no vote.
+  if(!cues.every(c=>c.view==='on')&&(front>=0||back>=0))
+    votes.push({front:front>=0?front:1-back,cue:cues.some(c=>c.neckDepth!=null)?'yaka oyuğu':'kapüşon açıklığı/kordon'});
+  if(labels.includes('celiski')){for(const c of cues){c.view='teyit';c.viewConflict='ÖN/ARKA etiketi çelişkili';}return;}
   const labelled=labels.findIndex(l=>l==='on'),labelledBack=labels.findIndex(l=>l==='arka');
   if(labelled>=0||labelledBack>=0) {
     if(labelled>=0&&labelledBack>=0&&labelled===labelledBack)return;
-    votes.push(labelled>=0?labelled:1-labelledBack);
+    votes.push({front:labelled>=0?labelled:1-labelledBack,cue:'ÖN/ARKA etiketi'});
   }
   const shade=refs.map(ref=>openingShade(p,ref));
   if(shade.every(s=>s!=null)) {
     const lining=refs.map(ref=>liningPair(p,ref));
-    const front=refs.map((_,i)=>shade[i]>=.15||lining[i]),back=refs.map((_,i)=>shade[i]<=.03&&!lining[i]);
-    const index=front.findIndex(Boolean);
-    // Dark cloth always shows a front opening; without one, neither is a front.
-    if(index<0||front[1-index]||!back[1-index])return;
-    votes.push(index);
+    const shaded=refs.map((_,i)=>shade[i]>=.15||lining[i]),plain=refs.map((_,i)=>shade[i]<=.03&&!lining[i]);
+    const index=shaded.findIndex(Boolean);
+    if(index>=0&&!shaded[1-index]&&plain[1-index])votes.push({front:index,cue:'yaka içi gölgesi'});
+    // Two closed hood backs: the hoods themselves say neither is a front.
+    if(cues.every((c,i)=>c.hooded&&plain[i]&&!c.lining&&!c.cords)) {
+      for(const c of cues){c.view='teyit';c.viewConflict='iki kapüşon da kapalı arka yüz gösteriyor';}
+      return;
+    }
   }
   if(matches.every(m=>!m.ambiguous)) {
     const offset=refs.map((ref,i)=>matches[i].box?Math.abs(matches[i].box.x+matches[i].box.w/2-ref.bodyCenterX)/ref.hemWidthPx:null);
-    const front=offset.findIndex(o=>o!=null&&o>=.15);
-    if(front>=0&&(offset[1-front]==null||offset[1-front]<.08))votes.push(front);
+    const side=offset.findIndex(o=>o!=null&&o>=.15);
+    if(side>=0&&(offset[1-side]==null||offset[1-side]<.08))votes.push({front:side,cue:'yan göğüs baskısı'});
   }
-  if(votes.length&&linkedFront!=null)votes.push(linkedFront);
-  if(!votes.length||votes.some(v=>v!==votes[0])||(!hoodSaysBoth&&known>=0&&votes[0]!==known))return;
-  cues[votes[0]].view='on';cues[1-votes[0]].view='arka';
-  cues.forEach(c=>{c.pairEvidence=votes.length;});
+  const marks=refs.map(ref=>neckMark(p,ref));
+  if(marks[0]!==marks[1])votes.push({front:marks.indexOf(false),cue:'ense etiketi/baskısı'});
+  if(linkedFront!=null)votes.push({front:linkedFront,cue:'bağlı desenin konumu'});
+  for(const c of cues)c.pairVotes=votes.map(v=>`${v.cue}: ${v.front+1}. ürün ön`);
+  if(!votes.length)return;
+  if(votes.some(v=>v.front!==votes[0].front)) {
+    for(const c of cues){c.view='teyit';c.viewConflict=votes.map(v=>`${v.cue} ${v.front+1}. ürünü`).join(', ')+' ön gösteriyor';}
+    return;
+  }
+  cues[votes[0].front].view='on';cues[1-votes[0].front].view='arka';
 }
 // Re-reading a page at a higher resolution keeps the garment found on the
 // scan raster: its mask is enlarged and its measurements scaled.

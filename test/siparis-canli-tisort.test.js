@@ -60,7 +60,7 @@ test('G47 a small letter-spaced word on the front of a dark pair is found as one
   assert.ok(s.aspectRatioError<=.3);
   assert.equal(r.width_mm,Math.round(s.candidateBoxPx.w*s.mmPerPx));
   // The neck shadow and the design on one garment agree on the front.
-  assert.equal(s.views[0].viewEvidence.pairVotes,2);
+  assert.deepEqual(s.views[0].viewEvidence.pairVotes,['yaka içi gölgesi: 1. ürün ön','bağlı desenin konumu: 1. ürün ön']);
 });
 
 test('G47 the same pair with the front on the right: evidence, not order, names the front', async()=> {
@@ -70,16 +70,50 @@ test('G47 the same pair with the front on the right: evidence, not order, names 
   assert.equal(r.measure_source.selectedProductIndex,1);
 });
 
-test('G47 the design on one garment alone is not evidence of the front; a contradiction stays open', async()=> {
-  // No neck shadow on either garment: only the design points at the left one.
+test('G47 the linked design position decides alone when nothing contradicts; a contradiction names its cues', async()=> {
+  // Patron, 21.11.2026: the system decides front/back itself. No neck shadow
+  // on either garment: the chest design found on the left one names it front.
   const alone=await measure(pair({shadow:null}));
-  assert.equal(alone.width_mm,null);
-  assert.match(alone.reason,/2 görünüm ayrılamadı/);
-  assert.match(alone.reason,/Desen yalnız 1\. üründe bulundu.*tek başına görünüm kanıtı sayılmadı/);
+  assert.deepEqual(alone.reasons,[],alone.reason);
+  assert.deepEqual(alone.measure_source.views.map(v=>v.view),['on','arka']);
   // The shadow names the left garment, the design sits on the right one.
   const conflict=await measure(pair({shadow:0,print:1}));
   assert.equal(conflict.width_mm,null);
-  assert.match(conflict.reason,/görünüm ayrılamadı/);
+  assert.match(conflict.reason,/2 görünüm ayrılamadı.*Kanıtlar çelişiyor: yaka içi gölgesi 1\. ürünü, bağlı desenin konumu 2\. ürünü ön gösteriyor/);
+});
+
+test('G47 a mark under the back collar and a chest-side print settle a pair of plain dark tees', async()=> {
+  // No neck shadow: the background shows inside both collars, as on many mockups.
+  const c=createCanvas(1200,650),x=c.getContext('2d');
+  x.fillStyle='#ffffff';x.fillRect(0,0,1200,650);tee(x,0);tee(x,600);
+  x.fillStyle='#f4f4f4';for(const y of [58,64,70])x.fillRect(600+291,y,18,3);
+  x.fillStyle='#f2f2f2';x.fillRect(340,215,44,10);x.fillRect(340,229,44,10);x.fillRect(340,215,8,24);
+  const r=await autoMeasure({image:{buffer:c.toBuffer('image/png'),mime:'image/png'},design:null,flat:FLAT,product:'tisort',position:'sol_gogus'});
+  const views=r.measure_source.views;
+  assert.deepEqual(views.map(v=>v.view),['on','arka'],r.reason);
+  assert.deepEqual(views[0].viewEvidence.pairVotes,['yan göğüs baskısı: 1. ürün ön','ense etiketi/baskısı: 1. ürün ön']);
+  // The same mark on the garment carrying the side print contradicts it.
+  const d=createCanvas(1200,650),y=d.getContext('2d');
+  y.fillStyle='#ffffff';y.fillRect(0,0,1200,650);tee(y,0);tee(y,600);
+  y.fillStyle='#f4f4f4';for(const yy of [58,64,70])y.fillRect(291,yy,18,3);
+  y.fillStyle='#f2f2f2';y.fillRect(340,215,44,10);y.fillRect(340,229,44,10);y.fillRect(340,215,8,24);
+  const conflict=await autoMeasure({image:{buffer:d.toBuffer('image/png'),mime:'image/png'},design:null,flat:FLAT,product:'tisort',position:'sol_gogus'});
+  assert.equal(conflict.width_mm,null);
+  assert.match(conflict.reason,/Kanıtlar çelişiyor: yan göğüs baskısı 1\. ürünü, ense etiketi\/baskısı 2\. ürünü ön gösteriyor/);
+});
+
+test('G47 a tee line on a garment whose collar rises above the shoulders asks for confirmation', async()=> {
+  const c=createCanvas(600,700),x=c.getContext('2d');
+  x.fillStyle='#ffffff';x.fillRect(0,0,600,700);
+  x.save();x.translate(0,90);tee(x,0);x.restore();
+  // A stand collar 95 px above the shoulder line (half-zip sweat).
+  x.fillStyle=CLOTH;x.fillRect(240,40,120,100);
+  lettering(x,300-TEXT_W/2,340);
+  const r=await measure(c.toBuffer('image/png'));
+  assert.equal(r.needs_confirmation,true);
+  assert.match(r.reason,/Satır ürünü tişört, görseldeki ürünün yakası omuzdan yükseliyor/);
+  // The ordinary tee of the main case has no such reason.
+  assert.doesNotMatch((await measure(pair())).reason,/yakası omuzdan/);
 });
 
 test('G47 thin lettering needs the linked design ratio; without it nothing is measured', async()=> {
