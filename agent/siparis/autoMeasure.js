@@ -319,31 +319,84 @@ function overlapFraction(a,b) {
   return area/Math.max(a.w*a.h,b.w*b.h);
 }
 
-function silhouettes(p) {
+function comparableShirts(a,b) {
+  const height=Math.max(a.bodyHeightPx,b.bodyHeightPx),hem=Math.max(a.hemWidthPx,b.hemWidthPx);
+  return Math.abs(a.hemWidthPx-b.hemWidthPx)<=hem*.12 &&
+    Math.abs(a.bodyHeightPx-b.bodyHeightPx)<=height*.12 &&
+    Math.abs(a.hemY-b.hemY)<=height*.08 && Math.abs(a.shoulderY-b.shoulderY)<=height*.08;
+}
+
+function lowerBodyGap(component,w) {
+  const {x,y,w:width,h:height}=component.box;
+  const firstY=Math.ceil(y+height*.61),lastY=Math.floor(y+height*.93);
+  const inkByX=new Uint32Array(width);
+  for(const i of component.pixels) {
+    const row=Math.floor(i/w);
+    if(row>=firstY && row<=lastY)inkByX[i%w-x]++;
+  }
+  // A real pair has a persistent background corridor through the lower body.
+  // Stay away from the side seams and require a span, rather than one blank column.
+  let start=null,best=null;
+  const first=Math.ceil(width*.35),last=Math.floor(width*.65);
+  for(let column=first;column<=last;column++) {
+    if(inkByX[column]===0 && column<last){start??=column;continue;}
+    if(start!=null && column-start>=Math.max(3,width*.018) && (!best || column-start>best.width))
+      best={boundary:x+Math.floor((start+column)/2),width:column-start};
+    start=null;
+  }
+  return best?.boundary;
+}
+
+function silhouettes(p,product) {
   const base=productMask(p),w=p.width,h=p.height;
   // A white product may contribute only a thin boundary before hole filling.
   // Judge body area in silhouette(), rather than discarding that outline here.
   const minInk=Math.max(24,Math.min(w*h*.006,Math.min(w,h)*.5));
   const collect=(raw,lowContrast=false)=>{
     const closed=closeMask(raw,w,h);
-    let pieces=components(closed,w,h,minInk).filter(c=>c.box.h>h*.12&&c.box.w>w*.06);
-    // Touching sleeves can connect two otherwise separate garments. Only split
-    // when two substantial, disconnected upper bodies provide independent seeds.
-    pieces=pieces.flatMap(c=>{
-      const top=new Uint8Array(w*h),cut=c.box.y+c.box.h*.32;
-      for(const i of c.pixels)if(Math.floor(i/w)<cut)top[i]=1;
-      const seeds=components(top,w,h,c.area*.025).filter(a=>a.box.h>c.box.h*.16&&a.box.w>c.box.w*.18).sort((a,b)=>a.box.x-b.box.x);
-      if(seeds.length!==2 || seeds[0].box.x+seeds[0].box.w>=seeds[1].box.x)return [c];
-      const boundary=Math.round((seeds[0].box.x+seeds[0].box.w+seeds[1].box.x)/2);
-      return [false,true].map(right=>({pixels:c.pixels.filter(i=>(i%w>=boundary)===right)}));
-    });
-    return pieces.map(c=>{
-      let mask=new Uint8Array(w*h);for(const i of c.pixels)mask[i]=1;
+    const pieces=components(closed,w,h,minInk).filter(c=>c.box.h>h*.12&&c.box.w>w*.06);
+    const reference=pixels=>{
+      let mask=new Uint8Array(w*h);for(const i of pixels)mask[i]=1;
       mask=fillHoles(mask,w,h);
       const ref=silhouette(p,{...base,raw,mask,lowContrast,box:bounds(mask,w,h)});
       if(ref)ref.maskMethod=lowContrast?'acik_zemin_bolge':'renk_kenar';
       return ref;
-    }).filter(Boolean);
+    };
+    const split=(c,boundary)=>[false,true].map(right=>reference(c.pixels.filter(i=>(i%w>=boundary)===right)));
+    return pieces.flatMap(c=>{
+      if(product==='tisort') {
+        if(!lowContrast && Math.min(...base.background)>235 && c.box.w>c.box.h*1.24) {
+          const boundary=lowerBodyGap(c,w);
+          if(boundary!=null) {
+            const halves=split(c,boundary);
+            if(halves.every(ref=>ref && ref.symmetry>=MIN_SYMMETRY)) {
+              for(const ref of halves) {
+                ref.neckline=roundNeckline(p,ref);
+                if(ref.neckline && ref.neckline.depth<=.18) {
+                  // Counting from the centre of a deep neckline shortens one
+                  // body's true shoulder-to-hem span, skewing the shared scale.
+                  ref.shoulderY=ref.neckline.shoulderY;
+                  ref.bodyHeightPx=ref.hemY-ref.shoulderY+1;
+                  ref.shoulderMethod='yuvarlak yakanın iki yanındaki omuz çizgisi';
+                }
+              }
+              if(comparableShirts(...halves))return halves.map(ref=>({...ref,splitMethod:'alt_govde_boslugu'}));
+            }
+            // The gap disproves one solid torso, even when the halves are
+            // too different to verify as a pair.
+            return [];
+          }
+        }
+        return [reference(c.pixels)].filter(Boolean);
+      }
+      // Retain the established independent upper-body split for other products.
+      const top=new Uint8Array(w*h),cut=c.box.y+c.box.h*.32;
+      for(const i of c.pixels)if(Math.floor(i/w)<cut)top[i]=1;
+      const seeds=components(top,w,h,c.area*.025).filter(a=>a.box.h>c.box.h*.16&&a.box.w>c.box.w*.18).sort((a,b)=>a.box.x-b.box.x);
+      if(seeds.length!==2 || seeds[0].box.x+seeds[0].box.w>=seeds[1].box.x)return [reference(c.pixels)].filter(Boolean);
+      const boundary=Math.round((seeds[0].box.x+seeds[0].box.w+seeds[1].box.x)/2);
+      return split(c,boundary).filter(Boolean);
+    });
   };
   const refs=collect(base.raw);
   // Keep established silhouettes unchanged. On a light background, a weaker
@@ -392,6 +445,45 @@ function hoodView(p,ref) {
   const cords=components(ink,w,h,4).filter(c=>c.box.y>=ref.shoulderY-ref.bodyHeightPx*.03&&c.box.y<ref.shoulderY+ref.bodyHeightPx*.25&&c.box.h>ref.bodyHeightPx*.15&&c.box.w<ref.hemWidthPx*.08&&Math.abs(c.box.x+c.box.w/2-cx)<ref.hemWidthPx*.22);
   return {hooded:raised,view:raised&&(lining.length||cords.length>=2)?'on':'teyit',lining:lining.length,cords:cords.length};
 }
+function roundNeckline(p,ref) {
+  if(ref.maskMethod!=='renk_kenar')return null;
+  const {bodyCenterX:cx,hemWidthPx:hem,bodyHeightPx:height,box}=ref,w=p.width;
+  const stableRows=Math.max(2,Math.round(height*.009)),end=box.y+height*.23;
+  const probe=offset=>{
+    const column=Math.round(cx+hem*offset),samples=[];
+    for(let dx=-1;dx<=1;dx++){
+      const x=column+dx;
+      let run=0,top=null;
+      for(let y=box.y;y<=end;y++){
+        const index=y*w+x;
+        run=ref.mask[index]&&ref.raw[index]?run+1:0;
+        if(run===stableRows){top=y-run+1;break;}
+      }
+      if(top==null)return null;
+      samples.push(top);
+    }
+    return median(samples);
+  };
+  const shoulders=[probe(-.32),probe(.32)],middle=probe(0);
+  const inner=[probe(-.13),probe(.13)],outer=[probe(-.25),probe(.25)];
+  if([...shoulders,middle,...inner,...outer].some(n=>n==null))return null;
+  const baseline=(shoulders[0]+shoulders[1])/2,depth=middle-baseline;
+  if(depth<Math.max(2,height*.018) || Math.abs(shoulders[0]-shoulders[1])>height*.018)return null;
+  if(outer.some(y=>Math.abs(y-baseline)>Math.max(2,height*.017)))return null;
+  if(Math.abs(inner[0]-inner[1])>Math.max(2,depth*.22) ||
+     inner.some(y=>y-baseline<depth*.25 || y-baseline>depth*.92+1))return null;
+  return {depth:depth/height,shoulderY:Math.round(baseline)};
+}
+
+function shirtViews(refs,cues) {
+  if(refs.length!==2 || !refs.every(ref=>ref.splitMethod) || !comparableShirts(...refs))return;
+  const depths=refs.map(ref=>ref.neckline?.depth??null);
+  for(let i=0;i<refs.length;i++)cues[i].neckDepth=depths[i];
+  const front=depths.findIndex(depth=>depth>=.085 && depth<=.18),back=1-front;
+  if(front<0 || depths[back]==null || depths[back]>.052 || depths[front]-depths[back]<.05)return;
+  cues[front].view='on';cues[back].view='arka';
+}
+
 function colorDesign(p,ref) {
   const w=p.width,h=p.height,cx=ref.bodyCenterX??(ref.box.x+ref.box.w/2),ink=contrastInk(p,ref),clean=new Uint8Array(ink.length);
   const top=ref.shoulderY+ref.bodyHeightPx*.14,bottom=ref.shoulderY+ref.bodyHeightPx*.62;
@@ -699,8 +791,9 @@ async function autoMeasure({image,design,flat,product,position}) {
     global.gc?.(); // Release full-resolution native decode surfaces before scanning masks.
     source.pageCount=pages.length;source.designPageCount=designs.length;timings.raster=performance.now()-started;
     for(let i=0;i<pages.length;i++) {
-      const refs=silhouettes(pages[i]);
-      const cues=refs.map(ref=>hoodView(pages[i],ref));
+      const refs=silhouettes(pages[i],product);
+      const cues=refs.map(ref=>ref.splitMethod?{hooded:false,view:'teyit',lining:0,cords:0}:hoodView(pages[i],ref));
+      if(product==='tisort')shirtViews(refs,cues);
       // No ordering assumption: only a visible opening/cords identifies front.
       // A second raised hood with no opening is the back of the same pair.
       if(refs.length===2&&cues.filter(c=>c.view==='on').length===1) {
@@ -708,7 +801,7 @@ async function autoMeasure({image,design,flat,product,position}) {
       }
       for(let k=0;k<refs.length;k++) {
         const ref=refs[k],cue=cues[k],scale=scaleFor(ref,measurements,scalePair,pages[i]);
-        allViews.push({page:i+1,index:k,view:cue.view,hooded:cue.hooded,viewEvidence:{lining:cue.lining,cords:cue.cords},maskMethod:ref.maskMethod,productBoxPx:ref.box,shoulderY:ref.shoulderY,hemY:ref.hemY,hemWidthPx:ref.hemWidthPx,chestLinePx:ref.chestLine??null,bodyHeightPx:ref.bodyHeightPx,...scale});
+        allViews.push({page:i+1,index:k,view:cue.view,hooded:cue.hooded,viewEvidence:{lining:cue.lining,cords:cue.cords,...(cue.neckDepth!==undefined?{neckDepth:cue.neckDepth}:{})},maskMethod:ref.maskMethod,...(ref.splitMethod?{splitMethod:ref.splitMethod}:{}),productBoxPx:ref.box,shoulderY:ref.shoulderY,hemY:ref.hemY,hemWidthPx:ref.hemWidthPx,chestLinePx:ref.chestLine??null,bodyHeightPx:ref.bodyHeightPx,...scale});
         if(cue.view!=='teyit'&&cue.view!==viewForPosition(position))continue;
         if(refs.length>1&&cue.view==='teyit'&&!designs.length)continue;
         if(designs.length)for(let j=0;j<designs.length;j++) {
@@ -739,7 +832,7 @@ async function autoMeasure({image,design,flat,product,position}) {
     }
     if(image.mime==='application/pdf' && finalists.length) {
       const numbers=[...new Set(finalists.map(c=>c.page))].sort((a,b)=>a-b),high=await rasterPages(image,640,numbers);
-      const refs=high.map(p=>silhouettes(p));
+      const refs=high.map(p=>silhouettes(p,product));
       finalists=finalists.map(candidate=>{
         const n=numbers.indexOf(candidate.page),p=high[n],sx=p.width/candidate.p.width,sy=p.height/candidate.p.height;
         const scaled=b=>({x:b.x*sx,y:b.y*sy,w:b.w*sx,h:b.h*sy}),box=scaled(candidate.ref.box);
@@ -764,7 +857,7 @@ async function autoMeasure({image,design,flat,product,position}) {
       const competing=refined.find(c=>c.page!==page||c.index!==chosen.index);
       const placementAmbiguous=match.ambiguous || !!competing&&Math.abs(match.confidence-competing.match.confidence)<.045;
       const templateSelectsProduct=designPage&&match.confidence>=MIN_MATCH_CONFIDENCE&&!placementAmbiguous;
-      if(unknownViews.some(v=>v.page===page)&&!templateSelectsProduct)reasons.push(unknownViewReason());
+      if(unknownViews.some(v=>v.page===page && (v.splitMethod || !templateSelectsProduct)))reasons.push(unknownViewReason());
       source.productSelection=templateSelectsProduct?'desen':'gorunum';
       const pageViews=allViews.filter(v=>v.page===page);
       // Independent products can be drawn at different sizes. Compare scales
