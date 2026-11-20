@@ -8,6 +8,7 @@ const orders = require('./orders');
 const flats = require('./flats');
 const { measureApplication, designBoxFromPng, imageSize } = require('./measure');
 const { viewForPosition } = require('./autoMeasure');
+const { reasonTexts } = require('./vectorReasons');
 const childProcess = require('node:child_process');
 const { buildWorkshopMessage, createWorkshopHandler } = require('./workshop');
 const { registerHandler } = require('./outbox');
@@ -24,6 +25,7 @@ const GENERATED = ['uretim_formu','onay_formu','baski_formu','nakis_formu','dese
 const WORKSHOP = ['baski_formu','nakis_formu','desen_vektor'];
 // Derived from an uploaded source right after upload; never an input of the forms and never sent to the workshop.
 const PREVIEW = 'desen_vektor_onizleme';
+const ARTWORK_EXTRACTION_REVISION = 2;
 // Product image views; a complete sleeve view can supply its own L length scale.
 const VIEWS = ['on','arka','kol'];
 const pending = new Set();
@@ -386,7 +388,7 @@ function artworkFor(db,v,line,app) {
   if(source)return {source};
   const selected=productImageFor(v,line,app),image=selected.image;
   const gap=explicit||candidates.length>1 ? 'Bu uygulama için desenDosyaId ile tek bir geçerli kaynak bağlayın.' : selected.gap;
-  const key=JSON.stringify([line.product_key,app.position,app.kind,image?.id,image?.sha256,image?.gorunum,gap]);
+  const key=JSON.stringify([ARTWORK_EXTRACTION_REVISION,line.product_key,app.position,app.kind,image?.id,image?.sha256,image?.gorunum,gap]);
   return {image,key,gap};
 }
 function formPlacement(app,source,image,design) {
@@ -1057,8 +1059,12 @@ function vectorStatus(db,versionId) {
     rows.push({extracted:true,applicationId:app.id,sourceFileId:input.image?.id??null,position:app.position,
       previewFileId:row?.preview_file_id??null,status:row?.status??(input.gap?'teyit':'hazirlaniyor'),message:row?.message??input.gap??null,
       quality:report.quality??null,reasons:report.reasons??[],...(report.placement?{placement:report.placement}:{}),
-      ...(report.sourceKind?{sourceKind:report.sourceKind}:{}),...(report.designBox?{designBox:report.designBox}:{})});
+      ...(report.sourceKind?{sourceKind:report.sourceKind}:{}),...(report.designBox?{designBox:report.designBox}:{}),
+      // Shown as the preview's origin: no separate artwork file was supplied.
+      ...(row?.preview_file_id?{sourceLabel:'Görselden ayrıldı'}:{})});
   }
+  // Stored reports keep short codes; every row also carries their Turkish text.
+  for(const row of rows)row.reasonTexts=reasonTexts(row.reasons);
   return rows.sort((a,b)=>a.sourceFileId-b.sourceFileId);
 }
 const settled=()=>Promise.all([...pending]);

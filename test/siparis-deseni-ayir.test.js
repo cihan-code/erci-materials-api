@@ -190,3 +190,55 @@ test('G40b measures the full tall back print and prepares a vector at that verif
   const pdf=await PDFDocument.load(ok(await f.request(`/dosyalar/${vector.id}`,{token:f.token})));
   assert.ok(Math.abs(pdf.getPage(0).getHeight()-app.height_mm*72/25.4)<.1);
 });
+
+async function darkCloth({mark='logo',repeat=false}={}) {
+  const bare=editPixels(mockup({missing:true}).image,png=> {
+    for(let y=0;y<png.height;y++)for(let x=0;x<png.width;x++) {
+      const i=(y*png.width+x)*4;
+      if(png.data[i]===36&&png.data[i+1]===76&&png.data[i+2]===119) {
+        const gray=Math.round(40+24*Math.sin(x/4+y/11));
+        png.data.set([gray,gray,gray+2,255],i);
+      }
+    }
+  });
+  const canvas=createCanvas(600,650),ctx=canvas.getContext('2d');
+  ctx.drawImage(await loadImage(bare),0,0);
+  ctx.fillStyle='#f6f6f6';
+  if(mark==='rectangle')ctx.fillRect(238,244,120,85);
+  else {
+    const draw=(dx,dy)=> {
+      ctx.save();ctx.translate(dx,dy);ctx.beginPath();
+      ctx.moveTo(276,230);ctx.lineTo(284,273);ctx.lineTo(316,280);ctx.lineTo(284,287);
+      ctx.lineTo(276,331);ctx.lineTo(268,287);ctx.lineTo(236,280);ctx.lineTo(268,273);
+      ctx.closePath();ctx.fill();
+      ctx.fillRect(320,268,25,5);ctx.fillRect(320,268,5,24);ctx.fillRect(320,287,25,5);
+      ctx.restore();
+    };
+    draw(0,0);
+    if(repeat)draw(0,175);
+    if(mark==='seam')ctx.fillRect(192,280,52,3);
+  }
+  return canvas.toBuffer('image/png');
+}
+
+test('G40b charcoal wrinkles stay transparent around fine white print and its lettering',async()=> {
+  const result=await extract(await darkCloth());
+  assert.ok(result.buffer,result.reason);
+  const png=PNG.sync.read(result.buffer);
+  const box=result.placement.designBoxPx;
+  assert.ok(box.h>=96);
+  assert.ok(box.w>=104);
+  const pixel=(x,y)=>[...png.data.subarray(((y-box.y)*png.width+x-box.x)*4,((y-box.y)*png.width+x-box.x)*4+4)];
+  assert.equal(pixel(301,246)[3],0);
+  assert.deepEqual(pixel(323,278),[255,255,255,255]);
+  assert.ok(pixel(276,235)[3]>100);
+  assert.ok(png.data.some((v,i)=>i%4===3&&v>0&&v<255));
+});
+
+test('G40b charcoal separation still refuses a connected seam, two prints and a flat white patch',async()=> {
+  for(const [options,reason] of [[{mark:'seam'},/dikiş/],[{repeat:true},/birden çok/],[{mark:'rectangle'},/kumaş/]]) {
+    const result=await extract(await darkCloth(options));
+    assert.equal(result.buffer,undefined,JSON.stringify(options));
+    assert.match(result.reason,reason);
+  }
+});

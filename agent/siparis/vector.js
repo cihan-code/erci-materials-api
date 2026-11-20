@@ -90,9 +90,10 @@ function alphaBounds({width,height,pixels}) {
 
 // Bound native tracing allocations. Keep physical source dimensions and require review
 // whenever resampling could hide artwork details; original uploads remain untouched.
+const RASTER_EDGE=800;
 async function boundedRaster(buffer) {
   const size=imageSize(buffer,buffer[0]===137?'image/png':'image/jpeg');
-  const scale=Math.min(1,800/Math.max(size.width,size.height));
+  const scale=Math.min(1,RASTER_EDGE/Math.max(size.width,size.height));
   if(scale===1)return {buffer,resampled:false};
   const image=await canvasLib.loadImage(buffer);
   const canvas=canvasLib.createCanvas(Math.max(1,Math.round(size.width*scale)),Math.max(1,Math.round(size.height*scale)));
@@ -673,12 +674,19 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
           if (rasterPages[i]) {
             // Rendering ONLY image-only pages preserves placement, crop, masks and composition;
             // raw PDF image extraction would lose those. No vector/text page is rasterized.
-            const result = await trace(await renderPage(await rendered.getPage(i + 1)), inputPages[i], target);
+            // Same 800 px bound as PNG/JPEG uploads: a 2x A4 photo page traced to
+            // SVG exhausts the worker's 64 MB heap. Physical size stays in points.
+            const page = await rendered.getPage(i + 1), scale = Math.min(2, RASTER_EDGE / Math.max(inputPages[i].width, inputPages[i].height));
+            if (scale < 2) reasons.push('Büyük raster bellek sınırı için küçültüldü; ince detayları özgün dosyayla teyit edin.');
+            const result = await trace(await renderPage(page, scale), inputPages[i], target, true);
+            page.cleanup();
             const traced = await PDFDocument.load(result.pdf);
             const [replacement] = await original.copyPages(traced, [0]);
             if (kind === 'raster') original.addPage(replacement);
             else { original.removePage(i); original.insertPage(i, replacement); }
-            const source={width:result.image.width*0.75,height:result.image.height*0.75};
+            // Content size in points: pixels at the render scale, not a fixed 96 dpi.
+            const source={width:result.image.width/scale,height:result.image.height/scale};
+            global.gc?.(); // Release this page's raster and SVG before the next page.
             if (target) aspectRatioError=Math.max(aspectRatioError,Math.abs((target.width/target.height)/(source.width/source.height)-1));
             rasterDetails.push(rasterMinDetail(result.image,(target || source).width/PT_PER_MM));
           } else if (target) aspectRatioError=Math.max(aspectRatioError,
