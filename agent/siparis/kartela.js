@@ -64,11 +64,19 @@ function keyParts(fabricKey) {
   const s = String(fabricKey ?? ''), i = s.indexOf('|');
   return i < 0 ? null : { type: s.slice(0, i), color: s.slice(i + 1) };
 }
+// Stored colour numbers may come from a spreadsheet as "12.0"; only a whole number reads, anything else is null.
+function cardNo(value) {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0 ? value : null;
+  const m = /^\s*(\d+)(?:\.0)?\s*$/.exec(String(value ?? ''));
+  const n = m ? Number(m[1]) : null;
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
 // Bound only when the stored number names the very colour the item key carries.
 function itemKartela(item) {
   const parts = keyParts(item?.fabric_key), card = parts && cardFor(parts.type);
-  if (!card || item.color_no == null) return null;
-  const r = card.renkler.find(c => String(c.no) === String(item.color_no).trim());
+  const no = cardNo(item?.color_no);
+  if (!card || no == null) return null;
+  const r = card.renkler.find(c => c.no === no);
   return r && r.renkKey === parts.color ? { id: card.id, ad: card.ad, no: r.no } : null;
 }
 function withKartela(item) {
@@ -109,8 +117,14 @@ function kartelaPlan(db, k = KARTELA) {
     if (candidates.length > 1) return skip(`birden çok aday: ${candidates.map(r => `${r.no} ${r.renk}`).join(', ')}`);
     const [r] = candidates;
     if (r.teyit) return skip(`kartela ${r.no} numaralı rengin adı teyit bekliyor`);
-    if (text(item.color_no) && item.color_no.trim() !== String(r.no))
-      return skip(`kayıtlı renk no (${item.color_no}) kartela numarasından (${r.no}) farklı`);
+    if (item.color_no != null && String(item.color_no).trim() !== '') {
+      const stored = cardNo(item.color_no), shown = String(item.color_no).trim();
+      if (stored == null) return skip(`kayıtlı no ${shown} tam sayı değil; '${r.renk}' kartelada ${r.no}`);
+      if (stored !== r.no) {
+        const there = card.renkler.find(c => c.no === stored);
+        return skip(`kayıtlı no ${shown} kartelada ${there ? `'${there.renk}'` : 'yok'}; '${r.renk}' kartelada ${r.no}`);
+      }
+    }
     const target = { name: standardName(parts.type, r, k), color_name: r.renk, color_no: String(r.no), color_hex: r.hex };
     const changes = Object.keys(target).filter(f => item[f] !== target[f])
       .map(f => ({ field: f, from: item[f] ?? null, to: target[f] }));
@@ -135,4 +149,4 @@ function applyKartela(db, { dry = false, kartela = KARTELA } = {}) {
   return { rows, changed: count('degisir'), unchanged: count('uygun'), unmatched: count('eslesmedi') };
 }
 
-module.exports = { loadKartela, kartelaView, fabricName, itemKartela, withKartela, resolveKartelaItem, kartelaPlan, applyKartela };
+module.exports = { cardNo, loadKartela, kartelaView, fabricName, itemKartela, withKartela, resolveKartelaItem, kartelaPlan, applyKartela };
