@@ -89,3 +89,10 @@ npm run siparis:ornek-pdf
 **Açıklama biçimi:** `description` maddeleri kırmızı kare imle basılır. Madde içinde `*…*` ile sarılan kısım kırmızı basılır (`Kapüşon *astarı ve kordon* olacak`); eşi olmayan yıldız olduğu gibi kalır. Ürün Formu'nda dolu özellik hücresine "+" ve altına küçük cm ölçüsü yazılır. Renk adı `(Kartela N)` ile biter; belge servisi bunu kumaş kaleminin `color_no` alanından üretir (`colorLabel`).
 
 Görsel referanslar yalnız geçici klasörde görüntülenmiştir; repoya kopyalanmamıştır. Üretim Formu ve Onay Formu, Canva şablon görsellerinden ölçülen konum, renk ve yuvarlatılmış bant biçimine göre çizilir; atölye formları aynı başlık ve madde diline çekilmiştir. Üretim Formu'nda yalnız ön ya da arka görsel varsa ortada tek büyük görsel, ikisi de varsa yan yana basılır. Beden tablosu yalnız beden dağılımı varsa çizilir. Bilinen farklar: Montserrat yazı metrikleri, uydurma ürün/desen/logolar, eklenen cm ölçüleri ve alt bilgi; üretim beden tablosundaki elle kesim takibi yerine siparişin gerçek adetleri gösterilir. Yatay nakış görsel referansları, istenen iki sayfalı atölye formu için baskı formuyla aynı dikey düzene uyarlanmıştır.
+
+## Bekleyen ölçü, adetsiz önizleme, çocuk bedenleri (G41c)
+
+- `applications[].pending: true` olan uygulama üretim ve onay formunda "Ölçü teyit bekliyor" yazar; atölye formuna alınmaz, forma "Eksik:" satırı eklenir. Tümü bekliyorsa o tür için form çıkmaz (`null`).
+- `omitQuantities: true` beden ve adet tablolarını boş çizer (üretim, onay, baskı/nakış). Sunucuda `POST /api/siparis/surumler/:id/onizleme?adetsiz=1` hiçbir şey kaydetmeden üç formu base64 döndürür.
+- `7-8 yaş` gibi anahtarlar kendi sütununu alır; `line.note` (kumaş/kalıp açıklaması) üretim ve atölye formuna yazılır.
+- Ayrı desen ya da ayrılmış desen yoksa baskı formu, ölçü kutusunu ürün görselinden kırpıp basar.

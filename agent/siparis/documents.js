@@ -346,8 +346,21 @@ function assertMeasurements(db, v) {
       fail(`Uygulama ${a.id}: ölçü teyidi gerekli`,409);
   }
 }
+// Applications whose measurement is not usable yet: an open confirmation (on the application, its line or the version),
+// no valid millimetres, or a flagged measurement nobody resolved. Forms still print them, marked as pending.
+function pendingApplications(db,v) {
+  const open=openMeasurements(db,v.id),pending=new Map();
+  for (const line of v.lines) for (const a of line.applications) {
+    const own=open.find(c=>(c.ref_table==='applications'&&c.ref_id===a.id)||(c.ref_table==='order_lines'&&c.ref_id===line.id)||c.ref_table==='order_versions');
+    if (own) pending.set(a.id,own.message);
+    else if (![a.width_mm,a.height_mm].every(n=>Number.isSafeInteger(n) && n>0)) pending.set(a.id,'Geçerli ölçü yok');
+    else if (a.needs_confirmation && !db.prepare("SELECT id FROM confirmations WHERE kind='olcu' AND ref_table='applications' AND ref_id=? AND status='cozuldu'").get(a.id)) pending.set(a.id,'Ölçü teyidi gerekli');
+  }
+  return pending;
+}
 function inputFingerprint(db,v) {
-  return JSON.stringify({order:db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id),
+  const pending=[...pendingApplications(db,v).keys()];
+  return JSON.stringify({...(pending.length?{pending}:{}),order:db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id),
     lines:v.lines.map(({recipe_version,...line})=>line),files:v.files.filter(f=>!GENERATED.includes(f.kind) && f.kind!==PREVIEW),
     sources:db.prepare(`SELECT s.application_id,s.file_id FROM document_application_sources s
       JOIN applications a ON a.id=s.application_id JOIN order_lines l ON l.id=a.line_id
@@ -473,14 +486,16 @@ function assertExtractedMeasurement(app,image,placement) {
   fail(`Uygulama ${app.id}: Ayrıştırılan desen otomatik ölçü kutusuyla eşleşmedi. Önizlemeyi kontrol edip fiziksel ölçüyü girin.`,409);
 }
 
-function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map()) {
-  assertMeasurements(db,v);
+// allowPending prints unmeasured applications as "Ölçü teyit bekliyor"; omitQuantities leaves every quantity field empty.
+function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPending=false,omitQuantities=false}={}) {
+  if (!allowPending) assertMeasurements(db,v);
+  const pending=allowPending ? pendingApplications(db,v) : new Map();
   const order=db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id);
   const preview = file => file && /\.(png|jpe?g)$/i.test(file.path) ? readFile(dataDir,file) : undefined;
   const applications=[];
   return {
     orderNo:order.order_no,name:order.customer_name || 'Müşteri belirtilmedi',version:v.version_no,
-    date:documentDate(),deliveryDate:'Teslim tarihi belirtilmedi',description:[],
+    date:documentDate(),deliveryDate:'Teslim tarihi belirtilmedi',description:[],...(omitQuantities?{omitQuantities:true}:{}),
     lines:v.lines.map(l=> {
       const images={},lineId=String(l.id);
       // Match automatic measurement's use of the latest immutable upload for each view.
@@ -490,6 +505,10 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map()) {
         if (mime) images[key]={fileId:file.id,view,mime,buffer:readFile(dataDir,file)};
       }
       for (const app of l.applications) {
+        if (pending.has(app.id)) {
+          applications.push({type:app.kind,position:app.position,width_mm:0,height_mm:0,lineIds:[lineId],pending:true,reason:pending.get(app.id)});
+          continue;
+        }
         const design=sourceByApp.get(app.id);
         const source=provenance(app);
         const image=Object.values(images).find(image=>image.fileId===source.gorselFileId);
@@ -497,9 +516,9 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map()) {
           preview:preview(design)||extractedByApp.get(app.id),placement:formPlacement(app,source,image,design)});
       }
       const sizes=JSON.parse(l.sizes_json);
-      if (Object.keys(sizes).length && Object.values(sizes).reduce((a,b)=>a+b,0)!==l.quantity) fail(`Satır ${l.id}: PDF için adetlere eşit beden dağılımı gerekli`,409);
+      if (!omitQuantities && Object.keys(sizes).length && Object.values(sizes).reduce((a,b)=>a+b,0)!==l.quantity) fail(`Satır ${l.id}: PDF için adetlere eşit beden dağılımı gerekli`,409);
       const item=l.fabric_item_id ? db.prepare('SELECT name,color_name,color_no FROM stock_items WHERE id=?').get(l.fabric_item_id) : null;
-      return {id:lineId,product:l.product_key,color:l.color_name ? require('./pdf').stockColorLabel(l.color_name,item) : 'Renk belirtilmedi',fabric:item ? item.name : 'Kumaş belirtilmedi',sizes,quantity:l.quantity,images};
+      return {id:lineId,product:l.product_key,color:l.color_name ? require('./pdf').stockColorLabel(l.color_name,item) : 'Renk belirtilmedi',fabric:item ? item.name : 'Kumaş belirtilmedi',sizes,quantity:l.quantity,images,...(l.note?{note:l.note}:{})};
     }),
     applications,
   };
@@ -687,6 +706,12 @@ async function editLine(db,dataDir,lineId,input,user) {
     const line=db.prepare('SELECT * FROM order_lines WHERE id=?').get(lineId);
     if(!line)fail('Satır bulunamadı',404);
     draft(db,line.version_id);unlocked(db,line.version_id);
+    if(input.note!==undefined) {
+      if(input.note!==null && (typeof input.note!=='string' || input.note.length>500))fail('Kumaş/kalıp açıklaması en çok 500 karakterlik metin olmalı');
+      db.prepare('UPDATE order_lines SET note=? WHERE id=?').run(input.note?.trim()||null,lineId);
+      audit(db,user.id,'satir_aciklama',lineId);
+    }
+    if(input.kalipId===undefined && input.note!==undefined)return line;
     if(typeof input.kalipId!=='string' || !flats.selection(db,line).candidates.some(f=>f.id===input.kalipId))
       fail('Kalıp bu ürünün adaylarından biri olmalı');
     db.prepare('UPDATE order_lines SET kalip_id=? WHERE id=?').run(input.kalipId,lineId);
@@ -700,6 +725,7 @@ async function editLine(db,dataDir,lineId,input,user) {
     return line;
   });
   let olcuHatasi;
+  if(input.kalipId===undefined)return {...orders.snapshot(db,line.version_id).lines.find(l=>l.id===lineId)};
   try {await automaticMeasure(db,dataDir,line.version_id,user,false,true,lineId);}
   catch(e) {olcuHatasi=`Otomatik ölçü şimdi çalışmadı (${e.message}); kalıp seçimi kaydedildi`;}
   return {...orders.snapshot(db,line.version_id).lines.find(l=>l.id===lineId),...(olcuHatasi?{olcuHatasi}:{})};
@@ -789,7 +815,6 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
   const token=crypto.randomUUID();
   const start=tx(db,()=> {
     const v=draft(db,versionId);
-    try {assertMeasurements(db,v);} catch(error) {return {v,measurementError:error};}
     const state=db.prepare('SELECT * FROM document_preparations WHERE version_id=?').get(versionId);
     if (state?.token && Date.now()-state.started_at<PREPARE_LOCK_MS) fail('Sürüm zaten hazırlanıyor',409);
     if (state?.ready && !regenerate) { assertFresh(db,v); return {existing:v.files}; }
@@ -797,11 +822,9 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
       ON CONFLICT(version_id) DO UPDATE SET token=excluded.token,started_at=excluded.started_at`).run(versionId,token,Date.now());
     return {v,fingerprint:stableSnapshot(v),sourceFingerprint:inputFingerprint(db,v)};
   });
-  if(start.measurementError) {
-    ensureExtractedRecords(db,dataDir,start.v,user);
-    throw start.measurementError;
-  }
   if (start.existing) return start.existing;
+  // Unmeasured applications no longer stop the forms; their desen previews are prepared in the background.
+  if (pendingApplications(db,start.v).size) ensureExtractedRecords(db,dataDir,start.v,user);
   const written=[];
   try {
     const {v}=start;
@@ -810,7 +833,9 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
       const applications=v.lines.flatMap(line=>line.applications.map(app=>({line,app})));
       for (const source of v.files.filter(f=>SOURCE_KINDS.includes(f.kind)))
         if (!applications.length) fail(`Desen ${source.id}: ölçülü uygulama bağlantısı gerekli`,409);
+      const unmeasured=pendingApplications(db,v);
       for (const {line,app:a} of applications) {
+        if (unmeasured.has(a.id)) continue;
         const targetMm={w:a.width_mm,h:a.height_mm},input=artworkFor(db,v,line,a);
         let original,prev;
         if(input.source) {
@@ -839,12 +864,12 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
           reasons:[...new Set([...(prev.report.reasons||[]),...(result.report.aspectRatioError>0.01 ? ['oran_bozuldu'] : [])])]} : result.report;
         generated.push({kind:'desen_vektor',buffer:result.pdf,meta:{applicationId:a.id,...(!input.source?{lineId:line.id}:{})},report});
       }
-      const model=formOrder(db,dataDir,v,sourceByApp,extractedByApp);
+      const model=formOrder(db,dataDir,v,sourceByApp,extractedByApp,{allowPending:true});
       generated.push(...await generateInChild({type:'forms',model},signal));
       return generated;
     });
     return tx(db,()=> {
-      const current=draft(db,versionId); assertMeasurements(db,current);
+      const current=draft(db,versionId);
       if (stableSnapshot(current)!==start.fingerprint || inputFingerprint(db,current)!==start.sourceFingerprint || db.prepare('SELECT token FROM document_preparations WHERE version_id=?').get(versionId)?.token!==token)
         fail('Sürüm hazırlama sırasında değişti; yeniden deneyin',409);
       for (const g of generated) {
@@ -876,6 +901,28 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
     throw e;
   }
   finally { db.prepare('UPDATE document_preparations SET token=NULL WHERE version_id=? AND token=?').run(versionId,token); }
+}
+// Persists nothing: forms for a version as they would print now, optionally without sizes and quantities.
+// Vectors are not traced; the print form uses the linked design, a cached extraction or a crop of the product image.
+async function previewForms(db,dataDir,versionId,user,{omitQuantities=false}={}) {
+  assertUser(db,user.id);
+  const v=orders.snapshot(db,integer(versionId,'versionId',1));
+  const sourceByApp=new Map(),extractedByApp=new Map(),pending=pendingApplications(db,v);
+  for (const line of v.lines) for (const app of line.applications) {
+    if (pending.has(app.id)) continue;
+    const input=artworkFor(db,v,line,app);
+    if (input.source) sourceByApp.set(app.id,input.source);
+    else if (!input.gap) {
+      const row=extractedRecord(db,app.id,input,true);
+      if (row?.artwork) extractedByApp.set(app.id,row.artwork);
+    }
+  }
+  const model=formOrder(db,dataDir,v,sourceByApp,extractedByApp,{allowPending:true,omitQuantities});
+  const forms=await renderQueue(signal=>generateInChild({type:'forms',model},signal));
+  const missing=[];
+  for (const line of v.lines) for (const app of line.applications) if (pending.has(app.id))
+    missing.push({applicationId:app.id,lineId:line.id,kind:app.kind,position:app.position,reason:pending.get(app.id)});
+  return {forms,missing};
 }
 function readyPreview(db,dataDir,v,source) {
   if (!source || !SOURCE_KINDS.includes(source.kind)) return null;
@@ -1044,7 +1091,7 @@ function registerWorkshop(boundDb,dataDir) {
     return {providerRef:result.providerRef};
   });
 }
-module.exports={editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+module.exports={editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,previewForms,pendingApplications,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
 function vectorModule() {
   // Native tracer/canvas binaries come from npm; a platform without them must say so, not fail anonymously.
   try { return require('./vector'); }

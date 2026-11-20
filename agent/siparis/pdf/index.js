@@ -14,6 +14,8 @@ const POSITION_ALIASES = { sol_gogus: 'gogus', sag_gogus: 'gogus', sol_kol: 'kol
 const POSITION_LABELS = { ...POSITIONS, ...LEG_POSITION, kapusan: POSITIONS.kapuson, sol_gogus: 'Sol göğüs', sag_gogus: 'Sağ göğüs', sol_kol: 'Sol kol', sag_kol: 'Sağ kol', sol_bacak: 'Sol bacak', sag_bacak: 'Sağ bacak' };
 const SIDED = ['sol_gogus', 'sag_gogus', 'sol_kol', 'sag_kol', 'sol_bacak', 'sag_bacak'];
 const TYPES = { baski: 'Baskı', nakis: 'Nakış' };
+const CHILD_SIZE = /^(\d{1,2})(?:\s*-\s*(\d{1,2}))?\s*ya[sş]$/i;
+const PENDING_LABEL = 'Ölçü teyit bekliyor';
 const FONT = path.join(__dirname, 'fonts');
 const TERMS_TITLE = 'SİPARİŞ ONAY FORMU – ŞARTLAR VE KOŞULLAR';
 const RED = '#ff3333';
@@ -40,12 +42,12 @@ function normalize(order) {
     if (ids.has(line.id)) throw new TypeError('Satır kimlikleri benzersiz olmalıdır.');
     ids.add(line.id);
     for (const field of ['product', 'color', 'fabric']) requiredText(line[field], `line.${field}`);
-    if (omitQuantities) return { ...line, sizes: {}, quantity: 0, distributed: false, images: line.images || {} };
+    if (omitQuantities) return { ...line, sizes: {}, quantity: 0, distributed: false, blank: true, images: line.images || {} };
     if (line.sizes != null && (typeof line.sizes !== 'object' || Array.isArray(line.sizes))) throw new TypeError('line.sizes nesne olmalıdır.');
     const sizes = Object.fromEntries(SIZES.map(size => [size, 0]));
     for (const [size, qty] of Object.entries(line.sizes || {})) {
       if (!size.trim() || !Number.isSafeInteger(qty) || qty < 0) throw new RangeError(`Geçersiz beden/adet: ${size}`);
-      const column = SIZES.includes(size) ? size : 'Diğer';
+      const column = sizeColumn(size);
       sizes[column] = (sizes[column] || 0) + qty;
     }
     const distributed = Object.keys(line.sizes || {}).length > 0;
@@ -57,7 +59,8 @@ function normalize(order) {
   if (!Array.isArray(order.applications)) throw new TypeError('applications dizi olmalıdır.');
   for (const app of order.applications) {
     if (!Object.hasOwn(TYPES, app.type) || !Object.hasOwn(POSITION_LABELS, app.position)) throw new TypeError('Geçersiz uygulama türü veya konumu.');
-    for (const field of ['width_mm', 'height_mm']) {
+    // A pending measurement is printed as such; its numbers are never drawn or measured.
+    for (const field of app.pending ? [] : ['width_mm', 'height_mm']) {
       if (!Number.isSafeInteger(app[field]) || app[field] < 0) throw new RangeError(`${field} negatif olmayan tam sayı olmalıdır; eksik ölçüyü önce teyit edin.`);
     }
     if (app.lineIds !== undefined && (!Array.isArray(app.lineIds) || !app.lineIds.length || app.lineIds.some(id => !ids.has(id)))) {
@@ -65,7 +68,15 @@ function normalize(order) {
     }
   }
   total(lines); // Reject unsafe totals before creating any document.
-  return { ...order, lines, omitQuantities };
+  // Copies, so previews cropped while rendering never leak into the caller's model.
+  return { ...order, lines, applications: order.applications.map(app => ({ ...app })), omitQuantities };
+}
+
+// Standard sizes keep their column, child age ranges get their own, anything else is summed under "Diğer".
+function sizeColumn(size) {
+  if (SIZES.includes(size)) return size;
+  const child = CHILD_SIZE.exec(size.trim());
+  return child ? `${child[1]}${child[2] ? `-${child[2]}` : ''} YAŞ` : 'Diğer';
 }
 
 function total(lines, size) {
@@ -81,7 +92,7 @@ function appsFor(order, lines, type) {
 
 // Every form uses this formatter and the stored millimetres, never image geometry.
 function cm(mm) { return String(mm / 10).replace('.', ','); }
-function dimensions(app) { return `${cm(app.width_mm)} × ${cm(app.height_mm)} cm`; }
+function dimensions(app) { return app.pending ? PENDING_LABEL : `${cm(app.width_mm)} × ${cm(app.height_mm)} cm`; }
 
 function text(doc, value, x, y, width, size = 18, bold = false, extra = {}) {
   doc.font(bold ? 'Bold' : 'Regular').fontSize(size).fillColor(extra.color || '#111111');
@@ -121,8 +132,32 @@ function logo(doc, brand, x, y, w, h) {
   image(doc, brand.logo || defaultLogo, x, y, w, h);
 }
 
+// Without a separate or extracted design, the print form shows the measured box cut from the product image.
+async function cropPreviews(order) {
+  for (const app of order.applications) {
+    if (app.preview || app.pending || !app.placement || app.lineIds?.length !== 1) continue;
+    const line = order.lines.find(l => l.id === app.lineIds[0]);
+    const source = ['front', 'back'].map(key => line?.images[key]).find(image => image?.placements?.includes(app));
+    if (!source) continue;
+    try {
+      const canvasLib = require('@napi-rs/canvas');
+      const img = await canvasLib.loadImage(source.buffer);
+      const { box, rasterWidth, rasterHeight } = app.placement;
+      const sx = img.width / rasterWidth, sy = img.height / rasterHeight;
+      const w = Math.max(1, Math.round(box.w * sx)), h = Math.max(1, Math.round(box.h * sy));
+      const canvas = canvasLib.createCanvas(w, h);
+      canvas.getContext('2d').drawImage(img, box.x * sx, box.y * sy, box.w * sx, box.h * sy, 0, 0, w, h);
+      app.preview = canvas.toBuffer('image/png');
+      app.previewCropped = true;
+    } catch {
+      // A failed crop leaves the "preview not provided" note; dimensions stay readable.
+    }
+  }
+}
+
 async function build(order, options, draw) {
   await resolveProductImages(order);
+  await cropPreviews(order);
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ autoFirstPage: false, margin: 0, bufferPages: true,
       info: { Title: `${order.orderNo} · ${order.name}`, Author: 'Sipariş Formları' } });
@@ -375,14 +410,23 @@ function applicationTable(doc, apps, y) {
   return y + 31;
 }
 
-function sizeColumns(lines) { return lines.some(l=>l.distributed) ? [...SIZES,...(lines.some(l=>Object.hasOwn(l.sizes,'Diğer')) ? ['Diğer'] : [])] : []; }
-function sizeSummary(lines) { return sizeColumns(lines).map(s=>`${s}:${total(lines,s)}`).join('  '); }
+const isBlank = lines => lines.some(l => l.blank);
+function sizeColumns(lines) {
+  if (!lines.some(l => l.distributed || l.blank)) return [];
+  const child = [...new Set(lines.flatMap(l => Object.keys(l.sizes)).filter(k => !SIZES.includes(k) && k !== 'Diğer' && total(lines, k) > 0))]
+    .sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+  // Age-range orders drop the adult columns nobody ordered.
+  const standard = child.length ? SIZES.filter(s => total(lines, s) > 0) : SIZES;
+  return [...standard, ...child, ...(lines.some(l => Object.hasOwn(l.sizes, 'Diğer')) ? ['Diğer'] : [])];
+}
+function sizeSummary(lines) { return sizeColumns(lines).map(s => `${s}:${isBlank(lines) ? '' : total(lines, s)}`).join('  '); }
 
 function sizeTable(doc, lines, y, orderTotal) {
   const columns = sizeColumns(lines);
   const tableHeight = columns.length ? 34 + 3 * 37 : 0;
   if (y + tableHeight + 60 > 1330) { page(doc); y = 65; }
-  const summary = `Toplam adet: ${total(lines)} · Sipariş toplamı: ${orderTotal}`;
+  const blank = isBlank(lines);
+  const summary = blank ? 'Toplam adet:                    Sipariş toplamı:' : `Toplam adet: ${total(lines)} · Sipariş toplamı: ${orderTotal}`;
   if (!columns.length) {
     text(doc, summary, 82, y, 646, 18, true);
     return;
@@ -390,7 +434,7 @@ function sizeTable(doc, lines, y, orderTotal) {
   const x = 86, labelWidth = 202, cellWidth = Math.min(50, 400 / columns.length);
   const rows = [
     ['Bedenler', columns.map(c => c), 34],
-    ['Kesilmesi Gerekenler', columns.map(c => String(total(lines, c))), 37],
+    ['Kesilmesi Gerekenler', columns.map(c => blank ? '' : String(total(lines, c))), 37],
     ['Kesilen Adet', columns.map(() => ''), 37],
     ['', columns.map(() => ''), 37],
   ];
@@ -401,11 +445,11 @@ function sizeTable(doc, lines, y, orderTotal) {
     values.forEach((value, c) => {
       const cx = x + labelWidth + c * cellWidth;
       box(doc, cx, cy, cellWidth, h, r === 0 ? '#d3dff2' : '#ffffff');
-      if (value) cellText(doc, value, cx, cy, cellWidth, h, columns.length > 8 ? 11 : 13, false);
+      if (value) cellText(doc, value, cx, cy, cellWidth, h, value.length > 4 ? 8 : columns.length > 8 ? 11 : 13, false);
     });
     cy += h;
   });
-  text(doc, `toplam adet: ${total(lines)}`, x + labelWidth + columns.length * cellWidth + 8, y + 52, 80, 9, true);
+  if (!blank) text(doc, `toplam adet: ${total(lines)}`, x + labelWidth + columns.length * cellWidth + 8, y + 52, 80, 9, true);
   text(doc, summary, x, cy + 14, 646, 14, true);
 }
 
@@ -424,10 +468,10 @@ async function renderProductionForm(input, options = {}) {
       fittedText(doc, order.deliveryDate, 363, y + 9, 257, 28, 17, true, { align: 'center', color: RED });
       y += 62;
       text(doc, 'Ürün Açıklaması:', 54, y, 700, 24, true);
-      y = bulletList(doc, [`${line.product} · ${line.color} · ${line.fabric}`, ...order.description], y + 34);
+      y = bulletList(doc, [`${line.product} · ${line.color} · ${line.fabric}`, ...(line.note ? [line.note] : []), ...order.description], y + 34);
       const appsList = appsFor(order, [line]);
       const tableHeight = 36 * 3 + 40 * appsList.length;
-      const fixed = 30 + 13 + Math.min(tableHeight, 200) + 31 + (line.distributed ? 150 + 40 : 40);
+      const fixed = 30 + 13 + Math.min(tableHeight, 200) + 31 + (line.distributed || line.blank ? 150 + 40 : 40);
       y = Math.max(y + 12, 497);
       let imageHeight = Math.min(411, 1345 - y - fixed);
       if (imageHeight < 220) { page(doc); y = 60; imageHeight = 411; }
@@ -436,7 +480,7 @@ async function renderProductionForm(input, options = {}) {
       if (both) productPair(doc, line, appsList, y + 34, { x: 82, width: 648, height: imageHeight - 30, labelSize: 14 });
       else productImage(doc, line.images.front ?? line.images.back, appsList, 182, y + 34, 452, imageHeight);
       y = applicationTable(doc, appsList, y + 34 + imageHeight + 13) ;
-      if (!order.omitQuantities) sizeTable(doc, [line], y, total(order.lines));
+      sizeTable(doc, [line], y, total(order.lines));
     }
   });
 }
@@ -497,7 +541,7 @@ async function renderApprovalForm(input, options = {}) {
         band(doc, 'Ürün Rengi', color, -30, 126, 570, '#8f8f99', 206);
         band(doc, 'Sipariş Kodu', order.orderNo, 750, 81, 720, '#454655', 941);
         band(doc, 'Tarih', order.date, 750, 126, 720, '#8f8f99', 941);
-        if (!order.omitQuantities) wholeBand(doc, `Bedenler ve Adetler : ${sizeSummary(lines)}   Toplam:${total(lines)}`, 171, '#454655');
+        wholeBand(doc, `Bedenler ve Adetler : ${sizeSummary(lines)}   Toplam:${order.omitQuantities ? '' : total(lines)}`, 171, '#454655');
         const apps = appsFor(order, batch);
         batch.forEach((line, i) => {
           const y = 250 + i * 270;
@@ -528,15 +572,21 @@ function colorLabel(name, colorNo) {
 
 function renderWorkshop(input, options, type) {
   const order = normalize(input);
-  const apps = appsFor(order, order.lines, type);
+  const wanted = appsFor(order, order.lines, type);
+  // Applications still awaiting a measurement are not workshop work; the form lists them as missing.
+  const apps = wanted.filter(app => !app.pending);
   if (apps.length === 0) return null;
+  const missing = wanted.filter(app => app.pending).map(app =>
+    `*Eksik:* ${POSITION_LABELS[app.position]} ${TYPES[type].toLocaleLowerCase('tr-TR')} uygulaması için ölçü teyidi bekleniyor; forma alınmadı.`);
   return build(order, options, (doc, brand) => {
     const lines = order.lines.filter(line => apps.some(app => !app.lineIds || app.lineIds.includes(line.id)));
     page(doc);
     title(doc, `${TYPES[type]} Formu`, `Ürün: ${[...new Set(lines.map(line => line.product))].join(', ')}`);
     text(doc, 'Ürün Açıklaması:', 54, 270, 700, 24, true);
-    const quantities = order.omitQuantities ? [] : [`Toplam adet: ${total(lines)}`, ...(sizeColumns(lines).length ? [`Bedenler ve Adetler: ${sizeSummary(lines)}`] : [])];
-    let visualY = bulletList(doc, [...quantities, ...order.description], 304) + 15;
+    const blank = order.omitQuantities;
+    const quantities = [`Toplam adet:${blank ? '' : ` ${total(lines)}`}`, ...(sizeColumns(lines).length ? [`Bedenler ve Adetler: ${sizeSummary(lines)}`] : [])];
+    const notes = lines.filter(line => line.note).map(line => `${line.product}: ${line.note}`);
+    let visualY = bulletList(doc, [...quantities, ...notes, ...order.description, ...missing], 304) + 15;
     if (visualY + 400 > 1210) { page(doc); visualY = 60; }
     text(doc, 'Ürün Görseli:', 28, visualY, 720, 24, true);
     visualY += 50;
@@ -546,7 +596,7 @@ function renderWorkshop(input, options, type) {
       for (let r = 0; r < count; r++, i++) {
         const line = lines[i];
         const y = visualY + r * rowHeight;
-        const label = `${line.product} · ${line.color} · ${line.fabric}${order.omitQuantities ? '' : ` · Adet: ${total([line])}`}`;
+        const label = `${line.product} · ${line.color} · ${line.fabric}${order.omitQuantities ? ' · Adet:' : ` · Adet: ${total([line])}`}`;
         const labelHeight = fittedText(doc, label, 45, y, 720, 60, 18, true, { align: 'center' });
         const imageHeight = Math.max(100, Math.min(350, rowHeight - labelHeight - 65));
         productPair(doc, line, apps, y + labelHeight + 15, { height: imageHeight });
@@ -563,6 +613,7 @@ function renderWorkshop(input, options, type) {
       if (app.lineIds) text(doc, lines.filter(line => app.lineIds.includes(line.id)).map(line => `${line.product} / ${line.color}`).join(', '), 45, y + 42, 720, 16, false, { align: 'center' });
       image(doc, app.preview, 175, y + 85, 460, 230, 'Desen önizlemesi sağlanmadı');
       text(doc, dimensions(app), 45, y + 335, 720, 26, true, { align: 'center' });
+      if (app.previewCropped) text(doc, 'Ürün görselinden kırpıldı', 175, y + 318, 460, 11, false, { align: 'center', color: '#666666' });
       y += 420;
     }
   });
