@@ -43,11 +43,14 @@ test('G39d missing or conflicting chest never falls back to hem or a single scal
   }
   const m=mock();delete m.flat.olculerL.omuzdan_boy;assert.equal((await autoMeasure(m)).width_mm,null);
 });
-test('G39d the unchanged 15 percent scale guard brackets chest/height disagreement',async()=>{
+test('G39d/G44 chest/height disagreement: mean, mockup geometric mean, then confirmation',async()=>{
   const valid=mock();valid.flat.olculerL.gogus=55.2;
   const accepted=await autoMeasure(valid);assert.ok(accepted.measure_source.scaleDifference<.15);assert.equal(accepted.needs_confirmation,false,JSON.stringify(accepted));
   valid.flat.olculerL.gogus=56.64;
-  const rejected=await autoMeasure(valid);assert.ok(rejected.measure_source.scaleDifference>.15);assert.equal(rejected.width_mm,null);assert.match(rejected.reason,/Boy\/göğüs ölçek farkı/);
+  const mockup=await autoMeasure(valid);assert.ok(mockup.measure_source.scaleDifference>.15);assert.equal(mockup.needs_confirmation,false,JSON.stringify(mockup));
+  assert.equal(mockup.measure_source.scaleMode,'geo_ortalama');assert.match(mockup.measure_source.scaleNote,/boy ile göğüs ortalaması/);
+  valid.flat.olculerL.gogus=72;
+  const rejected=await autoMeasure(valid);assert.ok(rejected.measure_source.scaleDifference>.35);assert.equal(rejected.width_mm,null);assert.match(rejected.reason,/Boy\/göğüs ölçek farkı/);
 });
 test('G39d raster loss on a unique small sleeve print can pass without loosening large-print matching',async()=>{
   const r=await autoMeasure(mock({sleeve:true,small:true,damage:40}));assert.equal(r.needs_confirmation,false,JSON.stringify(r));near(r.width_mm,40);near(r.height_mm,60);

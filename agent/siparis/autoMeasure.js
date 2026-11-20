@@ -655,13 +655,27 @@ function thinDesignEdge(refs,edge,contents,topEdge) {
   if(!Number.isFinite(chest)||chest>=needed)return null;
   return Math.min(topEdge,Math.ceil(edge*needed/chest));
 }
+// Two L axes within 15% agree: arithmetic mean. Up to 35% the mockup is drawn
+// off the pattern's proportions (Patron/Şef kararı, 20.11.2026): the geometric
+// mean keeps the artwork ratio and splits the error. Beyond 35% the mask or
+// shoulder is more likely wrong, so there is no scale.
+const SCALE_AGREE = .15, SCALE_MOCKUP = .35;
+function pairScale(vertical,horizontal) {
+  if(!vertical||!horizontal)return {difference:null,mean:null,mode:null};
+  const difference=Math.abs(vertical-horizontal)/((vertical+horizontal)/2);
+  if(difference<=SCALE_AGREE)return {difference,mean:(vertical+horizontal)/2,mode:'ortalama'};
+  // A boundary value computed in floating point stays inside the band.
+  if(difference<=SCALE_MOCKUP+1e-12)return {difference,mean:Math.sqrt(vertical*horizontal),mode:'geo_ortalama'};
+  return {difference,mean:null,mode:null};
+}
+const mockupNote=(difference,label)=>`Mockup oranı kalıptan farklı (%${percent(difference)}); ölçek ${label} ortalaması.`;
 function scaleFor(ref,measurements,scalePair='boy_etek',p=null) {
   if(scalePair==='boy_gogus'&&p&&ref.chestLine===undefined)ref.chestLine=chestLine(p,ref);
   const chest=scalePair==='boy_gogus',horizontalCm=chest?measurements.gogus:measurements.etek,horizontalPx=chest?ref.chestLine?.width:ref.hemWidthPx;
   const vertical=Number.isFinite(measurements.omuzdan_boy)&&measurements.omuzdan_boy>0?measurements.omuzdan_boy*10/ref.bodyHeightPx:null;
   const horizontal=Number.isFinite(horizontalCm)&&horizontalCm>0&&horizontalPx>0?horizontalCm*10/horizontalPx:null;
-  const difference=vertical&&horizontal?Math.abs(vertical-horizontal)/((vertical+horizontal)/2):null;
-  return {vertical,horizontal,difference,mean:vertical&&horizontal?(difference<=.15?(vertical+horizontal)/2:null):chest?null:vertical||horizontal};
+  const pair=pairScale(vertical,horizontal);
+  return {vertical,horizontal,difference:pair.difference,mode:pair.mode,mean:vertical&&horizontal?pair.mean:chest?null:vertical||horizontal};
 }
 
 // Sleeve geometry and matching are independent of the established torso path.
@@ -876,7 +890,8 @@ async function autoMeasureSleeve({image,design,flat,product,position}) {
         source.hemWidthPx=ref.hemWidthPx;source.bodyHeightPx=ref.bodyHeightPx;
         Object.assign(source,{chestPx:ref.chestLine?.width??null,chestLinePx:ref.chestLine??null,shoulderY:ref.shoulderY,hemY:ref.hemY});
         if(scalePair==='boy_gogus'&&(!scale.vertical||!scale.horizontal))reasons.push('Kol için boy ve göğüs birlikte doğrulanamadı; göğüs çizgisi ve iki L ölçüsü gerekli.');
-        if(scale.difference>.15)reasons.push(`Kol için gövde ${pairLabel} ölçek farkı %${percent(scale.difference)}; %15 sınırını aşıyor.`);
+        if(!scale.mean&&scale.difference>SCALE_MOCKUP)reasons.push(`Kol için gövde ${pairLabel} ölçek farkı %${percent(scale.difference)}; %35 sınırını aşıyor, maske veya omuz hatası olabilir.`);
+        else if(scale.mode==='geo_ortalama')Object.assign(source,{scaleMode:'geo_ortalama',verticalMmPerPx:scale.vertical,horizontalMmPerPx:scale.horizontal,scaleNote:mockupNote(scale.difference,pairLabel==='boy/göğüs'?'boy ile göğüs':'boy ile etek')});
         if(ref.symmetry<MIN_SYMMETRY)reasons.push(`Kol için kullanılan gövde simetrisi %${percent(ref.symmetry)}; %85 sınırının altında.`);
       } else if(Number.isFinite(measurements.kol_boyu)&&measurements.kol_boyu>0) {
         source.scaleFrom='kol_boyu';source.mmPerPx=measurements.kol_boyu*10/sleeve.lengthPx;
@@ -966,10 +981,13 @@ async function autoMeasureLeg({image,design,flat,product,position}) {
       if(wanted&&!['on','arka'].includes(image.gorunum)){sideOk=false;reasons.push('Sol/sağ bacak yönü görselden kesin doğrulanamadı; ön veya arka görünüm gerekli.');}
       else if(wanted&&found!==wanted){sideOk=false;reasons.push(`Desen ${found==='sol'?'sol':'sağ'} bacakta bulundu; uygulama ${wanted==='sol'?'sol':'sağ'} bacak olarak kayıtlı. Konum teyit edilmeli.`);}
       if(positive(measurements.yan_boy)&&positive(measurements.basen)) {
-        const vertical=measurements.yan_boy*10/ref.heightPx,horizontal=measurements.basen*10/ref.hipPx,difference=Math.abs(vertical-horizontal)/((vertical+horizontal)/2);
+        const vertical=measurements.yan_boy*10/ref.heightPx,horizontal=measurements.basen*10/ref.hipPx,{difference,mean,mode}=pairScale(vertical,horizontal);
         Object.assign(source,{verticalMmPerPx:vertical,horizontalMmPerPx:horizontal,scaleDifference:difference});
-        if(difference>.15){source.scaleMethod='çelişen L ölçekleri; ölçü yok';reasons.push(`Yan boy/basen ölçek farkı %${percent(difference)}; %15 sınırını aşıyor (${vertical.toFixed(3)} ve ${horizontal.toFixed(3)} mm/px).`);}
-        else {source.scaleMethod='yan_boy ve basen ortalaması';source.mmPerPx=(vertical+horizontal)/2;source.scale=source.mmPerPx/10;}
+        if(!mean){source.scaleMethod='çelişen L ölçekleri; ölçü yok';reasons.push(`Yan boy/basen ölçek farkı %${percent(difference)}; %35 sınırını aşıyor, maske veya bel/paça hatası olabilir (${vertical.toFixed(3)} ve ${horizontal.toFixed(3)} mm/px).`);}
+        else {
+          source.scaleMethod=mode==='geo_ortalama'?'yan_boy ve basen geometrik ortalaması':'yan_boy ve basen ortalaması';source.mmPerPx=mean;source.scale=mean/10;
+          if(mode==='geo_ortalama')Object.assign(source,{scaleMode:mode,scaleNote:mockupNote(difference,'yan boy ile basen')});
+        }
       }
       if(!ambiguous&&sideOk&&match.confidence>=MIN_MATCH_CONFIDENCE&&source.mmPerPx) {
         source.designBoxPx=box;
@@ -1095,7 +1113,7 @@ async function autoMeasure({image,design,flat,product,position}) {
       // only for the identified front/back pair, as in the two-view workflow.
       const paired=pageViews.length===2&&pageViews.some(v=>v.view==='on')&&pageViews.some(v=>v.view==='arka');
       const samePage=paired?pageViews.filter(v=>v.mean):[];
-      for(const v of paired?pageViews.filter(v=>v.difference>.15&&v.index!==chosen.index):[])reasons.push(`${v.view==='arka'?'Arka':'Diğer'} görünümün ${pairLabel} ölçek farkı %${percent(v.difference)}; %15 sınırını aşıyor (${v.vertical.toFixed(3)} ve ${v.horizontal.toFixed(3)} mm/px).`);
+      for(const v of paired?pageViews.filter(v=>v.difference>SCALE_MOCKUP+1e-12&&v.index!==chosen.index):[])reasons.push(`${v.view==='arka'?'Arka':'Diğer'} görünümün ${pairLabel} ölçek farkı %${percent(v.difference)}; %35 sınırını aşıyor (${v.vertical.toFixed(3)} ve ${v.horizontal.toFixed(3)} mm/px).`);
       if(samePage.length>1) {
         source.viewScaleDifference=(Math.max(...samePage.map(v=>v.mean))-Math.min(...samePage.map(v=>v.mean)))/(samePage.reduce((s,v)=>s+v.mean,0)/samePage.length);
         if(source.viewScaleDifference>.05)reasons.push(`Ön/arka ortalama ölçek farkı %${percent(source.viewScaleDifference)}; %5 sınırını aşıyor (${samePage.map(v=>v.mean.toFixed(3)).join(' ve ')} mm/px).`);
@@ -1123,13 +1141,15 @@ async function autoMeasure({image,design,flat,product,position}) {
       if(placementAmbiguous)reasons.push(`Desen/ürün eşleşme güveni düşük: birden fazla aday var (en iyi güven %${percent(match.confidence)}${competing?`, diğer ürün güveni %${percent(competing.match.confidence)}`:''}); tek yerleşim teyit edilmeli.`);
       if((scalePair==='boy_gogus'||ref.maskMethod==='acik_zemin_bolge'||ref.box.w*ref.box.h<chosen.p.width*chosen.p.height*.10)&&(!vertical||!horizontal))reasons.push(`Ürün için boy ve ${horizontalLabel} ölçekleri birlikte doğrulanamadı; gövde çizgisi ve iki L ölçüsüyle teyit edilmeli.`);
       source.verticalMmPerPx=vertical;source.horizontalMmPerPx=horizontal;
-      source.scaleDifference=vertical&&horizontal?Math.abs(vertical-horizontal)/((vertical+horizontal)/2):null;
-      if(vertical&&horizontal&&source.scaleDifference>.15)reasons.push(`${scalePair==='boy_gogus'?'Boy/göğüs':'Boy/etek'} ölçek farkı %${percent(source.scaleDifference)}; %15 sınırını aşıyor (${vertical.toFixed(3)} ve ${horizontal.toFixed(3)} mm/px).`);
+      const pair=pairScale(vertical,horizontal);
+      source.scaleDifference=pair.difference;
+      if(vertical&&horizontal&&!pair.mean)reasons.push(`${scalePair==='boy_gogus'?'Boy/göğüs':'Boy/etek'} ölçek farkı %${percent(source.scaleDifference)}; %35 sınırını aşıyor, maske veya omuz hatası olabilir (${vertical.toFixed(3)} ve ${horizontal.toFixed(3)} mm/px).`);
+      if(pair.mode==='geo_ortalama'){source.scaleMode='geo_ortalama';source.scaleNote=mockupNote(pair.difference,scalePair==='boy_gogus'?'boy ile göğüs':'boy ile etek');}
       if((vertical&&!horizontal)||(!vertical&&horizontal))source.scaleNote='Tek L ölçeği bulundu (1 eksen); ikinci eksen ölçüsü yok.';
-      source.scaleMethod=vertical&&horizontal?`omuzdan_boy ve ${horizontalLabel} ortalaması`:vertical?'yalnız omuzdan_boy':horizontal?`yalnız ${horizontalLabel}`:null;
-      source.mmPerPx=vertical&&horizontal?(source.scaleDifference<=.15?(vertical+horizontal)/2:null):scalePair==='boy_gogus'?null:vertical||horizontal;
+      source.scaleMethod=vertical&&horizontal?`omuzdan_boy ve ${horizontalLabel} ${pair.mode==='geo_ortalama'?'geometrik ':''}ortalaması`:vertical?'yalnız omuzdan_boy':horizontal?`yalnız ${horizontalLabel}`:null;
+      source.mmPerPx=vertical&&horizontal?pair.mean:scalePair==='boy_gogus'?null:vertical||horizontal;
       if(scalePair==='boy_gogus'&&(!vertical||!horizontal))source.scaleMethod='eksik boy/göğüs ölçek çifti; ölçü yok';
-      if(vertical&&horizontal&&source.scaleDifference>.15)source.scaleMethod='çelişen L ölçekleri; ölçü yok';
+      if(vertical&&horizontal&&!pair.mean)source.scaleMethod='çelişen L ölçekleri; ölçü yok';
       source.scale=source.mmPerPx?source.mmPerPx/10:null;
       if(source.aspectRatioError>.01)source.aspectRatioNote=`Desen en-boy oranı farkı %${percent(source.aspectRatioError)}.`;
       if(match.confidence<MIN_MATCH_CONFIDENCE)reasons.push(`Desen eşleştirme güveni %${percent(match.confidence)}; %${percent(MIN_MATCH_CONFIDENCE)} sınırının altında.`);

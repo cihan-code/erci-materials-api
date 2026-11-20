@@ -107,7 +107,8 @@ test('G24 manual correction made while worker runs cannot be overwritten, even w
 test('G24 print size has no preset cap; non-L references and divergent scales require confirmation',async()=>{
   const large=await auto.autoMeasure(input(mockup({width:220})));assert.ok(large.width_mm>350,JSON.stringify(large));assert.doesNotMatch(large.reason,/olağandışı/);
   const other=await auto.autoMeasure(input(mockup(),{flat:{...flat,refBeden:'M'}}));assert.match(other.reason,/L beden değil/);assert.equal(other.width_mm,null);
-  const check=await auto.autoMeasure(input(mockup(),{flat:{...flat,olculerL:{omuzdan_boy:80,etek:60}}}));assert.match(check.reason,/%15/);assert.equal(check.width_mm,null);assert.equal(check.measure_source.mmPerPx,null);
+  // G44: beyond 35% the axes disagree too much for a mockup; no scale.
+  const check=await auto.autoMeasure(input(mockup(),{flat:{...flat,olculerL:{omuzdan_boy:70,etek:60}}}));assert.match(check.reason,/%35/);assert.equal(check.width_mm,null);assert.equal(check.measure_source.mmPerPx,null);
   const single=await auto.autoMeasure(input(mockup(),{flat:{...flat,olculerL:{etek:60}}}));assert.match(single.measure_source.scaleNote,/Tek L ölçeği/);assert.equal(single.needs_confirmation,false);assert.ok(single.width_mm>0);
 });
 test('G24 white garments on transparent backgrounds use alpha as the product mask',async()=>{
@@ -303,11 +304,13 @@ test('G24d asymmetric product masks identify their measured symmetry and thresho
   assert.ok(r.measure_source.symmetry<.85&&r.measure_source.symmetry>=.75,JSON.stringify(r));
   assert.equal(r.needs_confirmation,true);assert.match(r.reason,/sol-sağ simetrisi %[0-9,]+; %85,0 sınırının altında/);
 });
-test('G24d axis scale threshold accepts the boundary and rejects a value above it',async()=>{
+test('G24d axis scale thresholds: mean to 15%, mockup geometric mean to 35%, none above',async()=>{
   const m=mockup(),baseline=await auto.autoMeasure(input(m)),s=baseline.measure_source;
-  for(const difference of [.149999,.15,.15001]) {
+  for(const difference of [.149999,.15,.15001,.35,.35001]) {
     const vertical=2*(2+difference)/(2-difference),r=await auto.autoMeasure(input(m,{flat:{...flat,olculerL:{omuzdan_boy:vertical*s.bodyHeightPx/10,etek:2*s.hemWidthPx/10}}}));
-    if(difference<=.15){assert.equal(r.needs_confirmation,false,JSON.stringify(r));assert.ok(r.width_mm>0);}
-    else {assert.equal(r.needs_confirmation,true);assert.equal(r.width_mm,null);assert.match(r.reason,/Boy\/etek ölçek farkı %15,001; %15 sınırını aşıyor/);}
+    const v=r.measure_source.verticalMmPerPx,h=r.measure_source.horizontalMmPerPx;
+    if(difference<=.15){assert.equal(r.needs_confirmation,false,JSON.stringify(r));assert.ok(r.width_mm>0);assert.equal(r.measure_source.scaleMode,undefined);assert.equal(r.measure_source.mmPerPx,(v+h)/2);}
+    else if(difference<=.35){assert.equal(r.needs_confirmation,false,JSON.stringify(r));assert.equal(r.measure_source.scaleMode,'geo_ortalama');assert.ok(Math.abs(r.measure_source.mmPerPx-Math.sqrt(v*h))<1e-9);assert.match(r.measure_source.scaleNote,/Mockup oranı kalıptan farklı \(%[0-9,]+\); ölçek boy ile etek ortalaması/);}
+    else {assert.equal(r.needs_confirmation,true);assert.equal(r.width_mm,null);assert.match(r.reason,/Boy\/etek ölçek farkı %35,001; %35 sınırını aşıyor/);}
   }
 });
