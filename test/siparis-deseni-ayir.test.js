@@ -102,7 +102,9 @@ test('G40b vector preview is available before physical measurement; prepare rema
   const image=await uploadProduct(f,id,lineId,mockup().image);
   const app=ok(await f.post(`/satirlar/${lineId}/uygulamalar`,{kind:'nakis',position:'gogus'}),201);
   assert.equal(app.width_mm,null);
-  assert.equal((await f.post(`/surumler/${id}/hazirla`)).status,409);
+  // G41c: the unmeasured application no longer stops the forms; they print it as pending.
+  const pendingForms=ok(await f.post(`/surumler/${id}/hazirla`));
+  assert.ok(pendingForms.some(g=>g.kind==='onay_formu'));assert.ok(!pendingForms.some(g=>g.kind==='nakis_formu'));
   await documents.settled();
   const [preview]=await vectorStatus(f,id);
   assert.equal(preview.extracted,true);
@@ -114,7 +116,7 @@ test('G40b vector preview is available before physical measurement; prepare rema
   assert.equal(preview.targetMm,undefined);
   ok(await f.request(`/uygulamalar/${app.id}`,{method:'PATCH',token:f.token,body:{width_mm:120,height_mm:68}}));
   ok(await f.post(`/teyitler/${openMeasure(f,app.id).id}/coz`));
-  const results=await Promise.all([f.post(`/surumler/${id}/hazirla`),f.post(`/surumler/${id}/hazirla`)]);
+  const results=await Promise.all([f.post(`/surumler/${id}/hazirla?yeniden=1`),f.post(`/surumler/${id}/hazirla?yeniden=1`)]);
   assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);
   const files=results.find(r=>r.status===200).data;
   assert.equal(files.filter(g=>g.kind==='nakis_formu').length,1);

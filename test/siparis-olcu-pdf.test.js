@@ -235,7 +235,9 @@ test('adetsiz model üç formda dağılımı gizler ve kesin PDF sayfasına iki 
 
   for (const render of [renderProductionForm, renderApprovalForm, renderPrintForm]) {
     const result = await extract(await render({ ...order, omitQuantities: true }));
-    assert.doesNotMatch(result.pages[0], /(?:(?:Sipariş |[Tt]oplam )?[Aa]det:|Bedenler|Kesilmesi Gerekenler|Toplam:)/);
+    // Tables are drawn, every quantity field stays empty.
+    assert.doesNotMatch(result.text, /\b\d+[ \t]*adet|[Tt]oplam adet:[ \t]*\d|Toplam:[ \t]*\d/);
+    if (render !== renderPrintForm) assert.match(result.text, /Bedenler/);
     assert.deepEqual(result.pages[0].split('\n').filter(text => /^(28|12) cm$/.test(text)), ['28 cm', '12 cm']);
     assert.match(result.text, /28 × 12 cm/);
   }

@@ -52,6 +52,11 @@ module.exports = function documentRouter({db,dataDir}) {
   router.patch('/satirlar/:id',wrap(async(req,res)=>res.json(await documents.editLine(db,dataDir,id(req),req.body,req.user))));
   router.patch('/uygulamalar/:id',wrap(async(req,res)=>res.json(await documents.editApplication(db,dataDir,id(req),req.body,req.user))));
   router.delete('/uygulamalar/:id',wrap((req,res)=>res.json(documents.deleteApplication(db,id(req),req.user))));
+  // Nothing is saved: base64 PDFs of the three forms as they would print now. adetsiz=1 leaves quantities empty.
+  router.post('/surumler/:id/onizleme',wrap(async(req,res)=> {
+    const {forms,missing}=await documents.previewForms(db,dataDir,id(req),req.user,{omitQuantities:req.query.adetsiz==='1'});
+    res.json({adetsiz:req.query.adetsiz==='1',eksik:missing,formlar:forms.map(f=>({kind:f.kind,pdf:Buffer.from(f.buffer).toString('base64')}))});
+  }));
   router.post('/surumler/:id/hazirla',wrap(async(req,res)=>res.json(await documents.prepare(db,dataDir,id(req),req.user,req.query.yeniden==='1'))));
   // degisen=1 measures only applications whose inputs changed or that were never measured.
   router.post('/surumler/:id/otomatik-olc',wrap(async(req,res)=>res.json(await documents.automaticMeasure(db,dataDir,id(req),req.user,req.query.yeniden==='1',req.query.degisen==='1'))));

@@ -108,7 +108,9 @@ test('HTTP measurement 280/56/140 gives 280 mm; PNG bounds and photo confirmatio
   assert.equal(photo.needsConfirmation,true);assert.match(photo.reason,/Fotoğraf/);
   const confirmations=ok(await f.request('/teyitler',{token:f.token}));
   assert.ok(confirmations.some(c=>c.id===photo.confirmationId && c.kind==='olcu' && c.ref_id===photo.application.id));
-  const blocked=await f.post(`/surumler/${o.version.id}/hazirla`);
+  // Open measurements no longer stop the forms; they only block sending for approval.
+  ok(await f.post(`/surumler/${o.version.id}/hazirla`));
+  const blocked=await f.post(`/surumler/${o.version.id}/gonder`);
   assert.equal(blocked.status,409);assert.match(blocked.data.error,/ölçü teyidi/);
 });
 
@@ -132,13 +134,18 @@ test('HTTP prepare generates four forms and one vector per application, is idemp
   assert.ok(ok(await f.request('/teyitler',{token:f.token})).some(c=>c.kind==='vektor_kalite'));
 });
 
-test('HTTP open measurement blocks prepare; resolving advisory values enables it',async t=> {
+test('HTTP open measurement still prepares forms (marked pending) but blocks sending; resolving it refreshes them',async t=> {
   const f=await fixture(t), o=await f.order();const file=ok(await f.upload(o.version.id),201);
   const measurement=ok(await f.measure(o.version.lines[0].id,{desenDosyaId:file.id,imageKind:'photo'}),201);
-  assert.equal((await f.post(`/surumler/${o.version.id}/hazirla`)).status,409);
+  const first=ok(await f.post(`/surumler/${o.version.id}/hazirla`));
+  assert.ok(first.some(f=>f.kind==='uretim_formu'));assert.ok(first.some(f=>f.kind==='onay_formu'));
+  assert.ok(!first.some(f=>f.kind==='baski_formu'||f.kind==='desen_vektor'));
+  assert.equal((await f.post(`/surumler/${o.version.id}/gonder`)).status,409);
   ok(await f.post(`/teyitler/${measurement.confirmationId}/coz`));
-  const files=ok(await f.post(`/surumler/${o.version.id}/hazirla`));
-  assert.ok(files.some(f=>f.kind==='onay_formu'));assert.ok(!files.some(f=>f.kind==='nakis_formu'));
+  // The pending marker is part of the input fingerprint, so the stale forms must be regenerated.
+  assert.equal((await f.post(`/surumler/${o.version.id}/hazirla`)).status,409);
+  const files=ok(await f.post(`/surumler/${o.version.id}/hazirla?yeniden=1`));
+  assert.ok(files.some(f=>f.kind==='onay_formu'));assert.ok(files.some(f=>f.kind==='baski_formu'));assert.ok(!files.some(f=>f.kind==='nakis_formu'));
 });
 
 test('HTTP submit requires approval form; unapproved package is blocked',async t=> {
