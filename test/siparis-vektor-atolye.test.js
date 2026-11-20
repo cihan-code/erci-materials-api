@@ -341,9 +341,30 @@ test('G40 beyaz vektör mürekkebi hedef ölçüyü doldurur, boş sayfa içerik
   const result=await render(source,true),[w,h]=await artworkMm(result.pdf,true);
   assert.ok(Math.abs(w-310)<1 && Math.abs(h-450)<1,`${w} × ${h}`);
   assert.equal(result.report.pages[0].imageCount,0);
-  const flood=await PDFDocument.create();
-  flood.addPage([400,400]).drawRectangle({x:0,y:0,width:400,height:400,color:rgb(1,1,1)});
-  await assert.rejects(render(flood,true),/PDF desen içerik kutusu boş/);
+  for(const [width,height,gray] of [[400,400,1],[400.2,399.8,.99]]) {
+    const flood=await PDFDocument.create();
+    flood.addPage([width,height]).drawRectangle({x:0,y:0,width,height,color:rgb(gray,gray,gray)});
+    await assert.rejects(render(flood,true),/PDF desen içerik kutusu boş/);
+  }
+});
+test('G40 karma vektör PDF koyu merkezi ve iki dış beyaz işareti birlikte ölçer',async()=> {
+  const source=await PDFDocument.create(),page=source.addPage([400,400]);
+  page.drawRectangle({x:170,y:150,width:60,height:100,color:rgb(.08,.15,.22)});
+  for(const x of [70,300])page.drawRectangle({x,y:155,width:30,height:85,color:rgb(1,1,1)});
+  const out=await vectorize({buffer:Buffer.from(await source.save()),mime:'application/pdf',manualVector:true,targetMm:{w:260,h:100}});
+  assert.equal(out.report.pages[0].imageCount,0);
+  const [whiteWidth,whiteHeight]=await artworkMm(out.pdf,true),[darkWidth,darkHeight]=await artworkMm(out.pdf);
+  for(const [actual,expected] of [[whiteWidth,260],[whiteHeight,85],[darkWidth,60],[darkHeight,100]]) {
+    assert.ok(Math.abs(actual-expected)<1,`${actual} mm; ${expected} mm bekleniyor`);
+  }
+  const {rasterPages}=require('../agent/siparis/autoMeasure');
+  const [proof]=await rasterPages({buffer:out.pdf,mime:'application/pdf'},1000,[1],{transparent:true});
+  const pixel=(x,y)=>{
+    const i=4*(Math.floor(y*proof.height)*proof.width+Math.floor(x*proof.width));
+    return Array.from(proof.data.subarray(i,i+4));
+  };
+  const [left,center,right]=[.04,.5,.96].map(x=>pixel(x,.5));
+  for(const edge of [left,right])assert.ok(edge[3]>240 && edge[0]-center[0]>180,JSON.stringify({left,center,right}));
 });
 test('G14-13 test mode cannot dispatch outside NODE_ENV=test and cloud without durable storage logs fallback',async()=> {
   for (const NODE_ENV of [undefined,'production','development']) {
