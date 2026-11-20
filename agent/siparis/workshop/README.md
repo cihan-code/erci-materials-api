@@ -12,7 +12,13 @@ const { pdf, kind, report } = await vectorize({ buffer, mime,
 // applicationType: 'baski' (varsayılan) veya 'nakis'; targetMm isteğe bağlı.
 ```
 
-PNG/JPEG: yerel `@neplex/vectorizer` (Rust vtracer) → SVG → `svg-to-pdfkit`/PDFKit yolları.
+PNG/JPEG: bir ya da iki mürekkepli düz desen (logo, yazı, amblem) `agent/siparis/flatTrace.js` ile izlenir:
+her renk yumuşak kapsama maskesi olur, kenar yumuşatma pikselleri karıştığı iki renge bölünür, maske
+3–4 kat büyütülüp ~0,5 kaynak pikseli yumuşatılır, kenar rampalarında Otsu eşiği (0,4–0,6 arası) alınır
+ve `potrace` (saf JS, GPL-2.0) ile Bézier yollara çevrilir. Büyütme 6 MP'yi aşmayacak katta seçilir
+(`POTRACE_MAX_PIXELS`). Çok renkli, degrade ya da fotoğrafik desen yerel `@neplex/vectorizer`
+(Rust vtracer) ile kalır. Seçilen yol `report.vectorizer` ve `rasterQuality.vectorizer` alanına,
+düz olmama nedeni `rasterQuality.flatClass` alanına yazılır. `SIPARIS_VECTOR_TRACER=vtracer` eski yolu zorlar.
 Mevcut içerik kırpması korunur: alfa sıfır ve beyaz kenarlar dışarıda, JPEG için açık kenar toleransı vardır.
 Yalnız tamamen beyaz, şeffaf zeminli PNG'de içerik bulunamazsa alfa kutusu kullanılır.
 Hedef, kırpılmış içeriğin iki boyutuna uygulanır; en ve boy bağımsız ölçeklenir. Oran farkı %1'i aşarsa teyit istenir.
@@ -38,6 +44,13 @@ PNG/JPEG artık her durumda teyit istemez. `report.rasterQuality` içindeki öl�
 | Ortalama RGB piksel farkı | ≤0.03 | `MAX_PIXEL_DIFFERENCE` |
 | Alfa kenarındaki yarı saydam piksel oranı | ≤0.02 | `MAX_SEMI_TRANSPARENT_RATIO` |
 | SVG yol / düğüm sayısı | ≤500 / ≤10000 | `MAX_PATHS`, `MAX_NODES` |
+| Düz desen: renk başına IoU (0,5 kaynak pikseli tolerans) | ≥0.98 | `MIN_FLAT_IOU` |
+| Düz desen: en büyük kenar sapması | ≤1 kaynak pikseli | `MAX_EDGE_DEVIATION_PX` |
+| Düz desen: kesişim/köşe çentiği (≥0,5 px derin, ≤4 px boyunda kusur) | 0 | — |
+| Düz desen mürekkep sayısı (kağıt hariç) | ≤2 | `FLAT_MAX_COLORS` |
+
+Düz desen ölçüsü hangi izleyici çalışırsa çalışsın yapılır: vektör, kaynağın 2–4 katı ızgarada yeniden
+çizilir ve kaynağın çift doğrusal renk sınırlarıyla karşılaştırılır (`rasterQuality.flatQuality`).
 
 RGB histogramı Lab uzayına dönüştürülür; en sık, komşularıyla tutarlı iç renkler kümeleri başlatır.
 Merkezden DeltaE 10'u aşan ton ayrı küme olur. Alfa ve komşularıyla sert geçiş yapan antialias
@@ -97,7 +110,7 @@ fark teyit nedenidir. Eşikler değiştirilmedi. Özel ölçüm/önizleme raporu
 
 PDF kuralları korunur: `pdf-lib` vektör içeriğini, fontlarını ve form nesnelerini tutar; hedef yoksa saf vektör
 PDF aynen döner. Hedefte içerik ve ek açıklamalar mevcut kırpma/dönüş kurallarıyla ölçeklenir.
-PDF.js Form XObject içeriklerini açar; yalnız görüntü içeren sayfalar 144 dpi çizilir ve yerel vtracer'a girer.
+PDF.js Form XObject içeriklerini açar; yalnız görüntü içeren sayfalar 144 dpi çizilir ve yerel izleyiciye (düz desende potrace, diğerlerinde vtracer) girer.
 Böylece sayfa crop, transform, alfa maskesi ve birden fazla görüntünün yerleşimi korunur.
 Vektör/metin sayfa rasterleştirilmez; karma sayfadaki raster korunur ve teyit ister. Tam raster PDF yeni belgeye
 alınır, kaynak `/Image` nesneleri çıktıya taşınmaz; karma çok sayfalı belgede orijinal form korunur.

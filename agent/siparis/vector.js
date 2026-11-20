@@ -10,6 +10,7 @@ const tracer = require('@neplex/vectorizer');
 const canvasLib = require('@napi-rs/canvas');
 const { PNG } = require('pngjs');
 const { imageSize, pixelBounds } = require('./measure');
+const { flatPalette, traceFlat, flatQuality, lab, delta } = require('./flatTrace');
 const PT_PER_MM = 72 / 25.4;
 let pdfjsPromise;
 
@@ -141,11 +142,24 @@ async function rasterInput(buffer, source, assessRaster = false) {
     : {width:image.width*0.75,height:image.height*0.75};
   return {buffer,image,dimensions};
 }
+// SIPARIS_VECTOR_TRACER=vtracer forces the previous tracer (comparisons, rollback).
+const tracerChoice = () => (process.env.SIPARIS_VECTOR_TRACER || '').trim().toLowerCase() === 'vtracer' ? 'vtracer' : 'auto';
 async function trace(buffer, source, target, assessRaster = false) {
   const decoded=await rasterInput(buffer,source,assessRaster);
   const {image,dimensions}=decoded;buffer=decoded.buffer;
+  let tracing={vectorizer:'vtracer'};
   if (assessRaster) {
     const colors=perceptualPalette(image.pixels,image.width,image.height,image.transparent);
+    // One or two flat inks (logo, lettering, emblem): potrace on smoothed per-colour masks.
+    const limits=qualityLimits(), classified=flatPalette(image,colors,{maxInks:limits.flatMaxColors,deltaE:limits.colorDeltaE});
+    if (classified.flat && tracerChoice()!=='vtracer') {
+      try {
+        const flat=traceFlat(classified.flat,{maxPixels:limits.potraceMaxPixels});
+        global.gc?.();
+        return { pdf: await svgPdf(flat.svg, dimensions, target), image, svg: flat.svg, dimensions: target || dimensions,
+          tracing: {vectorizer:'potrace',upscale:flat.upscale,thresholds:flat.thresholds,layers:flat.colors} };
+      } catch (error) { tracing.fallback=error.message; }
+    }
     if (colors.colorCount>0 && colors.colorCount<=qualityLimits().maxColors) {
       const normalized=PNG.sync.read(buffer), remap=new Map();
       colors.clusters.forEach((cluster,index)=> {
@@ -169,7 +183,7 @@ async function trace(buffer, source, target, assessRaster = false) {
     pathPrecision: 5, cornerThreshold: 60, lengthThreshold: 3.5,
     spliceThreshold: 45, layerDifference: 16, maxIterations: 10,
   });
-  return { pdf: await svgPdf(svg, dimensions, target), image, svg, dimensions: target || dimensions };
+  return { pdf: await svgPdf(svg, dimensions, target), image, svg, dimensions: target || dimensions, tracing };
 }
 
 // Operator lists expand Form XObjects, so paths inside forms are counted as well.
@@ -253,7 +267,10 @@ function qualityLimits(applicationType) {
     minShapeMm2: embroidery ? value('NAKIS_MIN_SHAPE_MM2', 1.44) : value('BASKI_MIN_SHAPE_MM2', 0.64),
     minIou: value('MIN_IOU', 0.97, 1), maxPixelDifference: value('MAX_PIXEL_DIFFERENCE', 0.03, 1),
     maxSemiTransparentRatio: value('MAX_SEMI_TRANSPARENT_RATIO', 0.02, 1),
-    maxPaths: value('MAX_PATHS', 500), maxNodes: value('MAX_NODES', 10000) };
+    maxPaths: value('MAX_PATHS', 500), maxNodes: value('MAX_NODES', 10000),
+    // Flat artwork (one or two inks): re-rasterized vector against the source colour edges.
+    flatMaxColors: value('FLAT_MAX_COLORS', 2, 6), minFlatIou: value('MIN_FLAT_IOU', 0.98, 1),
+    maxEdgeDeviationPx: value('MAX_EDGE_DEVIATION_PX', 1, 100), potraceMaxPixels: value('POTRACE_MAX_PIXELS', 6e6, 4e7) };
 }
 
 // Exact squared Euclidean distance transform with physical, anisotropic pixel spacing.
@@ -402,15 +419,6 @@ function components(mask, width, height, excludeBorder = false, noiseArea = 0) {
   return { mask: interior, minArea: Number.isFinite(minArea) ? minArea : null, gurultuSayisi };
 }
 
-// CIE76 Delta E in D65 Lab: alpha and antialias boundary mixtures are not inks.
-function lab(rgb) {
-  const [r,g,b] = rgb.map(v => {v/=255;return v>.04045 ? ((v+.055)/1.055)**2.4 : v/12.92;});
-  const f = v => v>.008856 ? Math.cbrt(v) : 7.787*v+16/116;
-  const x=f((.4124564*r+.3575761*g+.1804375*b)/.95047),
-    y=f(.2126729*r+.7151522*g+.072175*b),z=f((.0193339*r+.119192*g+.9503041*b)/1.08883);
-  return [116*y-16,500*(x-y),200*(y-z)];
-}
-const delta = (a,b) => Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2]);
 function perceptualPalette(data,width,height,transparent,limits=qualityLimits()) {
   const histogram=new Map(), keys=new Int32Array(width*height);keys.fill(-1);
   let visible=0;
@@ -457,7 +465,19 @@ function opening(mask,width,height) {
   return out;
 }
 
-async function rasterQuality(image, pdf, svg, dimensions, applicationType, target, priorMetrics) {
+// PDF page stretched to width x height pixels (same fit as the IoU render below).
+async function renderPixels(pdf, width, height, transparent) {
+  const canvas = canvasLib.createCanvas(width, height), ctx = canvas.getContext('2d');
+  const doc = await openPdf(pdf);
+  try {
+    const page = await doc.getPage(1), viewport = page.getViewport({scale:1});
+    await page.render({canvasContext:ctx,viewport,background:transparent ? 'rgba(0,0,0,0)' : 'white',
+      transform:[width/viewport.width,0,0,height/viewport.height,0,0]}).promise;
+    return ctx.getImageData(0,0,width,height).data;
+  } finally {await doc.destroy();canvas.width=canvas.height=0;}
+}
+
+async function rasterQuality(image, pdf, svg, dimensions, applicationType, target, priorMetrics, tracing) {
   const limits = qualityLimits(applicationType), originalWidth = image.width, originalHeight = image.height;
   const scale = Math.min(1, Math.sqrt(1_000_000/(originalWidth*originalHeight)),
     target ? dimensions.width/PT_PER_MM*300/25.4/originalWidth : 1,
@@ -552,7 +572,16 @@ async function rasterQuality(image, pdf, svg, dimensions, applicationType, targe
       if (arity[name]) nodeCount += Math.ceil(args.length/arity[name])*(name==='C' ? 3 : ['Q','S'].includes(name) ? 2 : 1);
     }
   }
-  const metrics = { gurultuSayisi, colorCount:palette.colorCount, minLineMm, minGapMm, minShapeMm2, pathCount, nodeCount:priorMetrics?.nodeCount ?? nodeCount,
+  // Flat artwork: per-colour IoU, edge deviation and notches in source pixels, whichever tracer ran.
+  const flatSource = flatPalette(image, perceptualPalette(image.pixels,originalWidth,originalHeight,transparent,limits),
+    {maxInks:limits.flatMaxColors,deltaE:limits.colorDeltaE});
+  const flat = flatSource.flat ? await flatQuality(flatSource.flat,(w,h)=>renderPixels(pdf,w,h,transparent)) : null;
+  global.gc?.();
+  const metrics = { vectorizer:priorMetrics?.vectorizer ?? tracing?.vectorizer ?? null,
+    ...(tracing?.vectorizer==='potrace' ? {potrace:{upscale:tracing.upscale,thresholds:tracing.thresholds,layers:tracing.layers}} : {}),
+    ...(tracing?.fallback ? {vectorizerFallback:tracing.fallback} : {}),
+    flatQuality:flat, flatClass:flatSource.flat ? 'duz' : flatSource.reason, flatStats:flatSource.stats ?? null,
+    gurultuSayisi, colorCount:palette.colorCount, minLineMm, minGapMm, minShapeMm2, pathCount, nodeCount:priorMetrics?.nodeCount ?? nodeCount,
     iou:union ? 1-mismatch/union : 0, pixelDifference:difference/(width*height*3),
     semiTransparentRatio:alphaEdgePixels ? semi/alphaEdgePixels : 0, alphaEdgePixels, semiTransparentPixels:semi, measurementSize:target ? 'target' : 'pending', analysisDpi:target ? Math.min(25.4/sx,25.4/sy) : null, noiseFilter:'one-pixel-opening', colorDeltaE:limits.colorDeltaE, minColorAreaRatio:limits.minColorAreaRatio, iouTolerancePx:1,
     widthMm:target ? dimensions.width/PT_PER_MM : null,heightMm:target ? dimensions.height/PT_PER_MM : null,
@@ -570,6 +599,9 @@ async function rasterQuality(image, pdf, svg, dimensions, applicationType, targe
   if (metrics.semiTransparentRatio > limits.maxSemiTransparentRatio) reasons.push(`Alfa kenarında yarı saydam piksel oranı ${metrics.semiTransparentRatio.toFixed(4)}; sınır ${limits.maxSemiTransparentRatio}.`);
   if (pathCount > limits.maxPaths) reasons.push(`Yol sayısı ${pathCount}; sınır ${limits.maxPaths}.`);
   if (metrics.nodeCount > limits.maxNodes) reasons.push(`Düğüm sayısı ${metrics.nodeCount}; sınır ${limits.maxNodes}.`);
+  if (flat && flat.iou < limits.minFlatIou) reasons.push(`Düz renk vektör benzerliği ${flat.iou.toFixed(4)}; gerekli IoU ${limits.minFlatIou}.`);
+  if (flat && flat.edgeDeviationPx > limits.maxEdgeDeviationPx) reasons.push(`Kenar sapması ${flat.edgeDeviationPx.toFixed(2)} kaynak pikseli; sınır ${limits.maxEdgeDeviationPx}.`);
+  if (flat && flat.notchCount) reasons.push(`Kesişim veya köşelerde ${flat.notchCount} çentik var.`);
   return {metrics,reasons};
 }
 
@@ -642,6 +674,7 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
   const target = targetSize(targetMm);
   mime = String(mime || '').split(';')[0].toLowerCase();
   let pdf, kind, inputPages, rasterQualityReport, designBox, rasterDetails = [], reasons = [], aspectRatioError = 0;
+  const vectorizers = new Set();
   if (!['baski','nakis'].includes(applicationType)) throw new TypeError('applicationType baski veya nakis olmalı');
   if (manualVector && mime!=='application/pdf') throw new Error('Hazır vektör PDF gerekli');
   if (['image/png', 'image/jpeg', 'image/jpg'].includes(mime)) {
@@ -655,7 +688,8 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
     inputPages = [{ width: result.image.width, height: result.image.height }];
     const source = { width: result.image.width * 0.75, height: result.image.height * 0.75 };
     if (target) aspectRatioError=Math.abs((target.width/target.height)/(source.width/source.height)-1);
-    rasterQualityReport = await rasterQuality(result.image,pdf,result.svg,result.dimensions,applicationType,target);
+    rasterQualityReport = await rasterQuality(result.image,pdf,result.svg,result.dimensions,applicationType,target,undefined,result.tracing);
+    vectorizers.add(result.tracing.vectorizer);
     rasterDetails.push(rasterQualityReport.metrics.minLineMm);
     reasons.push(...rasterQualityReport.reasons);
   } else if (mime === 'application/pdf') {
@@ -679,6 +713,7 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
             const page = await rendered.getPage(i + 1), scale = Math.min(2, RASTER_EDGE / Math.max(inputPages[i].width, inputPages[i].height));
             if (scale < 2) reasons.push('Büyük raster bellek sınırı için küçültüldü; ince detayları özgün dosyayla teyit edin.');
             const result = await trace(await renderPage(page, scale), inputPages[i], target, true);
+            vectorizers.add(result.tracing.vectorizer);
             page.cleanup();
             const traced = await PDFDocument.load(result.pdf);
             const [replacement] = await original.copyPages(traced, [0]);
@@ -735,6 +770,7 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
     minLineWidthUnit: 'mm', minLineWidthEstimated: true, aspectRatioPreserved: aspectRatioError <= 0.01,
     aspectRatioError, aspectRatioMethod: 'content-boundary-transform',
     rasterQuality: rasterQualityReport?.metrics,
+    ...(vectorizers.size ? {vectorizer:[...vectorizers].join('+')} : {}),
     ...(designBox?{designBox}:{}),
     quality: manualVector && !qualitySource ? 'iyi' : rasterQualityReport && !target ? 'beklemede' : reasons.length ? 'teyit' : 'iyi',
     qualityLabel: rasterQualityReport && !target ? 'Kalite ölçüden sonra değerlendirilecek' : undefined,
@@ -742,7 +778,7 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
     pageCount: pages.length, pages: pages.map(x => ({ pathCount: x.pathCount,
       imageCount: x.imageCount, textCount: x.textCount, widthMm: x.width / PT_PER_MM,
       heightMm: x.height / PT_PER_MM })), rasterPdfMethod: kind === 'raster' && mime === 'application/pdf'
-      ? 'PDF.js image-only page composition at 144 dpi -> local vtracer -> SVG paths' : undefined } };
+      ? `PDF.js image-only page composition at 144 dpi -> local ${[...vectorizers].join('+')} -> SVG paths` : undefined } };
 }
 
 async function compareDirectory(input, output) {
