@@ -27,6 +27,22 @@ function measureApplication({ refLengthPx, refLengthCm, designBoxPx, imageKind, 
   };
 }
 
+/** Sleeve lengthwise projection is observed; its transverse dimension comes only
+ * from the supplied artwork. A large observed ratio error still needs review. */
+function measureSleeve({alongPx, acrossPx, designRatio, measuredAxis, mmPerPx} = {}) {
+  const reasons=[];
+  if (![alongPx,acrossPx,designRatio,mmPerPx].every(n=>Number.isFinite(n)&&n>0) || !['en','boy'].includes(measuredAxis))
+    return {width_mm:null,height_mm:null,aspectRatioError:null,reasons:['Kol ölçüsü için eksen, desen oranı veya L ölçeği eksik; ölçü hesaplanmadı.']};
+  const observedRatio=measuredAxis==='boy'?acrossPx/alongPx:alongPx/acrossPx;
+  const aspectRatioError=Math.abs(observedRatio/designRatio-1);
+  if(aspectRatioError>.10+1e-9)reasons.push(`Koldaki görünür desen oranı dosyayla %${(aspectRatioError*100).toFixed(1).replace('.',',')} farklı; ±%10 sınırı aşılıyor, enine kısalma veya yerleşim teyit edilmeli.`);
+  const width=measuredAxis==='en'?alongPx*mmPerPx:alongPx*mmPerPx*designRatio;
+  const height=measuredAxis==='boy'?alongPx*mmPerPx:alongPx*mmPerPx/designRatio;
+  if (![width,height].every(n=>Number.isSafeInteger(Math.round(n))&&Math.round(n)>0))
+    return {width_mm:null,height_mm:null,aspectRatioError,reasons:[...reasons,'Kol için hesaplanan ölçü pozitif güvenli tam sayı değil.']};
+  return {width_mm:Math.round(width),height_mm:Math.round(height),aspectRatioError,reasons};
+}
+
 /** Read dimensions without allocating/decompressing pixels (including JPEG SOF markers). */
 function imageSize(buffer, mime) {
   let width, height;
@@ -76,4 +92,4 @@ function designBoxFromPng(buffer) {
   return pixelBounds(PNG.sync.read(buffer));
 }
 
-module.exports = { measureApplication, designBoxFromPng, imageSize, pixelBounds };
+module.exports = { measureSleeve, measureApplication, designBoxFromPng, imageSize, pixelBounds };

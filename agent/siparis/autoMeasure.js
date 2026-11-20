@@ -2,7 +2,7 @@
 
 // No database or filesystem access here: this module runs in the render worker.
 let canvasLib; // Native canvas is loaded only in the child, never by HTTP routing.
-const { imageSize } = require('./measure');
+const { imageSize, measureSleeve } = require('./measure');
 // Measurement uses a bounded raster; original uploads and their dimensions stay intact.
 const MAX_EDGE = 2000;
 const MIN_SYMMETRY = .85, MIN_MATCH_CONFIDENCE = .78;
@@ -408,7 +408,183 @@ function scaleFor(ref,measurements) {
   return {vertical,horizontal,difference,mean:vertical&&horizontal?(difference<=.15?(vertical+horizontal)/2:null):vertical||horizontal};
 }
 
+// Sleeve geometry and matching are independent of the established torso path.
+// PCA supplies the arm direction, not an assumed vertical artwork direction.
+function sleeveGeometry(mask,w,h,side=null) {
+  const pixels=[];let x=0,y=0;
+  for(let i=0;i<mask.length;i++)if(mask[i]){pixels.push(i);x+=i%w;y+=Math.floor(i/w);}
+  if(pixels.length<80)return null;
+  x/=pixels.length;y/=pixels.length;
+  let xx=0,xy=0,yy=0;
+  for(const i of pixels){const dx=i%w-x,dy=Math.floor(i/w)-y;xx+=dx*dx;xy+=dx*dy;yy+=dy*dy;}
+  const theta=.5*Math.atan2(2*xy,xx-yy);
+  let u={x:Math.cos(theta),y:Math.sin(theta)};
+  if(u.y<0)u={x:-u.x,y:-u.y};
+  const v={x:u.y,y:-u.x};
+  const project=indices=>{
+    let a=Infinity,b=-Infinity,c=Infinity,d=-Infinity;
+    for(const i of indices){const dx=i%w-x,dy=Math.floor(i/w)-y,along=dx*u.x+dy*u.y,across=dx*v.x+dy*v.y;a=Math.min(a,along);b=Math.max(b,along);c=Math.min(c,across);d=Math.max(d,across);}
+    return {a,b,c,d,alongPx:b-a+1,acrossPx:d-c+1};
+  };
+  const extent=project(pixels),box=bounds(mask,w,h);
+  if(extent.alongPx/extent.acrossPx<1.55)return null;
+  return {mask,box,side,u,v,center:{x,y},project,lengthPx:extent.alongPx,extent};
+}
+function sleevesOnBody(ref,w,h) {
+  const cx=ref.bodyCenterX,result=[];
+  for(const side of ['sol','sag']) {
+    const mask=new Uint8Array(w*h),edge=cx+(side==='sol'?-1:1)*ref.hemWidthPx*.51;
+    for(let y=ref.shoulderY;y<ref.box.y+ref.box.h;y++)for(let x=ref.box.x;x<ref.box.x+ref.box.w;x++)
+      if(ref.mask[y*w+x]&&(side==='sol'?x<edge:x>edge))mask[y*w+x]=1;
+    const sleeve=sleeveGeometry(largest(mask,w,h),w,h,side);
+    if(sleeve)result.push(sleeve);
+  }
+  return result;
+}
+function sleevePrints(p,sleeve) {
+  const w=p.width,h=p.height,mask=sleeve.mask;
+  const ink=contrastInk(p,sleeve),clean=new Uint8Array(w*h);
+  // Seams at the silhouette edge must not become measured artwork.
+  for(let y=2;y<h-2;y++)for(let x=2;x<w-2;x++) {
+    const i=y*w+x;
+    if(ink[i]&&mask[i-2]&&mask[i+2]&&mask[i-2*w]&&mask[i+2*w])clean[i]=1;
+  }
+  const r=Math.max(2,Math.round(sleeve.lengthPx*.012)),joined=dilate(clean,w,h,r,r);
+  return components(joined,w,h,8).map(c=>{
+    const pixels=c.pixels.filter(i=>clean[i]),extent=sleeve.project(pixels);
+    if(pixels.length<8||extent.alongPx<4||extent.acrossPx<4||extent.alongPx>sleeve.lengthPx*.65)return null;
+    const mask=new Uint8Array(w*h);for(const i of pixels)mask[i]=1;
+    return {mask,pixels,box:bounds(mask,w,h),...extent};
+  }).filter(Boolean);
+}
+function sleeveMatch(p,sleeve,candidate,design,content) {
+  let best=null;
+  // The artwork may tilt slightly relative to the entire shoulder/cuff axis.
+  // Search only a small angle, always measuring the independently observed ink.
+  const pixels=candidate.pixels;
+  for(const degrees of [-12,-8,-4,0,4,8,12]) {
+    const angle=degrees*Math.PI/180,cos=Math.cos(angle),sin=Math.sin(angle);
+    const u={x:sleeve.u.x*cos-sleeve.u.y*sin,y:sleeve.u.x*sin+sleeve.u.y*cos},v={x:u.y,y:-u.x};
+    let a=Infinity,b=-Infinity,c=Infinity,d=-Infinity;
+    for(const i of pixels){const dx=i%p.width-sleeve.center.x,dy=Math.floor(i/p.width)-sleeve.center.y,along=dx*u.x+dy*u.y,across=dx*v.x+dy*v.y;a=Math.min(a,along);b=Math.max(b,along);c=Math.min(c,across);d=Math.max(d,across);}
+    const projected={...candidate,a,b,c,d,alongPx:b-a+1,acrossPx:d-c+1};
+    const match=sleeveMatchAligned(p,{...sleeve,u,v},projected,design,content);
+    if(match&&(!best||match.confidence>best.confidence))best={...match,projected,axis:u,axisOffsetDegrees:degrees};
+  }
+  return best;
+}
+function sleeveMatchAligned(p,sleeve,candidate,design,content) {
+  const b=content.box;
+  if(!b)return null;
+  // Compare normalized ink shapes, allowing rotation and transverse shortening.
+  // The candidate bounds remain observed ink; no template ratio is imposed.
+  const N=24,observed=[];
+  const sample=(mask,w,h,x,y)=>x>=0&&y>=0&&x<w&&y<h?mask[Math.floor(y)*w+Math.floor(x)]:0;
+  for(let y=0;y<N;y++)for(let x=0;x<N;x++) {
+    let sum=0;
+    for(const dy of [.2,.5,.8])for(const dx of [.2,.5,.8]) {
+      const a=candidate.a+(y+dy)/N*candidate.alongPx,c=candidate.c+(x+dx)/N*candidate.acrossPx;
+      sum+=sample(candidate.mask,p.width,p.height,sleeve.center.x+a*sleeve.u.x+c*sleeve.v.x,sleeve.center.y+a*sleeve.u.y+c*sleeve.v.y);
+    }
+    observed.push(sum/9);
+  }
+  const mean=observed.reduce((s,v)=>s+v,0)/observed.length;
+  let best=null;
+  for(let rotation=0;rotation<4;rotation++) {
+    const values=[];
+    for(let y=0;y<N;y++)for(let x=0;x<N;x++) {
+      let sum=0;
+      for(const dy of [.2,.5,.8])for(const dx of [.2,.5,.8]) {
+        const u=(x+dx)/N,v=(y+dy)/N;
+        const [sx,sy]=rotation===0?[u,v]:rotation===1?[v,1-u]:rotation===2?[1-u,1-v]:[1-v,u];
+        sum+=sample(content.mask,design.width,design.height,b.x+sx*b.w,b.y+sy*b.h);
+      }
+      values.push(sum/9);
+    }
+    const tm=values.reduce((s,v)=>s+v,0)/values.length;
+    let cross=0,variance=0,tv=0;
+    for(let i=0;i<values.length;i++){const a=observed[i]-mean,d=values[i]-tm;cross+=a*d;variance+=a*a;tv+=d*d;}
+    const confidence=variance>0&&tv>0?Math.max(0,cross/Math.sqrt(variance*tv)):0;
+    if(!best||confidence>best.confidence)best={confidence,rotation,measuredAxis:rotation%2?'en':'boy',designRatio:b.w/b.h};
+  }
+  return best;
+}
+async function autoMeasureSleeve({image,design,flat,position}) {
+  const started=performance.now(),reasons=[],source={method:'otomatik',sleeveMethod:'kol_ekseni_desen_orani',scaleFrom:null,measuredAxis:null,flatId:flat?.id??null,flatAd:flat?.ad??null,refBeden:flat?.refBeden??null,refCm:flat?.refLengthCm??null,olculerL:flat?.olculerL??null,gorselFileId:image?.id??null,desenFileId:design?.id??null,selectedView:image?.gorunum||'on',mmPerPx:null,designBoxPx:null,confidence:0};
+  let width=null,height=null;
+  const measurements=flat?.refBeden==='L'?flat.olculerL||{}:{};
+  if(flat?.refBeden!=='L')reasons.push('Ürünün L kalıp referansı bulunamadı: kol için L beden ölçüsü gerekli.');
+  try {
+    // Small cuff artwork needs full raster resolution even on PDF sheets.
+    const pages=await rasterPages(image,image.mime==='application/pdf'?1000:MAX_EDGE),designs=design?await rasterPages(design):[],candidates=[];
+    const designContents=designs.map(designContent);
+    let sleeveCount=0,bodyCount=0;
+    source.pageCount=pages.length;source.designPageCount=designs.length;
+    for(let i=0;i<pages.length;i++) {
+      const p=pages[i],segmented=image.gorunum==='kol'?productMask(p):null,box=segmented?.box;
+      const isolated=box&&Math.max(box.h/box.w,box.w/box.h)>2.2;
+      const refs=isolated?[]:silhouettes(p),geometries=[];bodyCount+=refs.length;
+      const knownSide=['on','arka'].includes(image.gorunum)&&position!=='kol';
+      const wantedSide=position==='sol_kol'?'sol':'sag';
+      const imageSide=image.gorunum==='on'?(wantedSide==='sol'?'sag':'sol'):wantedSide;
+      for(const ref of refs)for(const sleeve of sleevesOnBody(ref,p.width,p.height))
+        if(!knownSide||sleeve.side===imageSide)geometries.push({sleeve,ref});
+      if(!refs.length&&image.gorunum==='kol') {
+        const {mask,box}=segmented;
+        // A close crop does not establish a full shoulder-to-cuff reference.
+        const complete=box&&box.x>2&&box.y>2&&box.x+box.w<p.width-2&&box.y+box.h<p.height-2;
+        const sleeve=complete?sleeveGeometry(mask,p.width,p.height):null;
+        if(sleeve)geometries.push({sleeve,ref:null});
+      }
+      sleeveCount+=geometries.length;
+      for(const {sleeve,ref} of geometries)for(const candidate of sleevePrints(p,sleeve))for(let j=0;j<designs.length;j++) {
+        const match=sleeveMatch(p,sleeve,candidate,designs[j],designContents[j]);
+        if(match)candidates.push({p,sleeve,ref,candidate,match,page:i+1,designPage:j+1});
+      }
+    }
+    source.sleeveCount=sleeveCount;source.bodyCount=bodyCount;
+    if(!sleeveCount)reasons.push('Kol bulunamadı: ürün maskesinde gövdeden ayrılan kol veya tamamı görünen ayrı kol silueti yok.');
+    if(!designs.length)reasons.push('Kol desen dosyası yok veya boş; en-boy oranı ve desen eşleşmesi doğrulanamadı.');
+    candidates.sort((a,b)=>b.match.confidence-a.match.confidence);
+    source.pageCandidates=candidates.slice(0,5).map(c=>({page:c.page,designPage:c.designPage,confidence:c.match.confidence,box:c.candidate.box}));
+    const chosen=candidates[0];
+    if(!chosen) {
+      if(sleeveCount)reasons.push('Kol üzerinde desen adayı bulunamadı (0 eşleşme); yerleşim teyit edilmeli.');
+    } else {
+      const {p,sleeve,ref,match}=chosen,candidate=match.projected;
+      Object.assign(source,{selectedPage:chosen.page,selectedDesignPage:chosen.designPage,rasterWidth:p.width,rasterHeight:p.height,productBoxPx:ref?.box??sleeve.box,sleeveBoxPx:sleeve.box,sleeveAxis:sleeve.u,measuredAxisVector:match.axis,axisOffsetDegrees:match.axisOffsetDegrees,sleeveLengthPx:sleeve.lengthPx,candidateBoxPx:candidate.box,observedAlongPx:candidate.alongPx,observedAcrossPx:candidate.acrossPx,measuredAxis:match.measuredAxis,designAspectRatio:match.designRatio,rotation:match.rotation*90,confidence:match.confidence});
+      const competing=candidates.find(c=>c.page!==chosen.page||overlapFraction(c.candidate.box,candidate.box)<.5);
+      const ambiguous=!!competing&&(competing.match.confidence>=MIN_MATCH_CONFIDENCE||match.confidence-competing.match.confidence<.045);
+      if(ambiguous)reasons.push(`Kol desen adayı belirsiz: en iyi eşleşme %${percent(match.confidence)}, diğer aday %${percent(competing.match.confidence)}; tek yerleşim seçilemiyor.`);
+      // Without proven front/back orientation, image left is not wearer left.
+      if(position!=='kol'&&!['on','arka'].includes(image.gorunum))reasons.push('Sol/sağ kol yönü görselden kesin doğrulanamadı; seçilen kol yerleşimi teyit edilmeli.');
+      if(match.confidence<MIN_MATCH_CONFIDENCE)reasons.push(`Kol desen eşleştirme güveni %${percent(match.confidence)}; %${percent(MIN_MATCH_CONFIDENCE)} sınırının altında.`);
+      if(ref) {
+        const scale=scaleFor(ref,measurements);
+        source.scaleFrom='govde';source.mmPerPx=scale.mean;source.scaleDifference=scale.difference;
+        source.hemWidthPx=ref.hemWidthPx;source.bodyHeightPx=ref.bodyHeightPx;
+        if(scale.difference>.15)reasons.push(`Kol için gövde boy/etek ölçek farkı %${percent(scale.difference)}; %15 sınırını aşıyor.`);
+        if(ref.symmetry<MIN_SYMMETRY)reasons.push(`Kol için kullanılan gövde simetrisi %${percent(ref.symmetry)}; %85 sınırının altında.`);
+      } else if(Number.isFinite(measurements.kol_boyu)&&measurements.kol_boyu>0) {
+        source.scaleFrom='kol_boyu';source.mmPerPx=measurements.kol_boyu*10/sleeve.lengthPx;
+      }
+      if(!source.mmPerPx)reasons.push('Kol için ölçek kaynağı yok: geçerli L kol_boyu veya aynı görselde doğrulanmış gövde boy/etek ölçeği bulunamadı.');
+      source.scale=source.mmPerPx?source.mmPerPx/10:null;
+      if(!ambiguous&&match.confidence>=MIN_MATCH_CONFIDENCE) {
+        const measured=measureSleeve({alongPx:candidate.alongPx,acrossPx:candidate.acrossPx,designRatio:match.designRatio,measuredAxis:match.measuredAxis,mmPerPx:source.mmPerPx});
+        source.aspectRatioError=measured.aspectRatioError;
+        reasons.push(...measured.reasons);width=measured.width_mm;height=measured.height_mm;
+        source.designBoxPx=candidate.box;
+      }
+      source.summary=`Kol boyunca desenin ${match.measuredAxis} ekseni ölçüldü; diğer eksen desen dosyasının oranından hesaplandı. Ölçek: ${source.scaleFrom==='kol_boyu'?'L kol boyu':source.scaleFrom==='govde'?'aynı görselde L gövde boy/etek':'bulunamadı'}.`;
+    }
+  } catch(e) {reasons.push(`Kol ürün/desen görseli okunamadı: ${e.message}`);}
+  source.timingsMs={total:Math.round(performance.now()-started)};
+  return {width_mm:width,height_mm:height,measure_source:source,needs_confirmation:reasons.length>0,reasons,reason:reasons.join(' ')};
+}
+
 async function autoMeasure({image,design,flat,product,position}) {
+  if(['kol','sol_kol','sag_kol'].includes(position))return autoMeasureSleeve({image,design,flat,position});
   const started=performance.now(),timings={},reasons=[],source={method:'otomatik',flatId:flat?.id??null,flatAd:flat?.ad??null,refBeden:flat?.refBeden??null,refCm:flat?.refLengthCm??null,olculerL:flat?.olculerL??null,chestPx:null,designBoxPx:null,scale:null,mmPerPx:null,confidence:0,gorselFileId:image?.id??null,desenFileId:design?.id??null};
   let width=null,height=null;
   const positive=n=>Number.isFinite(n)&&n>0;

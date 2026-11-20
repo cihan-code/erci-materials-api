@@ -107,16 +107,16 @@ test('G39 an application that cannot be measured states the concrete reason, nev
   const design=ok(await f.upload(v,{lineId:line,buffer:m.design}),201);
   const sleeve=ok(await f.post(`/satirlar/${line}/uygulamalar`,{kind:'nakis',position:'kol',desenDosyaId:design.id,measure_source:'{}',needs_confirmation:1}),201);
   const [reason]=openConfirmation(f,sleeve.id);
-  assert.match(reason.message,/^Kol görünümü için ürün görseli yok: kol konumu ön görselde ölçülür/);assert.notEqual(reason.message,GENERIC);
+  assert.match(reason.message,/^Kol görünümü için ürün görseli yok: kol, ön veya arka görsel yüklenmedi/);assert.notEqual(reason.message,GENERIC);
   assert.ok(f.db.prepare("SELECT count(*) n FROM audit_log WHERE action='uygulama_olcu_gerekce' AND ref=?").get(String(sleeve.id)).n===1);
-  // A sleeve close-up is stored but carries no L scale; the reason stays.
+  // A sleeve view is now measured first; this image has only a chest design.
   ok(await f.upload(v,{kind:'urun_gorsel',lineId:line,gorunum:'kol',buffer:m.image}),201);
-  assert.match(openConfirmation(f,sleeve.id)[0].message,/^Kol görünümü için ürün görseli yok/);
-  // With a front image whose garment lacks the design, the sleeve is reported as not measurable on the front view.
+  assert.match(openConfirmation(f,sleeve.id)[0].message,/^Kol konumu ayrı kol görselde ölçülemedi/);
+  // The dedicated sleeve view keeps priority when a front view is uploaded later.
   addFlat(f);
   ok(await f.upload(v,{kind:'urun_gorsel',lineId:line,gorunum:'on',buffer:mockup({missing:true}).image}),201);
   const after=application(f,sleeve.id);assert.equal(after.width_mm,null);
-  assert.match(openConfirmation(f,sleeve.id)[0].message,/^Kol konumu ön görselde ölçülemedi: /);
+  assert.match(openConfirmation(f,sleeve.id)[0].message,/^Kol konumu ayrı kol görselde ölçülemedi: /);
   assert.equal(openConfirmation(f,sleeve.id).length,1);
 });
 

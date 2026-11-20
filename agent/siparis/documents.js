@@ -20,7 +20,7 @@ const GENERATED = ['uretim_formu','onay_formu','baski_formu','nakis_formu','dese
 const WORKSHOP = ['baski_formu','nakis_formu','desen_vektor'];
 // Derived from an uploaded source right after upload; never an input of the forms and never sent to the workshop.
 const PREVIEW = 'desen_vektor_onizleme';
-// Product image views. 'kol' is a reference close-up only: sleeve positions are measured on the front image.
+// Product image views; a complete sleeve view can supply its own L length scale.
 const VIEWS = ['on','arka','kol'];
 const pending = new Set();
 // Source files whose preview job is queued or running in this process (per database); a 'hazirlaniyor'
@@ -445,17 +445,17 @@ const SLEEVES=['kol','sol_kol','sag_kol'];
 // Returns the measurement inputs, or {gap} with the concrete reason why the application cannot be measured yet.
 function autoInputs(db,v,line,app) {
   const view=viewForPosition(app.position),label=POSITION_LABELS[app.position] || app.position;
-  // Measurement needs the whole garment; a sleeve close-up ('kol') carries no L scale.
-  const images=v.files.filter(f=>f.kind==='urun_gorsel' && f.line_id===line.id && (view==='teyit' ? ['on','arka'].includes(f.gorunum) : f.gorunum===view));
+  const sleeve=SLEEVES.includes(app.position);
+  const images=v.files.filter(f=>f.kind==='urun_gorsel' && f.line_id===line.id && (sleeve ? ['kol','on','arka'].includes(f.gorunum) : view==='teyit' ? ['on','arka'].includes(f.gorunum) : f.gorunum===view));
   // A replacement upload supersedes the previous immutable file in this view.
-  const image=images.at(-1);
+  const image=sleeve ? images.filter(f=>f.gorunum==='kol').at(-1)||images.filter(f=>f.gorunum==='on').at(-1)||images.at(-1) : images.at(-1);
   const linked=db.prepare('SELECT file_id FROM document_application_sources WHERE application_id=?').get(app.id)?.file_id;
   // Applications registered before G24 kept their design only in the panel's provenance.
   const recorded=linked==null ? Number(provenance(app).desenDosyaId) : null;
   const design=v.files.find(f=>f.id===(linked ?? recorded) && f.kind==='desen_kaynak');
   const meta=design && db.prepare('SELECT line_id FROM document_file_meta WHERE file_id=?').get(design.id);
   if(meta?.line_id && meta.line_id!==line.id)return {gap:'Desen dosyası başka bir ürün satırına ait; bu satırın desenini bağlayın.'};
-  if(!image)return {gap:SLEEVES.includes(app.position) ? `${label} görünümü için ürün görseli yok: kol konumu ön görselde ölçülür ve bu satırda ön görsel yüklenmedi.`
+  if(!image)return {gap:sleeve ? `${label} görünümü için ürün görseli yok: kol, ön veya arka görsel yüklenmedi.`
     : view==='teyit' ? `${label} konumu için ön veya arka ürün görseli yok.` : `${view==='on'?'Ön':'Arka'} görünüm için ürün görseli yok (${label} konumu ${view==='on'?'ön':'arka'} görselde ölçülür).`};
   const {candidates,flat}=flats.selection(db,line,view==='teyit'?image.gorunum:view,flats.list(db));
   const flatNote=!flat && candidates.length>1 ? 'Bu ürün için birden çok kalıp var; kalıbı seçin' : null;
@@ -467,8 +467,7 @@ const NO_FLAT_REASONS=['Ürünün L kalıp referansı bulunamadı','Ürün için
 function explain(result,input) {
   let reasons=Array.isArray(result.reasons) ? result.reasons : result.reason ? [result.reason] : [];
   if(input.flatNote)reasons=[input.flatNote,...reasons.filter(r=>!NO_FLAT_REASONS.some(prefix=>String(r).startsWith(prefix)))];
-  // The sleeve is measured on the front view; say so when that view did not yield a size.
-  if(SLEEVES.includes(input.position) && reasons.length && result.width_mm==null)reasons=[`Kol konumu ön görselde ölçülemedi: ${reasons.join(' ')}`];
+  if(SLEEVES.includes(input.position) && reasons.length && result.width_mm==null)reasons=[`Kol konumu ${input.image.gorunum==='kol'?'ayrı kol':input.image.gorunum==='arka'?'arka':'ön'} görselde ölçülemedi: ${reasons.join(' ')}`];
   return {...result,reasons,reason:reasons.join(' '),needs_confirmation:result.needs_confirmation || reasons.length>0};
 }
 // Replace a stale or generic open measurement confirmation with the concrete reason; nothing is measured.
