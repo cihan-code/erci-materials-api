@@ -25,7 +25,7 @@ const GENERATED = ['uretim_formu','onay_formu','baski_formu','nakis_formu','dese
 const WORKSHOP = ['baski_formu','nakis_formu','desen_vektor'];
 // Derived from an uploaded source right after upload; never an input of the forms and never sent to the workshop.
 const PREVIEW = 'desen_vektor_onizleme';
-const ARTWORK_EXTRACTION_REVISION = 2;
+const ARTWORK_EXTRACTION_REVISION = 3;
 // Product image views; a complete sleeve view can supply its own L length scale.
 const VIEWS = ['on','arka','kol'];
 const pending = new Set();
@@ -388,7 +388,8 @@ function artworkFor(db,v,line,app) {
   if(source)return {source};
   const selected=productImageFor(v,line,app),image=selected.image;
   const gap=explicit||candidates.length>1 ? 'Bu uygulama için desenDosyaId ile tek bir geçerli kaynak bağlayın.' : selected.gap;
-  const key=JSON.stringify([ARTWORK_EXTRACTION_REVISION,line.product_key,app.position,app.kind,image?.id,image?.sha256,image?.gorunum,gap]);
+  // The line colour picks one garment on a sheet of colour variants.
+  const key=JSON.stringify([ARTWORK_EXTRACTION_REVISION,line.product_key,line.color_name??null,app.position,app.kind,image?.id,image?.sha256,image?.gorunum,gap]);
   return {image,key,gap};
 }
 function formPlacement(app,source,image,design) {
@@ -440,10 +441,14 @@ async function extractPreview(db,dataDir,v,line,app,input,user,signal,retryError
   try {
     const original={...input.image,...await vectorInput(dataDir,input.image)};
     if(previous&&(!retryError||previous.status!=='hata'))return previous;
-    artwork=await generateInChild({type:'extractArtwork',input:{image:original,position:app.position,product:line.product_key}},signal,{timeoutMs:15000});
+    // A small print is read a second time at a higher resolution; on a slow
+    // single CPU a ten-page sheet then needs more than the former 15 s.
+    artwork=await generateInChild({type:'extractArtwork',input:{image:original,position:app.position,product:line.product_key,color:line.color_name}},signal,{timeoutMs:30000});
     if(artwork.reason) {message=artwork.reason;status='teyit';}
     else {
       result=await generateInChild({type:'vector',designBox:true,input:{buffer:artwork.buffer,mime:'image/png'}},signal);
+      // A separation warning (small print) needs the same visual check as a vector warning.
+      if(artwork.warnings?.length)result.report={...result.report,quality:'teyit',reasons:[...(result.report.reasons||[]),...artwork.warnings]};
       status=result.report.quality==='teyit'?'teyit':'hazir';
     }
   } catch(e) {
