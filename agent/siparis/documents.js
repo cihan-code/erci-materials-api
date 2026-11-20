@@ -55,6 +55,13 @@ function init(db) {
     status TEXT NOT NULL CHECK(status IN ('hazirlaniyor','hazir','teyit','hata')),
     report_json TEXT, message TEXT, updated_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS document_extracted_previews (
+    application_id INTEGER PRIMARY KEY REFERENCES applications(id) ON DELETE CASCADE,
+    source_file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    preview_file_id INTEGER REFERENCES files(id) ON DELETE SET NULL,
+    input_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('hazir','teyit','hata')),
+    report_json TEXT, message TEXT, artwork BLOB
+  );
   CREATE TABLE IF NOT EXISTS document_preparations (
     version_id INTEGER PRIMARY KEY REFERENCES order_versions(id),
     token TEXT, started_at INTEGER, ready INTEGER NOT NULL DEFAULT 0, source_json TEXT
@@ -167,7 +174,7 @@ async function upload(db, dataDir, versionId, input, file, user) {
     const app=applicationId==null?null:v.lines.flatMap(l=>l.applications).find(a=>a.id===applicationId);
     if(applicationId!=null && (!app || (lineId && app.line_id!==lineId))) fail('Uygulama bu satır/sürüme ait değil');
     const saved=saveFile(db,dataDir,v,input.kind,file.buffer,user,{...file,lineId:lineId??app?.line_id,applicationId,gorunum:input.gorunum},written);
-    if(app && input.kind==='desen_kaynak') db.prepare('INSERT INTO document_application_sources(application_id,file_id) VALUES(?,?) ON CONFLICT(application_id) DO UPDATE SET file_id=excluded.file_id').run(app.id,saved.id);
+    if(app && SOURCE_KINDS.includes(input.kind)) db.prepare('INSERT INTO document_application_sources(application_id,file_id) VALUES(?,?) ON CONFLICT(application_id) DO UPDATE SET file_id=excluded.file_id').run(app.id,saved.id);
     // The vector record is committed with the file: a slow measurement or a restart can never leave it unknown.
     if (SOURCE_KINDS.includes(input.kind)) db.prepare("INSERT INTO document_vector_previews(source_file_id,status,updated_at) VALUES(?,'hazirlaniyor',?)").run(saved.id,Date.now());
     return saved;
@@ -306,6 +313,7 @@ function deleteApplication(db,applicationId,user) {
     if (!app) fail('Uygulama bulunamadı',404);
     draft(db,app.version_id);unlocked(db,app.version_id);
     db.prepare('DELETE FROM document_application_sources WHERE application_id=?').run(app.id);
+    retireExtractedPreview(db,app.id,user);
     db.prepare('UPDATE document_file_meta SET application_id=NULL WHERE application_id=?').run(app.id);
     db.prepare("UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='olcu' AND ref_table='applications' AND ref_id=? AND status='acik'").run(user.id,app.id);
     db.prepare('DELETE FROM applications WHERE id=?').run(app.id);
@@ -348,15 +356,21 @@ function assertFresh(db,v) {
   if (state?.ready && state.source_json!==inputFingerprint(db,v))
     fail('Sürüm değişmiş; belgeleri hazirla?yeniden=1 ile yeniden üretin',409);
 }
-function sourceFor(db, v, app) {
-  const explicit=db.prepare('SELECT file_id FROM document_application_sources WHERE application_id=?').get(app.id)?.file_id;
-  const candidates=v.files.filter(f=>SOURCE_KINDS.includes(f.kind)).filter(f=> {
-    const meta=db.prepare('SELECT line_id FROM document_file_meta WHERE file_id=?').get(f.id);
-    return !meta?.line_id || meta.line_id===app.line_id;
+function artworkFor(db,v,line,app) {
+  const linked=db.prepare('SELECT file_id FROM document_application_sources WHERE application_id=?').get(app.id)?.file_id;
+  const recorded=Number(provenance(app).desenDosyaId);
+  const lineSources=v.files.filter(f=>SOURCE_KINDS.includes(f.kind) && (!f.line_id||f.line_id===line.id));
+  const explicit=linked ?? (lineSources.some(f=>f.id===recorded) ? recorded : null);
+  const candidates=lineSources.filter(f=> {
+    const owner=db.prepare('SELECT application_id FROM document_file_meta WHERE file_id=?').get(f.id)?.application_id;
+    return !owner||owner===app.id;
   });
-  const source=explicit ? v.files.find(f=>f.id===explicit && SOURCE_KINDS.includes(f.kind)) : candidates.length===1 ? candidates[0] : null;
-  if (!source) fail(`Uygulama ${app.id}: desenDosyaId ile tek bir kaynak bağlayın`,409);
-  return source;
+  const source=explicit ? lineSources.find(f=>f.id===explicit) : candidates.length===1 ? candidates[0] : null;
+  if(source)return {source};
+  const selected=productImageFor(v,line,app),image=selected.image;
+  const gap=explicit||candidates.length>1 ? 'Bu uygulama için desenDosyaId ile tek bir geçerli kaynak bağlayın.' : selected.gap;
+  const key=JSON.stringify([line.product_key,app.position,app.kind,image?.id,image?.sha256,image?.gorunum,gap]);
+  return {image,key,gap};
 }
 function formPlacement(app,source,image,design) {
   const locatedMeasurement=['otomatik','otomatik_renk'].includes(source.method) || (source.method==='elle' && source.elleTeyit===true);
@@ -384,7 +398,78 @@ function formPlacement(app,source,image,design) {
   }
   return {fileId:image.fileId,view:image.view,page,rasterWidth,rasterHeight,box,swapAxes};
 }
-function formOrder(db,dataDir,v,sourceByApp) {
+
+function retireExtractedPreview(db,appId,user) {
+  const old=db.prepare('SELECT preview_file_id FROM document_extracted_previews WHERE application_id=?').get(appId);
+  if(!old)return;
+  db.prepare('DELETE FROM document_extracted_previews WHERE application_id=?').run(appId);
+  if(!old.preview_file_id)return;
+  db.prepare("UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='vektor_kalite' AND ref_table='files' AND ref_id=? AND status='acik'").run(user.id,old.preview_file_id);
+  db.prepare('DELETE FROM files WHERE id=? AND kind=?').run(old.preview_file_id,PREVIEW);
+}
+
+function extractedRecord(db,appId,{key},includeArtwork=false) {
+  return db.prepare(`SELECT preview_file_id,status,report_json,message${includeArtwork?',artwork':''} FROM document_extracted_previews
+    WHERE application_id=? AND input_json=? AND (artwork IS NULL OR preview_file_id IS NOT NULL)`).get(appId,key);
+}
+
+async function extractPreview(db,dataDir,v,line,app,input,user,signal,retryError=false) {
+  if(input.gap)return {message:input.gap};
+  const previous=extractedRecord(db,app.id,input,true);
+  // Verify the original bytes even if a valid-looking cached crop exists.
+  let artwork,result,message,status;
+  try {
+    const original={...input.image,...await vectorInput(dataDir,input.image)};
+    if(previous&&(!retryError||previous.status!=='hata'))return previous;
+    artwork=await generateInChild({type:'extractArtwork',input:{image:original,position:app.position,product:line.product_key}},signal,{timeoutMs:15000});
+    if(artwork.reason) {message=artwork.reason;status='teyit';}
+    else {
+      result=await generateInChild({type:'vector',designBox:true,input:{buffer:artwork.buffer,mime:'image/png'}},signal);
+      status=result.report.quality==='teyit'?'teyit':'hazir';
+    }
+  } catch(e) {
+    if(signal.aborted)throw e;
+    message=`Üründen desen önizlemesi tamamlanamadı: ${e.message}`;
+    status='hata';
+  }
+  signal.throwIfAborted();
+  const written=[];
+  try { return tx(db,()=> {
+    const current=draft(db,v.id),currentLine=current.lines.find(l=>l.id===line.id),currentApp=currentLine?.applications.find(a=>a.id===app.id);
+    if(!currentApp||artworkFor(db,current,currentLine,currentApp).key!==input.key)return {message:'Ürün görseli veya uygulama değişti; yeniden deneyin.'};
+    const existing=extractedRecord(db,app.id,input,true);
+    if(existing&&(!previous||existing.preview_file_id!==previous.preview_file_id))return existing;
+    const file=result && saveFile(db,dataDir,current,PREVIEW,result.pdf,user,{lineId:line.id,applicationId:app.id},written);
+    retireExtractedPreview(db,app.id,user);
+    const report=result && {...result.report,placement:artwork.placement};
+    if(file&&status==='teyit')db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('vektor_kalite','files',?,?)")
+      .run(file.id,`Vektör kalitesi görsel teyit gerektiriyor: ${JSON.stringify(report)}`);
+    db.prepare(`INSERT INTO document_extracted_previews(application_id,source_file_id,preview_file_id,input_json,status,report_json,message,artwork)
+      VALUES(?,?,?,?,?,?,?,?)`).run(app.id,input.image.id,file?.id??null,input.key,status,report?JSON.stringify(report):null,message??null,result?artwork.buffer:null);
+    return extractedRecord(db,app.id,input,true);
+  }); } catch(e) {
+    for(const file of written)try {fs.unlinkSync(file);} catch {}
+    throw e;
+  }
+}
+
+function assertExtractedMeasurement(app,image,placement) {
+  const source=provenance(app);
+  if(!['otomatik','otomatik_renk'].includes(source.method))return;
+  const box=source.designBoxPx, current=placement.designBoxPx;
+  const aligned=(offset,size,edge,currentOffset,currentSize,currentEdge)=> {
+    if(![offset,size,edge,currentOffset,currentSize,currentEdge].every(Number.isFinite)||size<=0||edge<=0)return false;
+    const relativeSize=size/edge,expectedSize=currentSize/currentEdge;
+    const relativeCenter=(offset+size/2)/edge,expectedCenter=(currentOffset+currentSize/2)/currentEdge;
+    return Math.abs(relativeSize/expectedSize-1)<=.12&&Math.abs(relativeCenter-expectedCenter)<=expectedSize*.12;
+  };
+  if(source.gorselFileId===image.id&&source.selectedPage===placement.page&&box&&
+    aligned(box.x,box.w,source.rasterWidth,current.x,current.w,placement.rasterWidth)&&
+    aligned(box.y,box.h,source.rasterHeight,current.y,current.h,placement.rasterHeight))return;
+  fail(`Uygulama ${app.id}: Ayrıştırılan desen otomatik ölçü kutusuyla eşleşmedi. Önizlemeyi kontrol edip fiziksel ölçüyü girin.`,409);
+}
+
+function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map()) {
   assertMeasurements(db,v);
   const order=db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id);
   const preview = file => file && /\.(png|jpe?g)$/i.test(file.path) ? readFile(dataDir,file) : undefined;
@@ -405,7 +490,7 @@ function formOrder(db,dataDir,v,sourceByApp) {
         const source=provenance(app);
         const image=Object.values(images).find(image=>image.fileId===source.gorselFileId);
         applications.push({type:app.kind,position:app.position,width_mm:app.width_mm,height_mm:app.height_mm,lineIds:[lineId],
-          preview:preview(design),placement:formPlacement(app,source,image,design)});
+          preview:preview(design)||extractedByApp.get(app.id),placement:formPlacement(app,source,image,design)});
       }
       const sizes=JSON.parse(l.sizes_json);
       if (Object.keys(sizes).length && Object.values(sizes).reduce((a,b)=>a+b,0)!==l.quantity) fail(`Satır ${l.id}: PDF için adetlere eşit beden dağılımı gerekli`,409);
@@ -478,21 +563,26 @@ function manuallyMeasured(app) {
 }
 const POSITION_LABELS={gogus:'Göğüs',sol_gogus:'Sol göğüs',sag_gogus:'Sağ göğüs',kol:'Kol',sol_kol:'Sol kol',sag_kol:'Sağ kol',sirt:'Sırt',ense:'Ense',kapusan:'Kapüşon',kapuson:'Kapüşon'};
 const SLEEVES=['kol','sol_kol','sag_kol'];
-// Returns the measurement inputs, or {gap} with the concrete reason why the application cannot be measured yet.
-function autoInputs(db,v,line,app) {
+function productImageFor(v,line,app) {
   const view=viewForPosition(app.position),label=POSITION_LABELS[app.position] || app.position;
   const sleeve=SLEEVES.includes(app.position);
   const images=v.files.filter(f=>f.kind==='urun_gorsel' && f.line_id===line.id && (sleeve ? ['kol','on','arka'].includes(f.gorunum) : view==='teyit' ? ['on','arka'].includes(f.gorunum) : f.gorunum===view));
   // A replacement upload supersedes the previous immutable file in this view.
   const image=sleeve ? images.filter(f=>f.gorunum==='kol').at(-1)||images.filter(f=>f.gorunum==='on').at(-1)||images.at(-1) : images.at(-1);
+  if(!image)return {gap:sleeve ? `${label} görünümü için ürün görseli yok: kol, ön veya arka görsel yüklenmedi.`
+    : view==='teyit' ? `${label} konumu için ön veya arka ürün görseli yok.` : `${view==='on'?'Ön':'Arka'} görünüm için ürün görseli yok (${label} konumu ${view==='on'?'ön':'arka'} görselde ölçülür).`};
+  return {image,view};
+}
+// Returns the measurement inputs, or {gap} with the concrete reason why the application cannot be measured yet.
+function autoInputs(db,v,line,app) {
+  const {image,view,gap}=productImageFor(v,line,app);
   const linked=db.prepare('SELECT file_id FROM document_application_sources WHERE application_id=?').get(app.id)?.file_id;
   // Applications registered before G24 kept their design only in the panel's provenance.
   const recorded=linked==null ? Number(provenance(app).desenDosyaId) : null;
   const design=v.files.find(f=>f.id===(linked ?? recorded) && f.kind==='desen_kaynak');
   const meta=design && db.prepare('SELECT line_id FROM document_file_meta WHERE file_id=?').get(design.id);
   if(meta?.line_id && meta.line_id!==line.id)return {gap:'Desen dosyası başka bir ürün satırına ait; bu satırın desenini bağlayın.'};
-  if(!image)return {gap:sleeve ? `${label} görünümü için ürün görseli yok: kol, ön veya arka görsel yüklenmedi.`
-    : view==='teyit' ? `${label} konumu için ön veya arka ürün görseli yok.` : `${view==='on'?'Ön':'Arka'} görünüm için ürün görseli yok (${label} konumu ${view==='on'?'ön':'arka'} görselde ölçülür).`};
+  if(gap)return {gap};
   const {candidates,flat}=flats.selection(db,line,view==='teyit'?image.gorunum:view,flats.list(db));
   const flatNote=!flat && candidates.length>1 ? 'Bu ürün için birden çok kalıp var; kalıbı seçin' : null;
   return {image,design,flat,product:line.product_key,position:app.position,...(flatNote?{flatNote}:{}),...(design && linked==null?{linkDesign:true}:{})};
@@ -649,7 +739,7 @@ async function generateInChild(input,signal,{timeoutMs=120000}={}) {
     const source=await shrink(input.input,800);
     const qualitySource=await shrink(source.qualitySource,800);
     input={...input,input:{...source,...(qualitySource?{qualitySource}:{})}};
-  } else if(input.type==='autoMeasure') {
+  } else if(['autoMeasure','extractArtwork'].includes(input.type)) {
     const image=await shrink(input.input.image,1000),design=await shrink(input.input.design,1000);
     input={...input,input:{...input.input,image,design}};
   }
@@ -694,7 +784,8 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
   assertUser(db,user.id);
   const token=crypto.randomUUID();
   const start=tx(db,()=> {
-    const v=draft(db,versionId); assertMeasurements(db,v);
+    const v=draft(db,versionId);
+    try {assertMeasurements(db,v);} catch(error) {return {v,measurementError:error};}
     const state=db.prepare('SELECT * FROM document_preparations WHERE version_id=?').get(versionId);
     if (state?.token && Date.now()-state.started_at<PREPARE_LOCK_MS) fail('Sürüm zaten hazırlanıyor',409);
     if (state?.ready && !regenerate) { assertFresh(db,v); return {existing:v.files}; }
@@ -702,18 +793,37 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
       ON CONFLICT(version_id) DO UPDATE SET token=excluded.token,started_at=excluded.started_at`).run(versionId,token,Date.now());
     return {v,fingerprint:stableSnapshot(v),sourceFingerprint:inputFingerprint(db,v)};
   });
+  if(start.measurementError) {
+    ensureExtractedRecords(db,dataDir,start.v,user);
+    throw start.measurementError;
+  }
   if (start.existing) return start.existing;
   const written=[];
   try {
     const {v}=start;
     const generated=await renderQueue(async signal=> {
-      const sourceByApp=new Map(), generated=[];
-      for (const a of v.lines.flatMap(l=>l.applications)) sourceByApp.set(a.id,sourceFor(db,v,a));
+      const sourceByApp=new Map(), extractedByApp=new Map(), generated=[];
+      const applications=v.lines.flatMap(line=>line.applications.map(app=>({line,app})));
       for (const source of v.files.filter(f=>SOURCE_KINDS.includes(f.kind)))
-        if (!sourceByApp.size) fail(`Desen ${source.id}: ölçülü uygulama bağlantısı gerekli`,409);
-      for (const a of v.lines.flatMap(l=>l.applications)) {
-        const targetMm={w:a.width_mm,h:a.height_mm},source=sourceByApp.get(a.id),prev=readyPreview(db,dataDir,v,source);
-        const original=await vectorInput(dataDir,source),raster=['image/png','image/jpeg','image/jpg'].includes(original.mime);
+        if (!applications.length) fail(`Desen ${source.id}: ölçülü uygulama bağlantısı gerekli`,409);
+      for (const {line,app:a} of applications) {
+        const targetMm={w:a.width_mm,h:a.height_mm},input=artworkFor(db,v,line,a);
+        let original,prev;
+        if(input.source) {
+          sourceByApp.set(a.id,input.source);
+          original=await vectorInput(dataDir,input.source);
+          prev=readyPreview(db,dataDir,v,input.source);
+        } else {
+          const row=await extractPreview(db,dataDir,v,line,a,input,user,signal,true);
+          if(!row.artwork)fail(`Uygulama ${a.id}: ${row.message}`,409);
+          const report=JSON.parse(row.report_json);
+          assertExtractedMeasurement(a,input.image,report.placement);
+          original={buffer:row.artwork,mime:'image/png'};
+          extractedByApp.set(a.id,row.artwork);
+          const file=db.prepare('SELECT * FROM files WHERE id=? AND version_id=? AND kind=?').get(row.preview_file_id,v.id,PREVIEW);
+          if(file)prev={buffer:readFile(dataDir,file),report};
+        }
+        const raster=['image/png','image/jpeg','image/jpg'].includes(original.mime);
         const cached=prev && (!raster || (Number.isFinite(prev.report.rasterQuality?.pathCount) && Number.isFinite(prev.report.rasterQuality?.nodeCount)));
         // Legacy previews without complexity metrics are retraced from the original raster.
         // Keep cached vector paths; final raster quality is measured against the original artwork.
@@ -723,9 +833,9 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
           : {...original,targetMm,applicationType:a.kind}},signal);
         const report=prev && !raster && !original.manualVector ? {...result.report,quality:prev.report.quality==='teyit' || result.report.aspectRatioError>0.01 ? 'teyit' : 'iyi',
           reasons:[...new Set([...(prev.report.reasons||[]),...(result.report.aspectRatioError>0.01 ? ['oran_bozuldu'] : [])])]} : result.report;
-        generated.push({kind:'desen_vektor',buffer:result.pdf,meta:{applicationId:a.id},report});
+        generated.push({kind:'desen_vektor',buffer:result.pdf,meta:{applicationId:a.id,...(!input.source?{lineId:line.id}:{})},report});
       }
-      const model=formOrder(db,dataDir,v,sourceByApp);
+      const model=formOrder(db,dataDir,v,sourceByApp,extractedByApp);
       generated.push(...await generateInChild({type:'forms',model},signal));
       return generated;
     });
@@ -744,6 +854,8 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
         db.prepare("UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='vektor_kalite' AND ref_table='files' AND ref_id=? AND status='acik'").run(user.id,f.id);
         db.prepare('DELETE FROM files WHERE id=?').run(f.id);
       }
+      for(const line of current.lines)for(const app of line.applications)
+        if(artworkFor(db,current,line,app).source)retireExtractedPreview(db,app.id,user);
       // Preview confirmations are superseded by the confirmation on the generated vector.
       db.prepare(`UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='vektor_kalite' AND status='acik' AND ref_table='files'
         AND ref_id IN (SELECT id FROM files WHERE version_id=? AND kind=?)`).run(user.id,versionId,PREVIEW);
@@ -798,6 +910,23 @@ function queuePreview(db,dataDir,file,user) {
   pending.add(task);
   return task;
 }
+function ensureExtractedRecords(db,dataDir,v,user) {
+  for(const line of v.lines) for(const app of line.applications) {
+    const input=artworkFor(db,v,line,app);
+    if(input.source||input.gap) {
+      if(db.prepare('SELECT 1 FROM document_extracted_previews WHERE application_id=?').get(app.id))
+        tx(db,()=>retireExtractedPreview(db,app.id,user));
+      continue;
+    }
+    if(extractedRecord(db,app.id,input))continue;
+    const workKey=`extract:${app.id}:${input.key}`;
+    if(previewing(db).has(workKey))continue;
+    previewing(db).add(workKey);
+    const task=renderQueue(signal=>extractPreview(db,dataDir,v,line,app,input,user,signal))
+      .catch(()=>{}).finally(()=>{pending.delete(task);previewing(db).delete(workKey);});
+    pending.add(task);
+  }
+}
 function ensureVectorRecords(db,dataDir,versionId,user) {
   const v=orders.snapshot(db,integer(versionId,'versionId',1));
   // A preview file can only be added to a draft; other versions report 'yok' in vectorStatus.
@@ -807,6 +936,7 @@ function ensureVectorRecords(db,dataDir,versionId,user) {
     const row=db.prepare('SELECT status FROM document_vector_previews WHERE source_file_id=?').get(file.id);
     if (!row || row.status==='hazirlaniyor') queuePreview(db,dataDir,file,user);
   }
+  ensureExtractedRecords(db,dataDir,v,user);
 }
 // Once an application has a size, a preview that waited for it ('beklemede') is judged
 // against that target. Runs in the background on the shared render queue.
@@ -867,6 +997,17 @@ function vectorStatus(db,versionId) {
   const draftVersion=orders.version(db,versionId).status==='taslak';
   for (const {id} of missing) rows.push({sourceFileId:id,previewFileId:null,status:'yok',quality:null,reasons:[],
     message:draftVersion ? 'Vektör kaydı yok; durum yeniden okununca hazırlanır.' : 'Sürüm taslak olmadığı için vektör önizlemesi hazırlanmadı.'});
+  const v=orders.snapshot(db,versionId);
+  for(const line of v.lines)for(const app of line.applications) {
+    const input=artworkFor(db,v,line,app);
+    if(input.source)continue;
+    const row=extractedRecord(db,app.id,input),report=row?.report_json ? JSON.parse(row.report_json) : {};
+    if(!row&&v.status!=='taslak')continue;
+    rows.push({extracted:true,applicationId:app.id,sourceFileId:input.image?.id??null,position:app.position,
+      previewFileId:row?.preview_file_id??null,status:row?.status??(input.gap?'teyit':'hazirlaniyor'),message:row?.message??input.gap??null,
+      quality:report.quality??null,reasons:report.reasons??[],...(report.placement?{placement:report.placement}:{}),
+      ...(report.sourceKind?{sourceKind:report.sourceKind}:{}),...(report.designBox?{designBox:report.designBox}:{})});
+  }
   return rows.sort((a,b)=>a.sourceFileId-b.sourceFileId);
 }
 const settled=()=>Promise.all([...pending]);
@@ -928,6 +1069,7 @@ if (require.main===module && process.argv[2]==='--vector-worker') {
         result={buffer:canvas.toBuffer('image/png')};
       }
       else if (job.type==='autoMeasure') result=await require('./autoMeasure').autoMeasure(job.input);
+      else if (job.type==='extractArtwork') result=await require('./autoMeasure').extractArtwork(job.input);
       else if (job.type==='vector') {
         const input=await normalizeVectorInput(job.input);
         result=await vectorModule().vectorize(input);

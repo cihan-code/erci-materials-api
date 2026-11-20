@@ -3,7 +3,7 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {createCanvas}=require('@napi-rs/canvas');
-const {autoMeasure,raster,silhouettes}=require('../agent/siparis/autoMeasure');
+const {autoMeasure,raster,silhouettes,extractArtwork}=require('../agent/siparis/autoMeasure');
 
 function touchingShirts({depths=[35,11],lowerBridge=false}={}) {
   const canvas=createCanvas(800,425),ctx=canvas.getContext('2d');
@@ -94,4 +94,18 @@ test('G40e PDF raster refinement preserves the same separated product and physic
   assert.equal(result.measure_source.selectedProductIndex,1);
   assert.equal(result.measure_source.rasterWidth,640);
   assert.ok(Math.abs(result.width_mm-192)<=5);
+});
+
+
+test('G40b/G40e extraction uses the same observed views and refuses two front variants',async()=>{
+  const image=touchingShirts({depths:[11,35]});
+  const front=await extractArtwork({image,position:'gogus',product:'tisort'});
+  const back=await extractArtwork({image,position:'sirt',product:'tisort'});
+  assert.ok(front.buffer,front.reason);
+  assert.ok(back.buffer,back.reason);
+  assert.equal(front.placement.designBoxPx.w,96);
+  assert.equal(back.placement.designBoxPx.w,80);
+  const ambiguous=await extractArtwork({image:touchingShirts({depths:[35,36]}),position:'sirt',product:'tisort'});
+  assert.equal(ambiguous.buffer,undefined);
+  assert.match(ambiguous.reason,/birden çok görünüm/);
 });

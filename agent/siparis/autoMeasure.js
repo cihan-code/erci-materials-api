@@ -484,9 +484,21 @@ function shirtViews(refs,cues) {
   cues[front].view='on';cues[back].view='arka';
 }
 
-function colorDesign(p,ref) {
+function productViewCues(p,refs,product) {
+  const cues=refs.map(ref=>ref.splitMethod?{hooded:false,view:'teyit',lining:0,cords:0}:hoodView(p,ref));
+  if(product==='tisort')shirtViews(refs,cues);
+  // A visible hood opening or cords identify the front of a hooded pair.
+  if(refs.length===2 && cues.filter(c=>c.view==='on').length===1) {
+    const other=cues.find(c=>c.view!=='on');
+    if(other.hooded)other.view='arka';
+  }
+  return cues;
+}
+
+function colorDesign(p,ref,tallBack=false) {
   const w=p.width,h=p.height,cx=ref.bodyCenterX??(ref.box.x+ref.box.w/2),ink=contrastInk(p,ref),clean=new Uint8Array(ink.length);
-  const top=ref.shoulderY+ref.bodyHeightPx*.14,bottom=ref.shoulderY+ref.bodyHeightPx*.62;
+  // A large back print can extend below the usual print band.
+  const top=ref.shoulderY+ref.bodyHeightPx*(tallBack?.11:.14),bottom=ref.shoulderY+ref.bodyHeightPx*(tallBack?.83:.62);
   for(const c of components(ink,w,h,2)) {
     const b=c.box,ratio=Math.max(b.w/b.h,b.h/b.w);
     // Reject piping, lining, cords and long seams before joining print letters.
@@ -783,6 +795,7 @@ async function autoMeasure({image,design,flat,product,position}) {
   if(viewForPosition(position)==='teyit')reasons.push('Ürün görünümü uygulama konumuyla eşleştirilemedi (geçerli görünüm sayısı 0).');
   try {
     const pages=await rasterPages(image,image.mime==='application/pdf'?320:MAX_EDGE),candidates=[],allViews=[];
+    const tallBack=position==='sirt'&&!design;
     let designs=[];
     if(design)try {designs=await rasterPages(design,1000,null,{transparent:true});}catch(e){source.designReadError=e.message;}
     const designContents=designs.map(p=>designContent(p,true));
@@ -792,13 +805,7 @@ async function autoMeasure({image,design,flat,product,position}) {
     source.pageCount=pages.length;source.designPageCount=designs.length;timings.raster=performance.now()-started;
     for(let i=0;i<pages.length;i++) {
       const refs=silhouettes(pages[i],product);
-      const cues=refs.map(ref=>ref.splitMethod?{hooded:false,view:'teyit',lining:0,cords:0}:hoodView(pages[i],ref));
-      if(product==='tisort')shirtViews(refs,cues);
-      // No ordering assumption: only a visible opening/cords identifies front.
-      // A second raised hood with no opening is the back of the same pair.
-      if(refs.length===2&&cues.filter(c=>c.view==='on').length===1) {
-        const other=cues.find(c=>c.view!=='on');if(other.hooded)other.view='arka';
-      }
+      const cues=productViewCues(pages[i],refs,product);
       for(let k=0;k<refs.length;k++) {
         const ref=refs[k],cue=cues[k],scale=scaleFor(ref,measurements,scalePair,pages[i]);
         allViews.push({page:i+1,index:k,view:cue.view,hooded:cue.hooded,viewEvidence:{lining:cue.lining,cords:cue.cords,...(cue.neckDepth!==undefined?{neckDepth:cue.neckDepth}:{})},maskMethod:ref.maskMethod,...(ref.splitMethod?{splitMethod:ref.splitMethod}:{}),productBoxPx:ref.box,shoulderY:ref.shoulderY,hemY:ref.hemY,hemWidthPx:ref.hemWidthPx,chestLinePx:ref.chestLine??null,bodyHeightPx:ref.bodyHeightPx,...scale});
@@ -811,7 +818,7 @@ async function autoMeasure({image,design,flat,product,position}) {
         // Also retain the color hypothesis: refinement may reject the template.
         // Unknown sheet products need the supplied design. An independently
         // identified front/back view keeps the established color fallback.
-        const match=(!designs.length||refs.length===1||cue.view!=='teyit')&&['gogus','sol_gogus','sag_gogus','sirt'].includes(position)?colorDesign(pages[i],ref):{box:null};
+        const match=(!designs.length||refs.length===1||cue.view!=='teyit')&&['gogus','sol_gogus','sag_gogus','sirt'].includes(position)?colorDesign(pages[i],ref,tallBack):{box:null};
         if(match.box)candidates.push({p:pages[i],ref,match,page:i+1,designPage:null,index:k});
       }
     }
@@ -841,7 +848,7 @@ async function autoMeasure({image,design,flat,product,position}) {
         return {...candidate,p,ref,match:{...candidate.match,box:scaled(candidate.match.box)}};
       }).filter(c=>c.ref);
     }
-    const refined=finalists.map(candidate=>({...candidate,match:candidate.designPage?matchDesign(candidate.p,designs[candidate.designPage-1],designContents[candidate.designPage-1],candidate.ref,true,candidate.match):colorDesign(candidate.p,candidate.ref)}));
+    const refined=finalists.map(candidate=>({...candidate,match:candidate.designPage?matchDesign(candidate.p,designs[candidate.designPage-1],designContents[candidate.designPage-1],candidate.ref,true,candidate.match):colorDesign(candidate.p,candidate.ref,tallBack)}));
     timings.refine=performance.now()-started-timings.raster-timings.scan;
     refined.sort((a,b)=>((!!b.designPage&&b.match.confidence>=.78?1:0)-(!!a.designPage&&a.match.confidence>=.78?1:0))||b.match.confidence-a.match.confidence);
     const chosen=refined[0];
@@ -915,4 +922,114 @@ async function autoMeasure({image,design,flat,product,position}) {
   source.timingsMs={...Object.fromEntries(Object.entries(timings).map(([k,v])=>[k,Math.round(v)])),total:Math.round(performance.now()-started)};
   return {width_mm:width,height_mm:height,measure_source:source,needs_confirmation:reasons.length>0,reasons,reason:reasons.join(' ')};
 }
-module.exports={autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette,silhouettes};
+// Artwork recovery uses the existing placement detector but never infers a physical scale.
+async function extractArtwork({image,position,product:productKey}) {
+  const view=viewForPosition(position);
+  const supported=['gogus','sol_gogus','sag_gogus','sirt'];
+  if(!supported.includes(position))return {reason:'Bu konumda üründen güvenilir desen ayrıştırılamadı; ayrı desen dosyası bağlayın.'};
+  if(image.gorunum&&image.gorunum!==view)return {reason:'Ürün görünümü bildirilen uygulama konumuyla eşleşmedi.'};
+  // An extra page detects overflow without decoding the rest of a large sheet.
+  const pageLimit=12, selectedPages=Array.from({length:pageLimit+1},(_,i)=>i+1);
+  const pages=await rasterPages(image,image.mime==='application/pdf'?640:1000,selectedPages), candidates=[];
+  if(pages.length>pageLimit)return {reason:`${pageLimit} sayfadan uzun üründen güvenle desen ayrılamıyor; tek ürün görünümü yükleyin.`};
+  let hasProduct=false, ambiguousView=false, wrongSide=false;
+  for(const [i,p] of pages.entries()) {
+    const refs=silhouettes(p,productKey),cues=productViewCues(p,refs,productKey);
+    for(const [index,ref] of refs.entries()) {
+      hasProduct=true;
+      const cue=cues[index];
+      if(cue.view!=='teyit'&&cue.view!==view)continue;
+      const match=colorDesign(p,ref,position==='sirt');
+      if(!match.box)continue;
+      if(refs.length>1&&cue.view==='teyit') {ambiguousView=true;continue;}
+      const {x,w}=match.box;
+      const offset=(x+w/2-ref.bodyCenterX)/ref.hemWidthPx;
+      if((position==='sol_gogus'&&offset<.05)||(position==='sag_gogus'&&offset>-.05)) {wrongSide=true;continue;}
+      candidates.push({p,ref,match,page:i+1});
+    }
+  }
+  if(ambiguousView||candidates.length>1||candidates[0]?.match.ambiguous)
+    return {reason:'Üründe birden çok görünüm veya desen adayı var; konumu teyit edin ya da ayrı desen bağlayın.'};
+  if(!candidates.length) return {reason:wrongSide ? 'Desen bildirilen göğüs tarafıyla eşleşmedi.' : hasProduct
+    ? 'Güvenilir desen adayı yok. Düşük kontrast, dikiş veya kesik desen olabilir.'
+    : 'Tam ürün maskesi bulunamadı; ürün veya desen kesilmiş olabilir.'};
+
+  const {p,ref,match,page}=candidates[0], b=match.box;
+  const {width:w,height:h,data}=p, mask=ref.mask;
+  const unsafe={reason:'Desen kenarı kumaş, gölge veya dikişten güvenle ayrılamadı; ayrı desen dosyası bağlayın.'};
+  const product=ref.box;
+  const sleeveOnly=x=> {
+    // A slight crop of the outer sleeve is independent of a complete torso
+    // print. Any border contact at torso height remains unsafe.
+    if(Math.abs(x-ref.bodyCenterX)<ref.hemWidthPx*.52)return false;
+    for(let y=Math.floor(ref.shoulderY+ref.bodyHeightPx*.42);y<product.y+product.h;y++)
+      if(mask[y*w+x])return false;
+    return true;
+  };
+  if(product.y<3||product.y+product.h>h-3||
+    (product.x<3&&!sleeveOnly(product.x))||(product.x+product.w>w-3&&!sleeveOnly(product.x+product.w-1)))
+    return {reason:'Ürün görüntü kenarında kesiliyor; desenin tamamı doğrulanamadı.'};
+  if(ref.symmetry<MIN_SYMMETRY||wrinkleFraction(p,ref,b)>.08) return unsafe;
+  if(b.w>ref.hemWidthPx*.90||b.h>ref.bodyHeightPx*(position==='sirt'?.70:.44)) return unsafe;
+  const pad=Math.max(4,Math.round(Math.min(b.w,b.h)*.14));
+  const x=Math.max(1,b.x-pad),y=Math.max(1,b.y-pad),right=Math.min(w-1,b.x+b.w+pad),bottom=Math.min(h-1,b.y+b.h+pad);
+  const cw=right-x,ch=bottom-y,ring=[];
+  for(let yy=y;yy<bottom;yy++)for(let xx=x;xx<right;xx++) {
+    const i=yy*w+xx;
+    if(!mask[i]||data[i*4+3]<250)return unsafe;
+    if(xx<x+2||yy<y+2||xx>=right-2||yy>=bottom-2)ring.push(i);
+  }
+  const fabric=dominant(p,ring);
+  const contrast=i=>Math.max(Math.abs(data[i*4]-fabric[0]),Math.abs(data[i*4+1]-fabric[1]),Math.abs(data[i*4+2]-fabric[2]));
+  if(ring.some(i=>contrast(i)>22)||ring.filter(i=>contrast(i)>9).length>ring.length*.07)return unsafe;
+  // The placement detector searches the usual print band. A second prominent
+  // mark elsewhere on the torso makes a source crop unsafe as well.
+  const outside=new Uint8Array(w*h), left=Math.max(2,Math.ceil(ref.bodyCenterX-ref.hemWidthPx*.47)),
+    end=Math.min(w-2,Math.floor(ref.bodyCenterX+ref.hemWidthPx*.47));
+  for(let yy=Math.max(2,Math.ceil(ref.shoulderY+ref.bodyHeightPx*.14));yy<Math.min(h-2,ref.hemY-ref.bodyHeightPx*.08);yy++)
+    for(let xx=left;xx<end;xx++) {
+      if(xx>=x&&xx<right&&yy>=y&&yy<bottom)continue;
+      const i=yy*w+xx;
+      if(mask[i]&&mask[i-2]&&mask[i+2]&&mask[i-2*w]&&mask[i+2*w]&&contrast(i)>75)outside[i]=1;
+    }
+  if(components(outside,w,h,Math.max(12,match.score*.10)).some(c=>c.box.w>=5&&c.box.h>=5))
+    return {reason:'Üründe birden çok desen adayı var; konumu teyit edin ya da ayrı desen bağlayın.'};
+  const ink=new Uint8Array(cw*ch);
+  for(let yy=0;yy<ch;yy++)for(let xx=0;xx<cw;xx++)ink[yy*cw+xx]=contrast((y+yy)*w+x+xx)>19?1:0;
+  const parts=components(ink,cw,ch), box=bounds(ink,cw,ch);
+  if(!box||box.w<8||box.h<8||box.x<2||box.y<2||box.x+box.w>cw-2||box.y+box.h>ch-2)return unsafe;
+  const area=parts.reduce((sum,c)=>sum+c.area,0);
+  if(area<box.w*box.h*.08||parts.some(c=>c.area>=8&&(c.box.w>c.box.h*10||c.box.h>c.box.w*10)))return unsafe;
+  const rowInk=new Uint16Array(box.h),colInk=new Uint16Array(box.w);
+  for(let yy=0;yy<box.h;yy++)for(let xx=0;xx<box.w;xx++)if(ink[(box.y+yy)*cw+box.x+xx]) {rowInk[yy]++;colInk[xx]++;}
+  const thinLimit=Math.max(2,Math.round(Math.min(box.w,box.h)*.07));
+  const hasThinEnd=counts=> {
+    const first=counts.findIndex(n=>n>thinLimit),last=counts.findLastIndex(n=>n>thinLimit);
+    return first<0||Math.max(first,counts.length-1-last)>Math.max(5,counts.length*.17);
+  };
+  if(hasThinEnd(rowInk)||hasThinEnd(colInk))return unsafe;
+  // A real print should have a repeatable boundary. Small changes to the
+  // fabric threshold must not make a substantial part of the artwork vanish.
+  let weak=0,opaque=0,sameColor=0;
+  const first=parts[0].pixels[0],colorOffset=((y+Math.floor(first/cw))*w+x+first%cw)*4;
+  for(const part of parts)for(const i of part.pixels) {
+    const source=(y+Math.floor(i/cw))*w+x+i%cw,d=contrast(source),offset=source*4;
+    if(d<30)weak++;
+    if(d>=65)opaque++;
+    if(Math.abs(data[offset]-data[colorOffset])<=9&&Math.abs(data[offset+1]-data[colorOffset+1])<=9&&Math.abs(data[offset+2]-data[colorOffset+2])<=9)sameColor++;
+  }
+  if(weak>area*.14||opaque<area*.28||(area>box.w*box.h*.94&&sameColor>area*.94))return unsafe;
+  const canvas=canvasLib.createCanvas(box.w,box.h),ctx=canvas.getContext('2d');
+  try {
+    const pixels=ctx.createImageData(box.w,box.h);
+    for(let yy=0;yy<box.h;yy++)for(let xx=0;xx<box.w;xx++) {
+      const i=(box.y+yy)*cw+box.x+xx;
+      if(!ink[i])continue;
+      const src=((y+box.y+yy)*w+x+box.x+xx)*4,dst=(yy*box.w+xx)*4;
+      pixels.data.set(data.subarray(src,src+4),dst);
+    }
+    ctx.putImageData(pixels,0,0);
+    return {buffer:canvas.toBuffer('image/png'),placement:{page,view,rasterWidth:w,rasterHeight:h,designBoxPx:{...box,x:x+box.x,y:y+box.y}}};
+  } finally {canvas.width=canvas.height=0;}
+}
+module.exports={autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette,silhouettes,extractArtwork};
