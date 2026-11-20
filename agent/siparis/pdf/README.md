@@ -14,6 +14,7 @@ const order = {
   date: '19.11.2026',          // Hazırlanma tarihi; gösterim metni
   deliveryDate: '30.11.2026',  // Teslim tarihi; gösterim metni
   version: 2,                // Pozitif tam sayı
+  omitQuantities: true,      // Yerel adetsiz örnek için isteğe bağlı
   description: ['Dikişler numuneye uygun olacak.'],
   lines: [{
     id: 'satir-1',            // Benzersiz metin
@@ -25,7 +26,7 @@ const order = {
   }],
   applications: [{
     type: 'baski',            // 'baski' | 'nakis'
-    position: 'sirt',         // 'gogus' | 'sirt' | 'kol' | 'ense' | 'kapuson'
+    position: 'sirt',         // Göğüs, sırt, kol, ense ve kapüşon konumları
     width_mm: 280,            // Negatif olmayan tam sayı; onaylanmış ölçü
     height_mm: 120,
     preview: desenPngBuffer,
@@ -49,6 +50,10 @@ const printPdf = await renderPrintForm(order, options); // Buffer veya null
 Bedenler `XS, S, M, L, XL, XXL, 3XL, 4XL`; eksik beden 0 sayılır. Adetler negatif olmayan güvenli tam sayılardır. Bilinmeyen beden, kesirli adet, geçersiz uygulama, olmayan satır kimliği ve eksik ölçü reddedilir. `applications: []` ve `description: []` geçerlidir. Ürün ve desen görselleri isteğe bağlı PNG/JPEG Buffer'lardır; yoksa açık bir yer tutucu görünür. Hatalı görsel sessizce atlanmaz.
 
 Ölçüler bütün formlarda aynı biçimleyiciyle yalnız `width_mm` / `height_mm` alanlarından gelir: `280 / 10 × 120 / 10` → `28 × 12 cm`. Kesirli cm Türkçe virgülle yazılır (`7,5 × 4 cm`). Görselin sayfadaki boyutu fiziksel uygulama ölçüsü değildir. Konum hücresinde birden fazla uygulama varsa her ölçü ayrı satırda görünür. `lineIds` renk/ürün varyantına özel desenleri ayırır.
+
+Belge servisi ürün görselinin dosyası, görünümü, sayfası ve ölçüm kutusu eşleştiğinde cetvel çizgilerini ürün üzerinde gösterir. Ölçüler tablolarda ve atölye detaylarında da okunabilir. Yerleşimi kayıtlı olmayan elle ölçüler tablo ve detay sayfalarında yer alır.
+
+Yerel bir sipariş anlık görüntüsünden adetsiz örnek üretmek için `documents.formOrder(db, dataDir, snapshot, sourceByApp)` çağırın. `sourceByApp`, uygulama kimliğini ilgili desen dosyası kaydına eşleyen `Map` nesnesidir. Modeli stok veya sipariş kaydına yazmadan `await renderProductionForm({ ...model, omitQuantities: true })` biçiminde kullanabilirsiniz. Aynı seçenek onay, baskı ve nakış formlarında adet ve beden dağılımını gizler.
 
 Üretim formu her sipariş satırı için bir dikey sayfa açar; satır beden toplamını ve bütün sipariş toplamını gösterir. Onay formu renk bazında ayrı yatay sayfalar oluşturur; aynı renkteki en fazla iki model aynı sayfada yer alır, renk toplamı bedenlerden hesaplanır. Son sayfa şartlardır. Baskı ve nakış ayrı belgelerdir: ilk sayfa açıklama ve en fazla iki satırın ön/arka görsellerini; ikinci sayfa yalnız ilgili türün desenlerini ve ölçülerini içerir. Daha fazla ürün, desen veya uzun açıklama ek devam sayfaları oluşturabilir. Bütün sayfalarda sipariş kodu ve sürüm alt bilgisi bulunur. Sayfa ölçüleri referanslardaki gibi dikey `810 × 1440`, onayda `1440 × 810` PDF puanıdır.
 

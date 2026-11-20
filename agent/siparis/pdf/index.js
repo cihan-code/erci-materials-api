@@ -8,6 +8,8 @@ const PORTRAIT = [810, 1440];
 const LANDSCAPE = [1440, 810];
 const SIZES = ['XS', 'S', 'M', 'L', 'XL', 'XXL', '3XL', '4XL'];
 const POSITIONS = { gogus: 'Göğüs', sirt: 'Sırt', kol: 'Kol', ense: 'Ense', kapuson: 'Kapüşon' };
+const POSITION_ALIASES = { sol_gogus: 'gogus', sag_gogus: 'gogus', sol_kol: 'kol', sag_kol: 'kol', kapusan: 'kapuson' };
+const POSITION_LABELS = { ...POSITIONS, kapusan: POSITIONS.kapuson, sol_gogus: 'Sol göğüs', sag_gogus: 'Sağ göğüs', sol_kol: 'Sol kol', sag_kol: 'Sağ kol' };
 const TYPES = { baski: 'Baskı', nakis: 'Nakış' };
 const FONT = path.join(__dirname, 'fonts');
 const TERMS_TITLE = 'SİPARİŞ ONAY FORMU – ŞARTLAR VE KOŞULLAR';
@@ -29,11 +31,13 @@ function normalize(order) {
   if (!Number.isSafeInteger(order.version) || order.version < 1) throw new RangeError('version pozitif tam sayı olmalıdır.');
   if (!Array.isArray(order.description) || order.description.some(t => typeof t !== 'string')) throw new TypeError('description metin dizisi olmalıdır.');
   const ids = new Set();
+  const omitQuantities = order.omitQuantities === true;
   const lines = order.lines.map(line => {
     requiredText(line.id, 'line.id');
     if (ids.has(line.id)) throw new TypeError('Satır kimlikleri benzersiz olmalıdır.');
     ids.add(line.id);
     for (const field of ['product', 'color', 'fabric']) requiredText(line[field], `line.${field}`);
+    if (omitQuantities) return { ...line, sizes: {}, quantity: 0, distributed: false, images: line.images || {} };
     if (line.sizes != null && (typeof line.sizes !== 'object' || Array.isArray(line.sizes))) throw new TypeError('line.sizes nesne olmalıdır.');
     const sizes = Object.fromEntries(SIZES.map(size => [size, 0]));
     for (const [size, qty] of Object.entries(line.sizes || {})) {
@@ -49,7 +53,7 @@ function normalize(order) {
   });
   if (!Array.isArray(order.applications)) throw new TypeError('applications dizi olmalıdır.');
   for (const app of order.applications) {
-    if (!Object.hasOwn(TYPES, app.type) || !Object.hasOwn(POSITIONS, app.position)) throw new TypeError('Geçersiz uygulama türü veya konumu.');
+    if (!Object.hasOwn(TYPES, app.type) || !Object.hasOwn(POSITION_LABELS, app.position)) throw new TypeError('Geçersiz uygulama türü veya konumu.');
     for (const field of ['width_mm', 'height_mm']) {
       if (!Number.isSafeInteger(app[field]) || app[field] < 0) throw new RangeError(`${field} negatif olmayan tam sayı olmalıdır; eksik ölçüyü önce teyit edin.`);
     }
@@ -58,7 +62,7 @@ function normalize(order) {
     }
   }
   total(lines); // Reject unsafe totals before creating any document.
-  return { ...order, lines };
+  return { ...order, lines, omitQuantities };
 }
 
 function total(lines, size) {
@@ -73,7 +77,8 @@ function appsFor(order, lines, type) {
 }
 
 // Every form uses this formatter and the stored millimetres, never image geometry.
-function dimensions(app) { return `${String(app.width_mm / 10).replace('.', ',')} × ${String(app.height_mm / 10).replace('.', ',')} cm`; }
+function cm(mm) { return String(mm / 10).replace('.', ','); }
+function dimensions(app) { return `${cm(app.width_mm)} × ${cm(app.height_mm)} cm`; }
 
 function text(doc, value, x, y, width, size = 18, bold = false, extra = {}) {
   doc.font(bold ? 'Bold' : 'Regular').fontSize(size).fillColor(extra.color || '#111111');
@@ -113,7 +118,8 @@ function logo(doc, brand, x, y, w, h) {
   image(doc, brand.logo || defaultLogo, x, y, w, h);
 }
 
-function build(order, options, draw) {
+async function build(order, options, draw) {
+  await resolveProductImages(order);
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ autoFirstPage: false, margin: 0, bufferPages: true,
       info: { Title: `${order.orderNo} · ${order.name}`, Author: 'Sipariş Formları' } });
@@ -227,10 +233,94 @@ function bulletList(doc, items, y, { size = PORTRAIT, x = 61, fontSize = 18, bot
   return y;
 }
 
-function productPair(doc, line, y, { x = 40, width = 730, height = 380, labelSize = 22, bold = true } = {}) {
+function validPlacement(placement) {
+  const { page, rasterWidth, rasterHeight, box } = placement;
+  return [page, rasterWidth, rasterHeight].every(n => Number.isSafeInteger(n) && n > 0) &&
+    box && [box.x, box.y, box.w, box.h].every(Number.isFinite) && box.x >= 0 && box.y >= 0 &&
+    box.w > 0 && box.h > 0 && box.x + box.w <= rasterWidth && box.y + box.h <= rasterHeight;
+}
+
+async function resolveProductImages(order) {
+  for (const line of order.lines) {
+    const images = { ...line.images };
+    for (const [key, view] of [['front', 'on'], ['back', 'arka']]) {
+      const source = images[key];
+      if (source == null || Buffer.isBuffer(source)) continue;
+      if (!Buffer.isBuffer(source.buffer)) throw new TypeError('Ürün görseli Buffer olmalıdır.');
+      const placements = order.applications.filter(({ placement, lineIds, width_mm, height_mm }) =>
+        placement && width_mm > 0 && height_mm > 0 && lineIds?.length === 1 && lineIds[0] === line.id &&
+        source.fileId != null && placement.fileId === source.fileId && placement.view === view && source.view === view && validPlacement(placement));
+      if (source.mime !== 'application/pdf') {
+        images[key] = { buffer: source.buffer, placements: placements.filter(app => app.placement.page === 1) };
+        continue;
+      }
+      const pages = new Set(placements.map(app => app.placement.page));
+      const selected = pages.size === 1 ? [...pages][0] : null;
+      try {
+        const { rasterPages } = require('../autoMeasure');
+        const { PNG } = require('pngjs');
+        const [raster] = await rasterPages(source, 1000, [selected ?? 1]);
+        images[key] = raster ? { buffer: PNG.sync.write(raster), placements: selected ? placements : [] } : undefined;
+      } catch {
+        // An unavailable optional preview leaves the listed dimensions readable.
+        images[key] = undefined;
+      }
+    }
+    line.images = images;
+  }
+}
+
+const DIMENSION_BLUE = '#94dcff';
+
+function dimensionMark(doc, x0, y0, x1, y1, label, bounds, vertical) {
+  // A dark outline keeps the pale blue line visible on both light and dark products.
+  doc.save().lineCap('round');
+  const ticks = vertical ? [3, 0] : [0, 3];
+  for (const [weight, color] of [[3.2, '#244358'], [1.5, DIMENSION_BLUE]]) {
+    doc.lineWidth(weight).strokeColor(color)
+      .moveTo(x0, y0).lineTo(x1, y1)
+      .moveTo(x0 - ticks[0], y0 - ticks[1]).lineTo(x0 + ticks[0], y0 + ticks[1])
+      .moveTo(x1 - ticks[0], y1 - ticks[1]).lineTo(x1 + ticks[0], y1 + ticks[1]).stroke();
+  }
+  const fontSize = 11, labelHeight = 16;
+  const labelWidth = doc.font('Bold').fontSize(fontSize).widthOfString(label) + 10;
+  const labelX = Math.max(bounds.x, Math.min(bounds.right - labelWidth, vertical ? x0 + 5 : (x0 + x1 - labelWidth) / 2));
+  const desiredY = vertical ? (y0 + y1 - labelHeight) / 2 : y0 - labelHeight - 4;
+  const labelY = Math.max(bounds.y, Math.min(bounds.bottom - labelHeight, desiredY));
+  doc.rect(labelX, labelY, labelWidth, labelHeight).fill(DIMENSION_BLUE);
+  text(doc, label, labelX, labelY + 1, labelWidth, fontSize, true, { color: '#183448', align: 'center', lineBreak: false });
+  doc.restore();
+}
+
+function productImage(doc, source, apps, x, y, w, h) {
+  if (source == null || Buffer.isBuffer(source)) return image(doc, source, x, y, w, h);
+  const { buffer, placements } = source;
+  const opened = doc.openImage(buffer);
+  doc.image(opened, x, y, { fit: [w, h], align: 'center', valign: 'center' });
+  if (opened.orientation && opened.orientation !== 1) return;
+  const scale = Math.min(w / opened.width, h / opened.height);
+  const width = opened.width * scale, height = opened.height * scale;
+  const left = x + (w - width) / 2, top = y + (h - height) / 2;
+  const bounds = { x, y, right: x + w, bottom: y + h };
+  for (const app of placements) {
+    if (!apps.includes(app)) continue;
+    const { box, rasterWidth, rasterHeight, swapAxes } = app.placement;
+    // The measured raster can round either side by one pixel during downsampling.
+    if (Math.abs(rasterWidth * opened.height - rasterHeight * opened.width) > opened.width + opened.height) continue;
+    const sx = width / rasterWidth, sy = height / rasterHeight;
+    const x0 = left + box.x * sx, x1 = x0 + box.w * sx;
+    const y0 = top + box.y * sy, y1 = y0 + box.h * sy;
+    const widthY = y0 - y >= 24 ? y0 - 6 : y0 + 6;
+    const heightX = x1 + 6 <= bounds.right - 6 ? x1 + 6 : x1 - 6;
+    dimensionMark(doc, x0, widthY, x1, widthY, `${cm(swapAxes ? app.height_mm : app.width_mm)} cm`, bounds, false);
+    dimensionMark(doc, heightX, y0, heightX, y1, `${cm(swapAxes ? app.width_mm : app.height_mm)} cm`, bounds, true);
+  }
+}
+
+function productPair(doc, line, apps, y, { x = 40, width = 730, height = 380, labelSize = 22, bold = true } = {}) {
   const half = width / 2;
-  image(doc, line.images.front, x, y, half - 12, height);
-  image(doc, line.images.back, x + half + 12, y, half - 12, height);
+  productImage(doc, line.images.front, apps, x, y, half - 12, height);
+  productImage(doc, line.images.back, apps, x + half + 12, y, half - 12, height);
   text(doc, 'ÖN', x, y + height + 10, half, labelSize, bold, { align: 'center' });
   text(doc, 'ARKA', x + half, y + height + 10, half, labelSize, bold, { align: 'center' });
 }
@@ -248,7 +338,8 @@ function applicationTable(doc, apps, y) {
   const x = 82, labelWidth = 188, cellWidth = 92, headHeight = 36;
   const positions = Object.keys(POSITIONS);
   const cells = ['baski', 'nakis'].map(type => positions.map(position =>
-    apps.filter(app => app.type === type && app.position === position).map(dimensions)));
+    apps.filter(app => app.type === type && (POSITION_ALIASES[app.position] || app.position) === position).map(app =>
+      ['sol_gogus', 'sag_gogus', 'sol_kol', 'sag_kol'].includes(app.position) ? `${POSITION_LABELS[app.position]} · ${dimensions(app)}` : dimensions(app))));
   const heights = cells.map(row => Math.max(36, ...row.map(list => list.length
     ? 40 + doc.font('Regular').fontSize(9).heightOfString(list.join('\n'), { width: cellWidth - 6, lineGap: 2 }) : 0)));
   const height = headHeight + heights[0] + heights[1];
@@ -337,10 +428,10 @@ async function renderProductionForm(input, options = {}) {
       if (imageHeight < 220) { page(doc); y = 60; imageHeight = 411; }
       text(doc, 'Ürün Görseli:', 28, y, 700, 24, true);
       const both = line.images.front != null && line.images.back != null;
-      if (both) productPair(doc, line, y + 34, { x: 82, width: 648, height: imageHeight - 30, labelSize: 14 });
-      else image(doc, line.images.front ?? line.images.back, 182, y + 34, 452, imageHeight);
+      if (both) productPair(doc, line, appsList, y + 34, { x: 82, width: 648, height: imageHeight - 30, labelSize: 14 });
+      else productImage(doc, line.images.front ?? line.images.back, appsList, 182, y + 34, 452, imageHeight);
       y = applicationTable(doc, appsList, y + 34 + imageHeight + 13) ;
-      sizeTable(doc, [line], y, total(order.lines));
+      if (!order.omitQuantities) sizeTable(doc, [line], y, total(order.lines));
     }
   });
 }
@@ -401,16 +492,16 @@ async function renderApprovalForm(input, options = {}) {
         band(doc, 'Ürün Rengi', color, -30, 126, 570, '#8f8f99', 206);
         band(doc, 'Sipariş Kodu', order.orderNo, 750, 81, 720, '#454655', 941);
         band(doc, 'Tarih', order.date, 750, 126, 720, '#8f8f99', 941);
-        wholeBand(doc, `Bedenler ve Adetler : ${sizeSummary(lines)}   Toplam:${total(lines)}`, 171, '#454655');
+        if (!order.omitQuantities) wholeBand(doc, `Bedenler ve Adetler : ${sizeSummary(lines)}   Toplam:${total(lines)}`, 171, '#454655');
+        const apps = appsFor(order, batch);
         batch.forEach((line, i) => {
           const y = 250 + i * 270;
           const labelHeight = batch.length > 1 ? fittedText(doc, line.product, 10, y, 760, 30, 16, true, { align: 'center' }) + 5 : 0;
           const height = batch.length > 1 ? 190 : 340;
-          productPair(doc, line, y + labelHeight + (batch.length > 1 ? 0 : 84), { x: 10, width: 760, height, labelSize: batch.length > 1 ? 18 : 28, bold: false });
+          productPair(doc, line, apps, y + labelHeight + (batch.length > 1 ? 0 : 84), { x: 10, width: 760, height, labelSize: batch.length > 1 ? 18 : 28, bold: false });
         });
         logo(doc, brand, 940, 335, 320, 290);
-        const apps = appsFor(order, batch);
-        paragraphs(doc, apps.map(app => `${TYPES[app.type]} · ${POSITIONS[app.position]}: ${dimensions(app)}`), 650,
+        paragraphs(doc, apps.map(app => `${TYPES[app.type]} · ${POSITION_LABELS[app.position]}: ${dimensions(app)}`), 650,
           { size: LANDSCAPE, x: 900, width: 500, fontSize: 18, bottom: 750 });
       }
     }
@@ -439,7 +530,8 @@ function renderWorkshop(input, options, type) {
     page(doc);
     title(doc, `${TYPES[type]} Formu`, `Ürün: ${[...new Set(lines.map(line => line.product))].join(', ')}`);
     text(doc, 'Ürün Açıklaması:', 54, 270, 700, 24, true);
-    let visualY = bulletList(doc, [`Toplam adet: ${total(lines)}`, ...(sizeColumns(lines).length ? [`Bedenler ve Adetler: ${sizeSummary(lines)}`] : []), ...order.description], 304) + 15;
+    const quantities = order.omitQuantities ? [] : [`Toplam adet: ${total(lines)}`, ...(sizeColumns(lines).length ? [`Bedenler ve Adetler: ${sizeSummary(lines)}`] : [])];
+    let visualY = bulletList(doc, [...quantities, ...order.description], 304) + 15;
     if (visualY + 400 > 1210) { page(doc); visualY = 60; }
     text(doc, 'Ürün Görseli:', 28, visualY, 720, 24, true);
     visualY += 50;
@@ -449,9 +541,10 @@ function renderWorkshop(input, options, type) {
       for (let r = 0; r < count; r++, i++) {
         const line = lines[i];
         const y = visualY + r * rowHeight;
-        const labelHeight = fittedText(doc, `${line.product} · ${line.color} · ${line.fabric} · Adet: ${total([line])}`, 45, y, 720, 60, 18, true, { align: 'center' });
+        const label = `${line.product} · ${line.color} · ${line.fabric}${order.omitQuantities ? '' : ` · Adet: ${total([line])}`}`;
+        const labelHeight = fittedText(doc, label, 45, y, 720, 60, 18, true, { align: 'center' });
         const imageHeight = Math.max(100, Math.min(350, rowHeight - labelHeight - 65));
-        productPair(doc, line, y + labelHeight + 15, { height: imageHeight });
+        productPair(doc, line, apps, y + labelHeight + 15, { height: imageHeight });
       }
       logo(doc, brand, 310, 1250, 190, 100);
       if (i < lines.length) { page(doc); visualY = 60; }
@@ -461,7 +554,7 @@ function renderWorkshop(input, options, type) {
     page(doc);
     for (const app of apps) {
       if (y + 395 > 1350) { page(doc); y = 60; }
-      text(doc, POSITIONS[app.position].toLocaleUpperCase('tr-TR'), 45, y, 720, 28, true, { align: 'center' });
+      text(doc, POSITION_LABELS[app.position].toLocaleUpperCase('tr-TR'), 45, y, 720, 28, true, { align: 'center' });
       if (app.lineIds) text(doc, lines.filter(line => app.lineIds.includes(line.id)).map(line => `${line.product} / ${line.color}`).join(', '), 45, y + 42, 720, 16, false, { align: 'center' });
       image(doc, app.preview, 175, y + 85, 460, 230, 'Desen önizlemesi sağlanmadı');
       text(doc, dimensions(app), 45, y + 335, 720, 26, true, { align: 'center' });

@@ -2,8 +2,14 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const parse = require('pdf-parse');
+const { PDFDocument, rgb } = require('pdf-lib');
 const { PNG } = require('pngjs');
+const documents = require('../agent/siparis/documents');
+const { openDb } = require('../agent/siparis/db');
 const { measureApplication, designBoxFromPng } = require('../agent/siparis/measure');
 const { renderProductionForm, renderApprovalForm, renderPrintForm, renderEmbroideryForm } = require('../agent/siparis/pdf');
 const { makeExampleOrder, raster } = require('./fixtures/siparis/example-order');
@@ -214,4 +220,57 @@ test('G14-8 all forms show totals without sizes and include other size quantitie
     order.lines[0].sizes={'5XL':10,'7-8 yaş':7};
     const other=await extract(await render(order));assert.match(other.text,/Diğer/);assert.match(other.text,/17/);
   }
+});
+
+test('adetsiz model üç formda dağılımı gizler ve kesin PDF sayfasına iki cm etiketi yerleştirir', async () => {
+  const order = makeExampleOrder({ twoColors: false });
+  const line = order.lines[0];
+  const input = await PDFDocument.create();
+  input.addPage([300, 370]).drawRectangle({ width: 300, height: 370, color: rgb(1, 0, 0) });
+  input.addPage([300, 370]).drawImage(await input.embedPng(line.images.back), { width: 300, height: 370 });
+  line.images.back = { fileId: 21, view: 'arka', mime: 'application/pdf', buffer: Buffer.from(await input.save()) };
+  const app = order.applications[0];
+  app.lineIds = [line.id];
+  app.placement = { fileId: 21, view: 'arka', page: 2, rasterWidth: 300, rasterHeight: 370, box: { x: 106, y: 106, w: 89, h: 47 } };
+
+  for (const render of [renderProductionForm, renderApprovalForm, renderPrintForm]) {
+    const result = await extract(await render({ ...order, omitQuantities: true }));
+    assert.doesNotMatch(result.pages[0], /(?:(?:Sipariş |[Tt]oplam )?[Aa]det:|Bedenler|Kesilmesi Gerekenler|Toplam:)/);
+    assert.deepEqual(result.pages[0].split('\n').filter(text => /^(28|12) cm$/.test(text)), ['28 cm', '12 cm']);
+    assert.match(result.text, /28 × 12 cm/);
+  }
+  const conflictingApp = { ...app, placement: { ...app.placement, page: 1 } };
+  const { pages } = await extract(await renderApprovalForm({ ...order, applications: [app, conflictingApp] }));
+  assert.doesNotMatch(pages[0], /^(28|12) cm$/m);
+  assert.match(pages[0], /28 × 12 cm/);
+  assert.match(pages[0], /Toplam:10/);
+});
+
+test('belge modeli kutuyu yalnız güncel dosya ve kesin görünümle taşır, ölçü teyidini uygular', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'siparis-form-kutu-'));
+  const db = openDb(':memory:');
+  t.after(() => { db.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  db.prepare("INSERT INTO orders (id,order_no,customer_name) VALUES (1,'MRC-SENTETIK','Örnek')").run();
+  const order = makeExampleOrder({ twoColors: false });
+  const buffer = order.lines[0].images.front;
+  const productPath = path.join(documents.directory(dir), 'on.png');
+  fs.writeFileSync(productPath, buffer);
+  const file = { id: 21, line_id: 1, path: productPath, sha256: documents.sha256(buffer), kind: 'urun_gorsel', gorunum: 'on' };
+  const source = { method: 'otomatik', gorselFileId: 21, desenFileId: null, selectedView: 'on', selectedPage: 1, selectedProductIndex: 0,
+    rasterWidth: 300, rasterHeight: 370, productBoxPx: { x: 10, y: 30, w: 280, h: 310 }, designBoxPx: { x: 166, y: 101, w: 29, h: 29 },
+    matchConfidence: .96, views: [{ page: 1, index: 0, view: 'on' }, { page: 1, index: 1, view: 'arka' }] };
+  const app = { id: 1, kind: 'nakis', position: 'sol_gogus', width_mm: 75, height_mm: 40, needs_confirmation: 0 };
+  const snapshot = { id: 1, order_id: 1, version_no: 1, files: [file], lines: [{ id: 1, product_key: 'tisort', color_name: 'Mavi', quantity: 3, sizes_json: '{"M":3}', applications: [app] }] };
+  const model = changes => {
+    app.measure_source = JSON.stringify({ ...source, ...changes });
+    return documents.formOrder(db, dir, snapshot, new Map());
+  };
+  assert.deepEqual(model().applications[0].placement?.box, source.designBoxPx);
+  assert.deepEqual(model({ method: 'elle', elleTeyit: true }).applications[0].placement?.box, source.designBoxPx);
+  for (const changes of [{ method: 'elle' }, { gorselFileId: 20 }, { desenFileId: 22 }, { selectedView: 'arka' }, { designBoxPx: null },
+    { views: [{ page: 1, index: 0, view: 'teyit' }, { page: 1, index: 1, view: 'teyit' }] }]) {
+    assert.equal(model(changes).applications[0].placement, undefined);
+  }
+  app.needs_confirmation = 1;
+  assert.throws(() => model(), /ölçü teyidi gerekli/);
 });

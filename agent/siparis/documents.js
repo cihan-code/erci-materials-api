@@ -358,25 +358,61 @@ function sourceFor(db, v, app) {
   if (!source) fail(`Uygulama ${app.id}: desenDosyaId ile tek bir kaynak bağlayın`,409);
   return source;
 }
+function formPlacement(app,source,image,design) {
+  const locatedMeasurement=['otomatik','otomatik_renk'].includes(source.method) || (source.method==='elle' && source.elleTeyit===true);
+  if (!image || !locatedMeasurement ||
+      source.gorselFileId!==image.fileId || source.selectedView!==image.view ||
+      (source.desenFileId??null)!==(design?.id??null)) return undefined;
+  const {selectedPage:page,rasterWidth,rasterHeight,designBoxPx:box,productBoxPx:product}=source;
+  if (![page,rasterWidth,rasterHeight].every(n=>Number.isSafeInteger(n) && n>0) ||
+      !box || !product || ![box.x,box.y,box.w,box.h,product.x,product.y,product.w,product.h].every(Number.isFinite) ||
+      box.x<product.x || box.y<product.y || box.x+box.w>product.x+product.w || box.y+box.h>product.y+product.h) return undefined;
+  let swapAxes=false;
+  if (source.sleeveMethod) {
+    const axis=source.measuredAxisVector;
+    if (!SLEEVES.includes(app.position) || source.bodyCount!==1 || !(source.confidence>=.78) ||
+        !['en','boy'].includes(source.measuredAxis) || !axis || ![axis.x,axis.y].every(Number.isFinite)) return undefined;
+    // The recorded ink bounds only describe horizontal and vertical axes.
+    const horizontal=Math.abs(axis.x)>.99,vertical=Math.abs(axis.y)>.99;
+    if (!horizontal && !vertical) return undefined;
+    swapAxes=horizontal !== (source.measuredAxis==='en');
+  } else {
+    if (viewForPosition(app.position)!==image.view || SLEEVES.includes(app.position) || !(source.matchConfidence>=.78) || !Array.isArray(source.views)) return undefined;
+    const views=source.views.filter(view=>view?.page===page);
+    const selected=views.find(view=>view.index===source.selectedProductIndex);
+    if (!selected || (selected.view!==image.view && (views.length!==1 || selected.view!=='teyit'))) return undefined;
+  }
+  return {fileId:image.fileId,view:image.view,page,rasterWidth,rasterHeight,box,swapAxes};
+}
 function formOrder(db,dataDir,v,sourceByApp) {
+  assertMeasurements(db,v);
   const order=db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id);
   const preview = file => file && /\.(png|jpe?g)$/i.test(file.path) ? readFile(dataDir,file) : undefined;
+  const applications=[];
   return {
     orderNo:order.order_no,name:order.customer_name || 'Müşteri belirtilmedi',version:v.version_no,
     date:documentDate(),deliveryDate:'Teslim tarihi belirtilmedi',description:[],
     lines:v.lines.map(l=> {
-      const images={};
-      for (const f of v.files.filter(f=>f.kind==='urun_gorsel')) {
-        const meta=db.prepare('SELECT * FROM document_file_meta WHERE file_id=?').get(f.id);
-        // A sleeve close-up is a reference only; the forms carry front and back views.
-        if (meta?.line_id===l.id && ['on','arka'].includes(meta.gorunum)) images[meta.gorunum==='on'?'front':'back']=preview(f);
+      const images={},lineId=String(l.id);
+      // Match automatic measurement's use of the latest immutable upload for each view.
+      for (const [key,view] of [['front','on'],['back','arka']]) {
+        const file=v.files.findLast(f=>f.kind==='urun_gorsel' && f.line_id===l.id && f.gorunum===view);
+        const mime={'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.pdf':'application/pdf'}[path.extname(file?.path||'').toLowerCase()];
+        if (mime) images[key]={fileId:file.id,view,mime,buffer:readFile(dataDir,file)};
+      }
+      for (const app of l.applications) {
+        const design=sourceByApp.get(app.id);
+        const source=provenance(app);
+        const image=Object.values(images).find(image=>image.fileId===source.gorselFileId);
+        applications.push({type:app.kind,position:app.position,width_mm:app.width_mm,height_mm:app.height_mm,lineIds:[lineId],
+          preview:preview(design),placement:formPlacement(app,source,image,design)});
       }
       const sizes=JSON.parse(l.sizes_json);
       if (Object.keys(sizes).length && Object.values(sizes).reduce((a,b)=>a+b,0)!==l.quantity) fail(`Satır ${l.id}: PDF için adetlere eşit beden dağılımı gerekli`,409);
       const item=l.fabric_item_id ? db.prepare('SELECT name,color_name,color_no FROM stock_items WHERE id=?').get(l.fabric_item_id) : null;
-      return {id:String(l.id),product:l.product_key,color:l.color_name ? require('./pdf').stockColorLabel(l.color_name,item) : 'Renk belirtilmedi',fabric:item ? item.name : 'Kumaş belirtilmedi',sizes,quantity:l.quantity,images};
+      return {id:lineId,product:l.product_key,color:l.color_name ? require('./pdf').stockColorLabel(l.color_name,item) : 'Renk belirtilmedi',fabric:item ? item.name : 'Kumaş belirtilmedi',sizes,quantity:l.quantity,images};
     }),
-    applications:v.lines.flatMap(l=>l.applications.map(a=>({type:a.kind,position:a.position,width_mm:a.width_mm,height_mm:a.height_mm,lineIds:[String(l.id)],preview:preview(sourceByApp.get(a.id))}))),
+    applications,
   };
 }
 async function vectorInput(dataDir,file) {
@@ -863,7 +899,7 @@ function registerWorkshop(boundDb,dataDir) {
     return {providerRef:result.providerRef};
   });
 }
-module.exports={editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+module.exports={editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
 function vectorModule() {
   // Native tracer/canvas binaries come from npm; a platform without them must say so, not fail anonymously.
   try { return require('./vector'); }
