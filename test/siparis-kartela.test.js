@@ -206,7 +206,7 @@ test('kartela-uygula: dry run writes nothing; real run numbers exact matches onl
   const line = id => real.stdout.split('\n').find(l => l.startsWith(`${id}\t`));
   for (const [id, reason] of [[ids.raw, /eşleşmedi\tham satır \(legacy\)/], [ids.noCard, /eşleşmedi\ttürün kartelası yok/],
     [ids.shade, /eşleşmedi\t30\/1 Lacoste kartelasında koyu_lacivert rengi yok/], [ids.unconfirmed, /eşleşmedi\tkartela 26 numaralı rengin adı teyit bekliyor/],
-    [ids.otherNo, /eşleşmedi\tkayıtlı renk no \(P-7\) kartela numarasından \(12\) farklı/], [ids.clash, /eşleşmedi\trenk adı "Lacivert" anahtardaki renkle \(siyah\) aynı değil/],
+    [ids.otherNo, /eşleşmedi\tkayıtlı no P-7 tam sayı değil; 'Bordo' kartelada 12$/], [ids.clash, /eşleşmedi\trenk adı "Lacivert" anahtardaki renkle \(siyah\) aynı değil/],
     [ids.standard, /\tuygun\tPolar 6 Siyah$/], [ids.numbered, /\tdeğişti\tad: "Lakost beyaz" → "30\/1 Lacoste 1 Beyaz"; hex: — → "#ffffff"$/]])
     assert.match(line(id), reason, String(id));
   const after = Object.fromEntries(snapshot().map(r => [r.id, r]));
@@ -303,4 +303,37 @@ test('invoices: a shade the cards do not list ("koyu lacivert", "açık turkuaz"
   assert.equal(bare.status, 'teyit');
   const night = matchInvoiceLine({ line: { description: 'Lakost gece mavi 5 kg', qtyMilli: 5000, unit: 'kg' }, openNeeds: [] });
   assert.match(night.reasons.join(' '), /tanınmayan sözcük var \("gece"\)/);
+});
+
+test('kartela-uygula: a spreadsheet number "12.0" matches and is written as "12"; a real clash stays unmatched with both colours named', async t => {
+  const f = await setup(t);
+  const add = (key, colorName, colorNo) => Number(f.db.prepare('INSERT INTO stock_items(fabric_key,name,color_name,color_no,unit) VALUES(?,?,?,?,?)')
+    .run(key, 'eski ad', colorName, colorNo, 'kg').lastInsertRowid);
+  const ids = {
+    float: add('sardonlu_3_iplik|bordo', 'Bordo', '12.0'),
+    plain: add('polar|bordo', 'Bordo', ' 12 '),
+    green: add('supren_30_1|yesil', 'Yeşil', '34.0'),
+    beige: add('supren_30_1|bej', 'Bej', '22'),
+    beige3: add('sardonlu_3_iplik|bej', 'Bej', '16'),
+    missing: add('lakost|bordo', 'Bordo', '40'),
+    half: add('sardonsuz_3_iplik|bordo', 'Bordo', '12.5'),
+  };
+  assert.equal(kartela.itemKartela({ fabric_key: 'sardonlu_3_iplik|bordo', color_no: '12.0' }).no, 12, 'the kartela field reads the same number');
+  assert.equal(kartela.itemKartela({ fabric_key: 'sardonlu_3_iplik|bordo', color_no: 12 }).no, 12);
+  for (const v of ['12.5', '12.00.0', 'on iki', '-12', '0', 12.5]) assert.equal(kartela.cardNo(v), null, String(v));
+  const first = kartela.applyKartela(f.db);
+  const row = id => first.rows.find(r => r.id === id);
+  assert.deepEqual([row(ids.float).durum, row(ids.plain).durum], ['degisir', 'degisir']);
+  assert.match(row(ids.float).neden, /no: "12\.0" → "12"/);
+  assert.equal(row(ids.green).neden, "kayıtlı no 34.0 kartelada 'Nefti'; 'Yeşil' kartelada 30");
+  assert.equal(row(ids.beige).neden, "kayıtlı no 22 kartelada 'Krem'; 'Bej' kartelada 16");
+  assert.equal(row(ids.beige3).neden, "kayıtlı no 16 kartelada 'Ekru'; 'Bej' kartelada 36");
+  assert.equal(row(ids.missing).neden, "kayıtlı no 40 kartelada yok; 'Bordo' kartelada 6");
+  assert.equal(row(ids.half).neden, "kayıtlı no 12.5 tam sayı değil; 'Bordo' kartelada 12");
+  const stored = id => f.db.prepare('SELECT color_no,name FROM stock_items WHERE id=?').get(id);
+  assert.deepEqual(stored(ids.float), { color_no: '12', name: '3 İplik Sardonlu 12 Bordo' });
+  assert.equal(stored(ids.plain).color_no, '12');
+  for (const key of ['green', 'beige', 'beige3', 'missing', 'half']) assert.equal(stored(ids[key]).name, 'eski ad', key);
+  const again = kartela.applyKartela(f.db);
+  assert.deepEqual([again.changed, again.unchanged, again.unmatched], [0, 2, 5]);
 });
