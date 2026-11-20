@@ -669,11 +669,48 @@ function pairScale(vertical,horizontal) {
   return {difference,mean:null,mode:null};
 }
 const mockupNote=(difference,label)=>`Mockup oranı kalıptan farklı (%${percent(difference)}); ölçek ${label} ortalaması.`;
-function scaleFor(ref,measurements,scalePair='boy_etek',p=null) {
+// The L table and the detector need not mean the same row: on a pattern's
+// own flat drawing the detected chest/height can disagree with L (SWEAT 29%).
+// The same detector run on that drawing maps its pixels to the L values; the
+// ratio is split evenly between the axes (sqrt), so a mockup drawn like the
+// pattern gets one scale and the 15/35% bands apply to what remains.
+function flatCalibration(p,flat,kind) {
+  const L=flat?.olculerL||{},positive=n=>Number.isFinite(n)&&n>0;
+  if(kind==='bacak') {
+    if(!positive(L.yan_boy)||!positive(L.basen))return null;
+    const ref=legSilhouette(p);
+    if(!ref)return null;
+    return {yanBoyPx:ref.heightPx,basenPx:ref.hipPx,kaynak:'duz_cizim',oran:(L.basen/ref.hipPx)/(L.yan_boy/ref.heightPx)};
+  }
+  const chest=kind==='boy_gogus',horizontalCm=chest?L.gogus:L.etek;
+  if(!positive(L.omuzdan_boy)||!positive(horizontalCm))return null;
+  const refs=silhouettes(p,flat.urun);
+  // One garment only: a sheet of several drawings has no single calibration.
+  if(refs.length!==1)return null;
+  const ref=refs[0];if(chest)ref.chestLine=chestLine(p,ref);
+  const horizontalPx=chest?ref.chestLine?.width:ref.hemWidthPx;
+  if(!(horizontalPx>0)||!(ref.bodyHeightPx>0))return null;
+  return {boyPx:ref.bodyHeightPx,gogusPx:horizontalPx,yatay:chest?'gogus':'etek',kaynak:'duz_cizim',oran:(horizontalCm/horizontalPx)/(L.omuzdan_boy/ref.bodyHeightPx)};
+}
+// A precomputed calibration (cached by the caller) is used as is; otherwise
+// the drawing is read here. Without a drawing or a detection: no calibration.
+async function calibrationFor(flat,kind) {
+  if(!flat||flat.refBeden!=='L')return null;
+  const cached=flat.kalibrasyon;
+  if(cached!==undefined)return cached&&cached.tur===kind&&cached.oran>0?cached:null;
+  if(!flat.cizim?.buffer)return null;
+  try {
+    const [p]=await rasterPages(flat.cizim,MAX_EDGE,[1]);
+    const result=p?flatCalibration(p,flat,kind):null;
+    return result?{...result,tur:kind}:null;
+  } catch {return null;}
+}
+const calibrationFactor=cal=>cal?Math.sqrt(cal.oran):1;
+function scaleFor(ref,measurements,scalePair='boy_etek',p=null,k=1) {
   if(scalePair==='boy_gogus'&&p&&ref.chestLine===undefined)ref.chestLine=chestLine(p,ref);
   const chest=scalePair==='boy_gogus',horizontalCm=chest?measurements.gogus:measurements.etek,horizontalPx=chest?ref.chestLine?.width:ref.hemWidthPx;
-  const vertical=Number.isFinite(measurements.omuzdan_boy)&&measurements.omuzdan_boy>0?measurements.omuzdan_boy*10/ref.bodyHeightPx:null;
-  const horizontal=Number.isFinite(horizontalCm)&&horizontalCm>0&&horizontalPx>0?horizontalCm*10/horizontalPx:null;
+  const vertical=Number.isFinite(measurements.omuzdan_boy)&&measurements.omuzdan_boy>0?measurements.omuzdan_boy*10/ref.bodyHeightPx*k:null;
+  const horizontal=Number.isFinite(horizontalCm)&&horizontalCm>0&&horizontalPx>0?horizontalCm*10/horizontalPx/k:null;
   const pair=pairScale(vertical,horizontal);
   return {vertical,horizontal,difference:pair.difference,mode:pair.mode,mean:vertical&&horizontal?pair.mean:chest?null:vertical||horizontal};
 }
@@ -827,6 +864,8 @@ async function autoMeasureSleeve({image,design,flat,product,position}) {
   let width=null,height=null;
   const measurements=flat?.refBeden==='L'?flat.olculerL||{}:{};
   if(flat?.refBeden!=='L')reasons.push('Ürünün L kalıp referansı bulunamadı: kol için L beden ölçüsü gerekli.');
+  const cal=await calibrationFor(flat,scalePair),k=calibrationFactor(cal);
+  source.kalibrasyon=cal;
   try {
     // Small cuff artwork needs full raster resolution even on PDF sheets.
     const pages=await rasterPages(image,image.mime==='application/pdf'?1000:MAX_EDGE),designs=design?await rasterPages(design,1000,null,{transparent:true}):[],candidates=[];
@@ -841,7 +880,7 @@ async function autoMeasureSleeve({image,design,flat,product,position}) {
       const wantedSide=position==='sol_kol'?'sol':'sag';
       const imageSide=image.gorunum==='on'?(wantedSide==='sol'?'sag':'sol'):wantedSide;
       for(const ref of refs) {
-        scaleFor(ref,measurements,scalePair,p);
+        scaleFor(ref,measurements,scalePair,p,k);
         for(const sleeve of sleevesOnBody(ref,p.width,p.height))
           if(!knownSide||sleeve.side===imageSide)geometries.push({sleeve,ref});
       }
@@ -885,7 +924,7 @@ async function autoMeasureSleeve({image,design,flat,product,position}) {
       if(position!=='kol'&&!['on','arka'].includes(image.gorunum))reasons.push('Sol/sağ kol yönü görselden kesin doğrulanamadı; seçilen kol yerleşimi teyit edilmeli.');
       if(match.confidence<threshold)reasons.push(`Kol desen eşleştirme güveni %${percent(match.confidence)}; %${percent(threshold)} sınırının altında.`);
       if(ref) {
-        const scale=scaleFor(ref,measurements,scalePair,p);
+        const scale=scaleFor(ref,measurements,scalePair,p,k);
         source.scaleFrom='govde';source.mmPerPx=scale.mean;source.scaleDifference=scale.difference;
         source.hemWidthPx=ref.hemWidthPx;source.bodyHeightPx=ref.bodyHeightPx;
         Object.assign(source,{chestPx:ref.chestLine?.width??null,chestLinePx:ref.chestLine??null,shoulderY:ref.shoulderY,hemY:ref.hemY});
@@ -941,6 +980,8 @@ async function autoMeasureLeg({image,design,flat,product,position}) {
   const measurements=flat?.refBeden==='L'&&flat?.olculerL&&typeof flat.olculerL==='object'?flat.olculerL:{};
   if(flat?.refBeden!=='L')reasons.push('Ürünün L kalıp referansı bulunamadı: bacak için L beden ölçüsü gerekli.');
   else if(!positive(measurements.yan_boy)||!positive(measurements.basen))reasons.push('Bacak ölçeği için kalıbın L yan_boy ve basen ölçüleri gerekli; ikisi birlikte bulunamadı.');
+  const cal=await calibrationFor(flat,'bacak'),k=calibrationFactor(cal);
+  source.kalibrasyon=cal;
   try {
     const pages=await rasterPages(image,image.mime==='application/pdf'?1000:MAX_EDGE),designs=design?await rasterPages(design,1000,null,{transparent:true}):[],candidates=[];
     const designContents=designs.map(p=>designContent(p,true));
@@ -981,7 +1022,7 @@ async function autoMeasureLeg({image,design,flat,product,position}) {
       if(wanted&&!['on','arka'].includes(image.gorunum)){sideOk=false;reasons.push('Sol/sağ bacak yönü görselden kesin doğrulanamadı; ön veya arka görünüm gerekli.');}
       else if(wanted&&found!==wanted){sideOk=false;reasons.push(`Desen ${found==='sol'?'sol':'sağ'} bacakta bulundu; uygulama ${wanted==='sol'?'sol':'sağ'} bacak olarak kayıtlı. Konum teyit edilmeli.`);}
       if(positive(measurements.yan_boy)&&positive(measurements.basen)) {
-        const vertical=measurements.yan_boy*10/ref.heightPx,horizontal=measurements.basen*10/ref.hipPx,{difference,mean,mode}=pairScale(vertical,horizontal);
+        const vertical=measurements.yan_boy*10/ref.heightPx*k,horizontal=measurements.basen*10/ref.hipPx/k,{difference,mean,mode}=pairScale(vertical,horizontal);
         Object.assign(source,{verticalMmPerPx:vertical,horizontalMmPerPx:horizontal,scaleDifference:difference});
         if(!mean){source.scaleMethod='çelişen L ölçekleri; ölçü yok';reasons.push(`Yan boy/basen ölçek farkı %${percent(difference)}; %35 sınırını aşıyor, maske veya bel/paça hatası olabilir (${vertical.toFixed(3)} ve ${horizontal.toFixed(3)} mm/px).`);}
         else {
@@ -1011,6 +1052,8 @@ async function autoMeasure({image,design,flat,product,position}) {
   if(flat?.refBeden!=='L')reasons.push('Ürünün L kalıp referansı bulunamadı: kayıt L beden değil veya belirtilmemiş (geçerli referans sayısı 0).');
   if(!positive(measurements.omuzdan_boy)&&!positive(measurements[scalePair==='boy_gogus'?'gogus':'etek']))reasons.push(`Ürün için geçerli L beden kalıp ölçüleri bulunamadı (boy ve ${horizontalLabel} ölçüsü sayısı 0).`);
   if(viewForPosition(position)==='teyit')reasons.push('Ürün görünümü uygulama konumuyla eşleştirilemedi (geçerli görünüm sayısı 0).');
+  const cal=await calibrationFor(flat,scalePair),calK=calibrationFactor(cal);
+  source.kalibrasyon=cal;
   try {
     // PDF sheets are scanned small, then only pages whose artwork needs more
     // pixels are redrawn. Photos are already measured at MAX_EDGE.
@@ -1036,7 +1079,7 @@ async function autoMeasure({image,design,flat,product,position}) {
         if(mapped.every(Boolean)&&new Set(mapped).size===mapped.length){pages[i]=p;pageEdges[i]=edge;refs=mapped;}
       }
       for(let k=0;k<refs.length;k++) {
-        const ref=refs[k],cue=cues[k],scale=scaleFor(ref,measurements,scalePair,pages[i]);
+        const ref=refs[k],cue=cues[k],scale=scaleFor(ref,measurements,scalePair,pages[i],calK);
         allViews.push({page:i+1,index:k,view:cue.view,hooded:cue.hooded,viewEvidence:{lining:cue.lining,cords:cue.cords,...(cue.neckDepth!==undefined?{neckDepth:cue.neckDepth}:{})},maskMethod:ref.maskMethod,...(ref.splitMethod?{splitMethod:ref.splitMethod}:{}),productBoxPx:ref.box,shoulderY:ref.shoulderY,hemY:ref.hemY,hemWidthPx:ref.hemWidthPx,chestLinePx:ref.chestLine??null,bodyHeightPx:ref.bodyHeightPx,...scale});
         if(cue.view!=='teyit'&&cue.view!==viewForPosition(position))continue;
         if(refs.length>1&&cue.view==='teyit'&&!designs.length)continue;
@@ -1100,7 +1143,7 @@ async function autoMeasure({image,design,flat,product,position}) {
     }
     else {
       const {ref,match,page,designPage}=chosen;
-      const {vertical,horizontal}=scaleFor(ref,measurements,scalePair,chosen.p);
+      const {vertical,horizontal}=scaleFor(ref,measurements,scalePair,chosen.p,calK);
       source.method=match.method||'otomatik';source.selectedView=viewForPosition(position);
       source.rasterWidth=chosen.p.width;source.rasterHeight=chosen.p.height;
       const competing=refined.find(c=>c.page!==page||c.index!==chosen.index);

@@ -525,6 +525,21 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPendi
     applications,
   };
 }
+// The worker calibrates the scale on the pattern's own flat drawing (G45b).
+// One result per drawing file and L values is kept for this process; a
+// missing or unreadable drawing leaves the uncalibrated behaviour.
+const FLAT_CALIBRATIONS=new Map();
+function flatCalibrationInput(flat,leg) {
+  if(!flat?.dosya)return {flat,key:null};
+  let stat;
+  try {stat=fs.statSync(flat.dosya);} catch {return {flat,key:null};}
+  if(!stat.isFile())return {flat,key:null};
+  const key=JSON.stringify([flat.id,flat.dosya,stat.size,stat.mtimeMs,flat.urun,flat.olculerL??null,leg]);
+  if(FLAT_CALIBRATIONS.has(key))return {flat:{...flat,kalibrasyon:FLAT_CALIBRATIONS.get(key)},key:null};
+  const ext=path.extname(flat.dosya).toLowerCase(),mime=ext==='.png'?'image/png':['.jpg','.jpeg'].includes(ext)?'image/jpeg':null;
+  if(!mime)return {flat,key:null};
+  try {return {flat:{...flat,cizim:{buffer:fs.readFileSync(flat.dosya),mime}},key};} catch {return {flat,key:null};}
+}
 async function vectorInput(dataDir,file) {
   return {manualVector:file.kind==='desen_kaynak_vektor',buffer:readFile(dataDir,file),mime:{'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.pdf':'application/pdf','.svg':'image/svg+xml'}[path.extname(file.path).toLowerCase()]};
 }
@@ -676,7 +691,10 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
         const image={...input.image,...await vectorInput(dataDir,input.image)};
         const design=input.design?{...input.design,...await vectorInput(dataDir,input.design)}:null;
         const {flatNote,linkDesign,...job}=input;
-        result=await generateInChild({type:'autoMeasure',input:{...job,image,design}},signal,{timeoutMs:MEASURE_TIMEOUT_MS});
+        const calibration=flatCalibrationInput(input.flat,['bacak','sol_bacak','sag_bacak'].includes(input.position));
+        result=await generateInChild({type:'autoMeasure',input:{...job,image,design,flat:calibration.flat}},signal,{timeoutMs:MEASURE_TIMEOUT_MS});
+        if(calibration.key && result?.measure_source && Object.hasOwn(result.measure_source,'kalibrasyon'))
+          FLAT_CALIBRATIONS.set(calibration.key,result.measure_source.kalibrasyon);
       } catch(e) {
         if(signal.aborted)throw e;
         result={width_mm:null,height_mm:null,needs_confirmation:true,reasons:[`Otomatik ölçü tamamlanamadı: ${e.message}`],
@@ -1097,7 +1115,7 @@ function registerWorkshop(boundDb,dataDir) {
     return {providerRef:result.providerRef};
   });
 }
-module.exports={editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,previewForms,pendingApplications,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+module.exports={flatCalibrationInput,FLAT_CALIBRATIONS,editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,previewForms,pendingApplications,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
 function vectorModule() {
   // Native tracer/canvas binaries come from npm; a platform without them must say so, not fail anonymously.
   try { return require('./vector'); }
