@@ -38,12 +38,12 @@ async function openPdf(buffer) {
   catch (error) { await task.destroy(); throw error; }
 }
 
-async function renderPage(page, scale = 2) {
+async function renderPage(page, scale = 2, background) {
   const viewport = page.getViewport({ scale });
   if (viewport.width * viewport.height > 40_000_000) throw Object.assign(new Error('PDF sayfasi cok buyuk (40 MP siniri)'),{status:413});
   const factory = new CanvasFactory(), pair = factory.create(viewport.width, viewport.height);
   try {
-    await page.render({ canvasContext: pair.context, viewport, canvasFactory: factory }).promise;
+    await page.render({ canvasContext: pair.context, viewport, background, canvasFactory: factory }).promise;
     return pair.canvas.toBuffer('image/png');
   } finally { factory.destroy(pair); }
 }
@@ -601,7 +601,14 @@ function rasterMinDetail(image, widthMm) {
 async function pageContentBox(page) {
   const scale=2, viewport=page.getViewport({scale});
   const png=PNG.sync.read(await renderPage(page,scale));
-  const bounds=pixelBounds(png,250);
+  let bounds=pixelBounds(png,250);
+  if (!bounds) {
+    // PDF.js's default white canvas hides white ink. Alpha on a transparent
+    // canvas reveals painted pixels without treating a white flood as artwork.
+    const {width,height,data:pixels}=PNG.sync.read(await renderPage(page,scale,'rgba(0,0,0,0)'));
+    const hasClearPixel=pixels.some((value,index)=>index%4===3 && value<128);
+    if (hasClearPixel) bounds=alphaBounds({width,height,pixels});
+  }
   if (!bounds) throw new Error('PDF desen içerik kutusu boş');
   const corners=[viewport.convertToPdfPoint(bounds.x,bounds.y),
     viewport.convertToPdfPoint(bounds.x+bounds.w,bounds.y+bounds.h)];

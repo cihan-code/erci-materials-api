@@ -288,7 +288,7 @@ test('input validation does not accept invalid dimensions or unsupported MIME', 
   await assert.rejects(vectorize({ buffer: png(), mime: 'image/gif' }), /MIME/);
 });
 
-async function artworkMm(buffer) {
+async function artworkMm(buffer, whiteInk = false) {
   const canvasLib=require('@napi-rs/canvas');
   for (const key of ['DOMMatrix','ImageData','Path2D']) globalThis[key] ||= canvasLib[key];
   const pdfjs=await import('pdfjs-dist/legacy/build/pdf.mjs');
@@ -296,12 +296,13 @@ async function artworkMm(buffer) {
   try {
     const page=await doc.getPage(1), scale=3, viewport=page.getViewport({scale});
     const canvas=createCanvas(Math.ceil(viewport.width),Math.ceil(viewport.height)),ctx=canvas.getContext('2d');
-    await page.render({canvasContext:ctx,viewport}).promise;
+    const background=whiteInk?'rgba(0,0,0,0)':undefined;
+    await page.render({canvasContext:ctx,viewport,background}).promise;
     const pixels=ctx.getImageData(0,0,canvas.width,canvas.height).data;
     let left=Infinity,top=Infinity,right=-1,bottom=-1;
     for(let y=0;y<canvas.height;y++) for(let x=0;x<canvas.width;x++) {
       const i=(y*canvas.width+x)*4;
-      if(pixels[i+3]>32 && Math.min(...pixels.subarray(i,i+3))<200) {
+      if(pixels[i+3]>32 && (whiteInk ? Math.min(...pixels.subarray(i,i+3))>240 : Math.min(...pixels.subarray(i,i+3))<200)) {
         left=Math.min(left,x);right=Math.max(right,x);top=Math.min(top,y);bottom=Math.max(bottom,y);
       }
     }
@@ -330,6 +331,19 @@ test('G14-3 rendered artwork, including transparent/white margins and vector PDF
     assert.ok(Math.abs(w-280)<=1,`${input.mime}: width ${w}`);assert.ok(Math.abs(h-120)<=1,`${input.mime}: height ${h}`);
     assert.equal(out.report.pages[0].imageCount,0);
   }
+});
+test('G40 beyaz vektör mürekkebi hedef ölçüyü doldurur, boş sayfa içerik sayılmaz',async()=> {
+  const blank=await PDFDocument.create();blank.addPage([400,400]);
+  const render=async (doc,manualVector)=>vectorize({buffer:Buffer.from(await doc.save()),mime:'application/pdf',manualVector,targetMm:{w:310,h:450}});
+  await assert.rejects(render(blank,false),/PDF desen içerik kutusu boş/);
+  const source=await PDFDocument.create(),page=source.addPage([400,400]);
+  page.drawRectangle({x:110,y:75,width:124,height:180,color:rgb(1,1,1)});
+  const result=await render(source,true),[w,h]=await artworkMm(result.pdf,true);
+  assert.ok(Math.abs(w-310)<1 && Math.abs(h-450)<1,`${w} × ${h}`);
+  assert.equal(result.report.pages[0].imageCount,0);
+  const flood=await PDFDocument.create();
+  flood.addPage([400,400]).drawRectangle({x:0,y:0,width:400,height:400,color:rgb(1,1,1)});
+  await assert.rejects(render(flood,true),/PDF desen içerik kutusu boş/);
 });
 test('G14-13 test mode cannot dispatch outside NODE_ENV=test and cloud without durable storage logs fallback',async()=> {
   for (const NODE_ENV of [undefined,'production','development']) {
