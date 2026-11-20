@@ -6,6 +6,9 @@ const { imageSize, measureSleeve } = require('./measure');
 // Measurement uses a bounded raster; original uploads and their dimensions stay intact.
 const MAX_EDGE = 2000;
 const MIN_SYMMETRY = .85, MIN_MATCH_CONFIDENCE = .78;
+// Product keys, not inferred garment names or the presence of a chest number.
+const CHEST_SCALE_PRODUCTS = new Set(['sweat','sweatshirt','hoodie','kapusonlu','polar','tam_fermuar']);
+const scalePairFor = (flat,product) => CHEST_SCALE_PRODUCTS.has(String(flat?.urun||product||'').trim().toLowerCase())?'boy_gogus':'boy_etek';
 const percent = n => (n*100).toLocaleString('tr-TR',{minimumFractionDigits:1,maximumFractionDigits:4});
 const VIEW = {gogus:'on',sol_gogus:'on',sag_gogus:'on',kol:'on',sol_kol:'on',sag_kol:'on',sirt:'arka',ense:'arka',kapusan:'arka'};
 const viewForPosition = position => VIEW[position] || 'teyit';
@@ -274,7 +277,7 @@ function silhouette(p, segmented=null) {
   const tail=rows.filter(r=>r.y>=hemY-Math.max(3,box.h*.035)&&r.y<hemY);
   if(smallProduct&&(!tail.length||median(tail.map(r=>r.width))<hemWidthPx*.65))return null;
   if(symmetry<.75 || Math.max(...rows.slice(0,Math.ceil(rows.length*.5)).map(r=>r.width))<hemWidthPx*shoulderBreadth)return null;
-  return {mask,box,rows,bodyCenterX:median(band.map(r=>(r.l+r.r)/2)),hemWidthPx,chestPx:hemWidthPx,hemY,shoulderY:shoulder.y,shoulderMethod:'merkez gövdenin hızlı genişlediği ilk sürekli omuz satırı',bodyHeightPx:hemY-shoulder.y+1,symmetry,softEdgeFraction:soft/Math.max(1,edgeN),textureFraction:texture/Math.max(1,interior)};
+  return {mask,raw,box,rows,bodyCenterX:median(band.map(r=>(r.l+r.r)/2)),hemWidthPx,chestPx:hemWidthPx,hemY,shoulderY:shoulder.y,shoulderMethod:'merkez gövdenin hızlı genişlediği ilk sürekli omuz satırı',bodyHeightPx:hemY-shoulder.y+1,symmetry,softEdgeFraction:soft/Math.max(1,edgeN),textureFraction:texture/Math.max(1,interior)};
 }
 function wrinkleFraction(p,ref,printBox) {
   const w=p.width,cx=ref.bodyCenterX??(ref.box.x+ref.box.w/2),lum=i=>(p.data[i*4]+p.data[i*4+1]+p.data[i*4+2])/3;
@@ -401,11 +404,78 @@ function colorDesign(p,ref) {
   return {...candidates[0],ambiguous:!!candidates[1]&&candidates[1].score>candidates[0].score*.4};
 }
 
-function scaleFor(ref,measurements) {
+function chestLine(p,ref) {
+  const {width:w,height:h}=p,cx=Math.round(ref.bodyCenterX),height=ref.bodyHeightPx,hem=ref.hemWidthPx;
+  const start=Math.ceil(ref.shoulderY+height*.2),end=Math.floor(ref.shoulderY+height*.58),window=Math.max(4,Math.round(height*.035));
+  const rows=[];
+  for(let y=start;y<=end;y++) {
+    if(!ref.raw[y*w+cx])continue;
+    const side=direction=>{let last=cx,gap=0;for(let x=cx;x>=ref.box.x&&x<ref.box.x+ref.box.w;x+=direction){if(ref.raw[y*w+x]){last=x;gap=0;}else if(++gap>=2)break;}return last;};
+    const l=side(-1),r=side(1),width=r-l+1;
+    // There must be shoulder/sleeve breadth above this central, separated run.
+    const broad=ref.rows.some(q=>q.y<y&&q.y>=ref.shoulderY&&q.width>width*1.12);
+    if(width>=hem*.7&&width<=hem*1.7&&broad)rows.push({y,l,r,width});
+  }
+  const stable=[];
+  for(let i=0;i<=rows.length-window;i++) {
+    const band=rows.slice(i,i+window),width=median(band.map(r=>r.width));
+    if(band.at(-1).y-band[0].y!==window-1||band.some(r=>Math.abs(r.width-width)>width*.025))continue;
+    stable.push({...band[Math.floor(window/2)],width,method:'kol_alti_ayrik_maske'});
+  }
+  if(stable.length) {
+    const narrow=Math.min(...stable.map(r=>r.width));
+    return stable.find(r=>r.width<=narrow*1.025);
+  }
+  // Touching sleeves have no exterior gap. A side seam is usable only when
+  // it persists below the chest print as well as in the upper body. A uniform
+  // joined mask provides no evidence: do not manufacture a split from L sizes.
+  const lum=(x,y)=>{const i=(y*w+x)*4;return (p.data[i]+p.data[i+1]+p.data[i+2])/3;};
+  const radius=Math.max(1,Math.round(hem*.01)),edge=(x,y)=>Math.abs(lum(x+radius,y)-lum(x-radius,y));
+  const anchors=[];
+  for(const sign of [-1,1]) {
+    let best=null;
+    for(let offset=Math.ceil(hem*.35);offset<=hem*.75;offset++) {
+      const x=cx+sign*offset;if(x-radius<0||x+radius>=w)continue;
+      let sum=0,strong=0,n=0,lower=0,lowerN=0;
+      for(let y=start;y<Math.min(h,ref.shoulderY+height*.78);y++) {
+        if(!ref.mask[y*w+x])continue;
+        const value=edge(x,y);sum+=value;strong+=value>10;n++;
+        if(y>ref.shoulderY+height*.58){lower+=value>10;lowerN++;}
+      }
+      if(n<height*.5||strong/n<.65||lower/Math.max(1,lowerN)<.6||sum/n<12)continue;
+      if(!best||sum/n>best.score)best={x,score:sum/n};
+    }
+    if(!best)return null;anchors.push(best.x);
+  }
+  const traced=[];
+  for(let y=start;y<=end;y++) {
+    const ends=anchors.map(anchor=>{
+      let best=null;
+      for(let x=anchor-Math.ceil(hem*.025);x<=anchor+hem*.025;x++) {
+        const value=edge(x,y);if(value>10&&(!best||value>best.value))best={x,value};
+      }
+      return best?.x;
+    });
+    if(ends.some(x=>x==null))continue;
+    const [l,r]=ends,width=r-l+1;
+    // Both sleeves must actually extend outside the proposed torso boundary.
+    if(ref.rows.find(q=>q.y===y)?.width<width*1.15||Math.abs((l+r)/2-cx)>hem*.08)continue;
+    traced.push({y,l,r,width});
+  }
+  for(let i=0;i<=traced.length-window;i++) {
+    const band=traced.slice(i,i+window),width=median(band.map(r=>r.width));
+    if(band.at(-1).y-band[0].y===window-1&&band.every(r=>Math.abs(r.width-width)<=width*.025))
+      return {...band[Math.floor(window/2)],width,method:'yapisik_kol_surekli_yan_kenar'};
+  }
+  return null;
+}
+function scaleFor(ref,measurements,scalePair='boy_etek',p=null) {
+  if(scalePair==='boy_gogus'&&p&&ref.chestLine===undefined)ref.chestLine=chestLine(p,ref);
+  const chest=scalePair==='boy_gogus',horizontalCm=chest?measurements.gogus:measurements.etek,horizontalPx=chest?ref.chestLine?.width:ref.hemWidthPx;
   const vertical=Number.isFinite(measurements.omuzdan_boy)&&measurements.omuzdan_boy>0?measurements.omuzdan_boy*10/ref.bodyHeightPx:null;
-  const horizontal=Number.isFinite(measurements.etek)&&measurements.etek>0?measurements.etek*10/ref.hemWidthPx:null;
+  const horizontal=Number.isFinite(horizontalCm)&&horizontalCm>0&&horizontalPx>0?horizontalCm*10/horizontalPx:null;
   const difference=vertical&&horizontal?Math.abs(vertical-horizontal)/((vertical+horizontal)/2):null;
-  return {vertical,horizontal,difference,mean:vertical&&horizontal?(difference<=.15?(vertical+horizontal)/2:null):vertical||horizontal};
+  return {vertical,horizontal,difference,mean:vertical&&horizontal?(difference<=.15?(vertical+horizontal)/2:null):chest?null:vertical||horizontal};
 }
 
 // Sleeve geometry and matching are independent of the established torso path.
@@ -433,7 +503,7 @@ function sleeveGeometry(mask,w,h,side=null) {
 function sleevesOnBody(ref,w,h) {
   const cx=ref.bodyCenterX,result=[];
   for(const side of ['sol','sag']) {
-    const mask=new Uint8Array(w*h),edge=cx+(side==='sol'?-1:1)*ref.hemWidthPx*.51;
+    const mask=new Uint8Array(w*h),edge=cx+(side==='sol'?-1:1)*(ref.chestLine?.width||ref.hemWidthPx)*.51;
     for(let y=ref.shoulderY;y<ref.box.y+ref.box.h;y++)for(let x=ref.box.x;x<ref.box.x+ref.box.w;x++)
       if(ref.mask[y*w+x]&&(side==='sol'?x<edge:x>edge))mask[y*w+x]=1;
     const sleeve=sleeveGeometry(largest(mask,w,h),w,h,side);
@@ -509,8 +579,9 @@ function sleeveMatchAligned(p,sleeve,candidate,design,content) {
   }
   return best;
 }
-async function autoMeasureSleeve({image,design,flat,position}) {
-  const started=performance.now(),reasons=[],source={method:'otomatik',sleeveMethod:'kol_ekseni_desen_orani',scaleFrom:null,measuredAxis:null,flatId:flat?.id??null,flatAd:flat?.ad??null,refBeden:flat?.refBeden??null,refCm:flat?.refLengthCm??null,olculerL:flat?.olculerL??null,gorselFileId:image?.id??null,desenFileId:design?.id??null,selectedView:image?.gorunum||'on',mmPerPx:null,designBoxPx:null,confidence:0};
+async function autoMeasureSleeve({image,design,flat,product,position}) {
+  const scalePair=scalePairFor(flat,product),pairLabel=scalePair==='boy_gogus'?'boy/göğüs':'boy/etek';
+  const started=performance.now(),reasons=[],source={scalePair,method:'otomatik',sleeveMethod:'kol_ekseni_desen_orani',scaleFrom:null,measuredAxis:null,flatId:flat?.id??null,flatAd:flat?.ad??null,refBeden:flat?.refBeden??null,refCm:flat?.refLengthCm??null,olculerL:flat?.olculerL??null,gorselFileId:image?.id??null,desenFileId:design?.id??null,selectedView:image?.gorunum||'on',mmPerPx:null,designBoxPx:null,confidence:0};
   let width=null,height=null;
   const measurements=flat?.refBeden==='L'?flat.olculerL||{}:{};
   if(flat?.refBeden!=='L')reasons.push('Ürünün L kalıp referansı bulunamadı: kol için L beden ölçüsü gerekli.');
@@ -527,8 +598,11 @@ async function autoMeasureSleeve({image,design,flat,position}) {
       const knownSide=['on','arka'].includes(image.gorunum)&&position!=='kol';
       const wantedSide=position==='sol_kol'?'sol':'sag';
       const imageSide=image.gorunum==='on'?(wantedSide==='sol'?'sag':'sol'):wantedSide;
-      for(const ref of refs)for(const sleeve of sleevesOnBody(ref,p.width,p.height))
-        if(!knownSide||sleeve.side===imageSide)geometries.push({sleeve,ref});
+      for(const ref of refs) {
+        scaleFor(ref,measurements,scalePair,p);
+        for(const sleeve of sleevesOnBody(ref,p.width,p.height))
+          if(!knownSide||sleeve.side===imageSide)geometries.push({sleeve,ref});
+      }
       if(!refs.length&&image.gorunum==='kol') {
         const {mask,box}=segmented;
         // A close crop does not establish a full shoulder-to-cuff reference.
@@ -554,29 +628,40 @@ async function autoMeasureSleeve({image,design,flat,position}) {
       const {p,sleeve,ref,match}=chosen,candidate=match.projected;
       Object.assign(source,{selectedPage:chosen.page,selectedDesignPage:chosen.designPage,rasterWidth:p.width,rasterHeight:p.height,productBoxPx:ref?.box??sleeve.box,sleeveBoxPx:sleeve.box,sleeveAxis:sleeve.u,measuredAxisVector:match.axis,axisOffsetDegrees:match.axisOffsetDegrees,sleeveLengthPx:sleeve.lengthPx,candidateBoxPx:candidate.box,observedAlongPx:candidate.alongPx,observedAcrossPx:candidate.acrossPx,measuredAxis:match.measuredAxis,designAspectRatio:match.designRatio,rotation:match.rotation*90,confidence:match.confidence});
       const competing=candidates.find(c=>c.page!==chosen.page||overlapFraction(c.candidate.box,candidate.box)<.5);
-      const ambiguous=!!competing&&(competing.match.confidence>=MIN_MATCH_CONFIDENCE||match.confidence-competing.match.confidence<.045);
+      const ambiguous=!!competing&&(competing.match.confidence>=MIN_MATCH_CONFIDENCE||match.confidence-competing.match.confidence<=.10);
       if(ambiguous)reasons.push(`Kol desen adayı belirsiz: en iyi eşleşme %${percent(match.confidence)}, diğer aday %${percent(competing.match.confidence)}; tek yerleşim seçilemiyor.`);
+      const ratio=match.measuredAxis==='boy'?candidate.acrossPx/candidate.alongPx:candidate.alongPx/candidate.acrossPx;
+      const ratioError=Math.abs(ratio/match.designRatio-1),short=Math.min(candidate.box.w,candidate.box.h),long=Math.max(candidate.box.w,candidate.box.h);
+      // At <=48 px a single lost ink pixel changes a normalized 24x24 cell
+      // substantially. Only a detached, non-solid small mark with independent
+      // aspect agreement and a >10 percentage point lead may use 0.65 NCC.
+      const fill=chosen.candidate.pixels.length/(candidate.box.w*candidate.box.h);
+      const smallDistinct=!ambiguous&&short>=8&&long<=48&&chosen.candidate.pixels.length>=24&&fill>=.1&&fill<=.85&&ratioError<=.25;
+      const threshold=smallDistinct?.65:MIN_MATCH_CONFIDENCE;
+      Object.assign(source,{matchThreshold:threshold,matchPolicy:smallDistinct?'kucuk_ayrik_desen':'standart',runnerUpConfidence:competing?.match.confidence??null,matchMargin:competing?match.confidence-competing.match.confidence:null});
       // Without proven front/back orientation, image left is not wearer left.
       if(position!=='kol'&&!['on','arka'].includes(image.gorunum))reasons.push('Sol/sağ kol yönü görselden kesin doğrulanamadı; seçilen kol yerleşimi teyit edilmeli.');
-      if(match.confidence<MIN_MATCH_CONFIDENCE)reasons.push(`Kol desen eşleştirme güveni %${percent(match.confidence)}; %${percent(MIN_MATCH_CONFIDENCE)} sınırının altında.`);
+      if(match.confidence<threshold)reasons.push(`Kol desen eşleştirme güveni %${percent(match.confidence)}; %${percent(threshold)} sınırının altında.`);
       if(ref) {
-        const scale=scaleFor(ref,measurements);
+        const scale=scaleFor(ref,measurements,scalePair,p);
         source.scaleFrom='govde';source.mmPerPx=scale.mean;source.scaleDifference=scale.difference;
         source.hemWidthPx=ref.hemWidthPx;source.bodyHeightPx=ref.bodyHeightPx;
-        if(scale.difference>.15)reasons.push(`Kol için gövde boy/etek ölçek farkı %${percent(scale.difference)}; %15 sınırını aşıyor.`);
+        Object.assign(source,{chestPx:ref.chestLine?.width??null,chestLinePx:ref.chestLine??null,shoulderY:ref.shoulderY,hemY:ref.hemY});
+        if(scalePair==='boy_gogus'&&(!scale.vertical||!scale.horizontal))reasons.push('Kol için boy ve göğüs birlikte doğrulanamadı; göğüs çizgisi ve iki L ölçüsü gerekli.');
+        if(scale.difference>.15)reasons.push(`Kol için gövde ${pairLabel} ölçek farkı %${percent(scale.difference)}; %15 sınırını aşıyor.`);
         if(ref.symmetry<MIN_SYMMETRY)reasons.push(`Kol için kullanılan gövde simetrisi %${percent(ref.symmetry)}; %85 sınırının altında.`);
       } else if(Number.isFinite(measurements.kol_boyu)&&measurements.kol_boyu>0) {
         source.scaleFrom='kol_boyu';source.mmPerPx=measurements.kol_boyu*10/sleeve.lengthPx;
       }
-      if(!source.mmPerPx)reasons.push('Kol için ölçek kaynağı yok: geçerli L kol_boyu veya aynı görselde doğrulanmış gövde boy/etek ölçeği bulunamadı.');
+      if(!source.mmPerPx)reasons.push(`Kol için ölçek kaynağı yok: geçerli L kol_boyu veya aynı görselde doğrulanmış gövde ${pairLabel} ölçeği bulunamadı.`);
       source.scale=source.mmPerPx?source.mmPerPx/10:null;
-      if(!ambiguous&&match.confidence>=MIN_MATCH_CONFIDENCE) {
+      if(!ambiguous&&match.confidence>=threshold) {
         const measured=measureSleeve({alongPx:candidate.alongPx,acrossPx:candidate.acrossPx,designRatio:match.designRatio,measuredAxis:match.measuredAxis,mmPerPx:source.mmPerPx});
         source.aspectRatioError=measured.aspectRatioError;
         reasons.push(...measured.reasons);width=measured.width_mm;height=measured.height_mm;
         source.designBoxPx=candidate.box;
       }
-      source.summary=`Kol boyunca desenin ${match.measuredAxis} ekseni ölçüldü; diğer eksen desen dosyasının oranından hesaplandı. Ölçek: ${source.scaleFrom==='kol_boyu'?'L kol boyu':source.scaleFrom==='govde'?'aynı görselde L gövde boy/etek':'bulunamadı'}.`;
+      source.summary=width!=null?`Kol boyunca desenin ${match.measuredAxis} ekseni ölçüldü; diğer eksen desen dosyasının oranından hesaplandı. Ölçek: ${source.scaleFrom==='kol_boyu'?'L kol boyu':`aynı görselde L gövde ${pairLabel}`}.`:'Kol deseni değerlendirildi; güvenilir cm ölçüsü oluşmadı. Teyit gerekçelerine bakılmalı.';
     }
   } catch(e) {reasons.push(`Kol ürün/desen görseli okunamadı: ${e.message}`);}
   source.timingsMs={total:Math.round(performance.now()-started)};
@@ -584,13 +669,14 @@ async function autoMeasureSleeve({image,design,flat,position}) {
 }
 
 async function autoMeasure({image,design,flat,product,position}) {
-  if(['kol','sol_kol','sag_kol'].includes(position))return autoMeasureSleeve({image,design,flat,position});
-  const started=performance.now(),timings={},reasons=[],source={method:'otomatik',flatId:flat?.id??null,flatAd:flat?.ad??null,refBeden:flat?.refBeden??null,refCm:flat?.refLengthCm??null,olculerL:flat?.olculerL??null,chestPx:null,designBoxPx:null,scale:null,mmPerPx:null,confidence:0,gorselFileId:image?.id??null,desenFileId:design?.id??null};
+  if(['kol','sol_kol','sag_kol'].includes(position))return autoMeasureSleeve({image,design,flat,product,position});
+  const scalePair=scalePairFor(flat,product),pairLabel=scalePair==='boy_gogus'?'boy/göğüs':'boy/etek',horizontalLabel=scalePair==='boy_gogus'?'göğüs':'etek';
+  const started=performance.now(),timings={},reasons=[],source={scalePair,method:'otomatik',flatId:flat?.id??null,flatAd:flat?.ad??null,refBeden:flat?.refBeden??null,refCm:flat?.refLengthCm??null,olculerL:flat?.olculerL??null,chestPx:null,designBoxPx:null,scale:null,mmPerPx:null,confidence:0,gorselFileId:image?.id??null,desenFileId:design?.id??null};
   let width=null,height=null;
   const positive=n=>Number.isFinite(n)&&n>0;
   const measurements=flat?.refBeden==='L' && flat?.olculerL && typeof flat.olculerL==='object' ? flat.olculerL : {};
   if(flat?.refBeden!=='L')reasons.push('Ürünün L kalıp referansı bulunamadı: kayıt L beden değil veya belirtilmemiş (geçerli referans sayısı 0).');
-  if(!positive(measurements.omuzdan_boy)&&!positive(measurements.etek))reasons.push('Ürün için geçerli L beden kalıp ölçüleri bulunamadı (boy ve etek ölçüsü sayısı 0).');
+  if(!positive(measurements.omuzdan_boy)&&!positive(measurements[scalePair==='boy_gogus'?'gogus':'etek']))reasons.push(`Ürün için geçerli L beden kalıp ölçüleri bulunamadı (boy ve ${horizontalLabel} ölçüsü sayısı 0).`);
   if(viewForPosition(position)==='teyit')reasons.push('Ürün görünümü uygulama konumuyla eşleştirilemedi (geçerli görünüm sayısı 0).');
   try {
     const pages=await rasterPages(image,image.mime==='application/pdf'?320:MAX_EDGE),candidates=[],allViews=[];
@@ -607,8 +693,8 @@ async function autoMeasure({image,design,flat,product,position}) {
         const other=cues.find(c=>c.view!=='on');if(other.hooded)other.view='arka';
       }
       for(let k=0;k<refs.length;k++) {
-        const ref=refs[k],cue=cues[k],scale=scaleFor(ref,measurements);
-        allViews.push({page:i+1,index:k,view:cue.view,hooded:cue.hooded,viewEvidence:{lining:cue.lining,cords:cue.cords},maskMethod:ref.maskMethod,productBoxPx:ref.box,shoulderY:ref.shoulderY,hemY:ref.hemY,hemWidthPx:ref.hemWidthPx,bodyHeightPx:ref.bodyHeightPx,...scale});
+        const ref=refs[k],cue=cues[k],scale=scaleFor(ref,measurements,scalePair,pages[i]);
+        allViews.push({page:i+1,index:k,view:cue.view,hooded:cue.hooded,viewEvidence:{lining:cue.lining,cords:cue.cords},maskMethod:ref.maskMethod,productBoxPx:ref.box,shoulderY:ref.shoulderY,hemY:ref.hemY,hemWidthPx:ref.hemWidthPx,chestLinePx:ref.chestLine??null,bodyHeightPx:ref.bodyHeightPx,...scale});
         if(cue.view!=='teyit'&&cue.view!==viewForPosition(position))continue;
         if(refs.length>1&&cue.view==='teyit'&&!designs.length)continue;
         if(designs.length)for(let j=0;j<designs.length;j++) {
@@ -658,6 +744,7 @@ async function autoMeasure({image,design,flat,product,position}) {
     }
     else {
       const {ref,match,page,designPage}=chosen;
+      const {vertical,horizontal}=scaleFor(ref,measurements,scalePair,chosen.p);
       source.method=match.method||'otomatik';source.selectedView=viewForPosition(position);
       source.rasterWidth=chosen.p.width;source.rasterHeight=chosen.p.height;
       const competing=refined.find(c=>c.page!==page||c.index!==chosen.index);
@@ -670,13 +757,13 @@ async function autoMeasure({image,design,flat,product,position}) {
       // only for the identified front/back pair, as in the two-view workflow.
       const paired=pageViews.length===2&&pageViews.some(v=>v.view==='on')&&pageViews.some(v=>v.view==='arka');
       const samePage=paired?pageViews.filter(v=>v.mean):[];
-      for(const v of paired?pageViews.filter(v=>v.difference>.15&&v.index!==chosen.index):[])reasons.push(`${v.view==='arka'?'Arka':'Diğer'} görünümün boy/etek ölçek farkı %${percent(v.difference)}; %15 sınırını aşıyor (${v.vertical.toFixed(3)} ve ${v.horizontal.toFixed(3)} mm/px).`);
+      for(const v of paired?pageViews.filter(v=>v.difference>.15&&v.index!==chosen.index):[])reasons.push(`${v.view==='arka'?'Arka':'Diğer'} görünümün ${pairLabel} ölçek farkı %${percent(v.difference)}; %15 sınırını aşıyor (${v.vertical.toFixed(3)} ve ${v.horizontal.toFixed(3)} mm/px).`);
       if(samePage.length>1) {
         source.viewScaleDifference=(Math.max(...samePage.map(v=>v.mean))-Math.min(...samePage.map(v=>v.mean)))/(samePage.reduce((s,v)=>s+v.mean,0)/samePage.length);
         if(source.viewScaleDifference>.05)reasons.push(`Ön/arka ortalama ölçek farkı %${percent(source.viewScaleDifference)}; %5 sınırını aşıyor (${samePage.map(v=>v.mean.toFixed(3)).join(' ve ')} mm/px).`);
       }
       source.wrinkleFraction=wrinkleFraction(chosen.p,ref,match.box);
-      Object.assign(source,{selectedPage:page,selectedDesignPage:designPage,selectedProductIndex:chosen.index,maskMethod:ref.maskMethod,chestPx:ref.hemWidthPx,hemWidthPx:ref.hemWidthPx,bodyHeightPx:ref.bodyHeightPx,shoulderY:ref.shoulderY,hemY:ref.hemY,shoulderMethod:ref.shoulderMethod,productBoxPx:ref.box,symmetry:ref.symmetry,textureFraction:ref.textureFraction,softEdgeFraction:ref.softEdgeFraction});
+      Object.assign(source,{selectedPage:page,selectedDesignPage:designPage,selectedProductIndex:chosen.index,maskMethod:ref.maskMethod,chestPx:scalePair==='boy_gogus'?(ref.chestLine?.width??null):ref.hemWidthPx,chestLinePx:ref.chestLine??null,hemWidthPx:ref.hemWidthPx,bodyHeightPx:ref.bodyHeightPx,shoulderY:ref.shoulderY,hemY:ref.hemY,shoulderMethod:ref.shoulderMethod,productBoxPx:ref.box,symmetry:ref.symmetry,textureFraction:ref.textureFraction,softEdgeFraction:ref.softEdgeFraction});
       source.matchConfidence=Math.round(Math.max(0,Math.min(1,match.confidence))*1000)/1000;
       source.textureConfidencePenalty=(ref.softEdgeFraction>.35 || ref.textureFraction>.16 || source.wrinkleFraction>.06)?.05:0;
       source.confidence=Math.round(Math.max(0,source.matchConfidence-source.textureConfidencePenalty)*1000)/1000;
@@ -685,14 +772,14 @@ async function autoMeasure({image,design,flat,product,position}) {
       source.aspectRatioError=match.box&&source.designAspectRatio?Math.abs(match.box.w/match.box.h/source.designAspectRatio-1):null;
       if(ref.symmetry<MIN_SYMMETRY)reasons.push(`Ürün maskesinin sol-sağ simetrisi %${percent(ref.symmetry)}; %${percent(MIN_SYMMETRY)} sınırının altında.`);
       if(placementAmbiguous)reasons.push(`Desen/ürün eşleşme güveni düşük: birden fazla aday var (en iyi güven %${percent(match.confidence)}${competing?`, diğer ürün güveni %${percent(competing.match.confidence)}`:''}); tek yerleşim teyit edilmeli.`);
-      const {vertical,horizontal}=scaleFor(ref,measurements);
-      if((ref.maskMethod==='acik_zemin_bolge'||ref.box.w*ref.box.h<chosen.p.width*chosen.p.height*.10)&&(!vertical||!horizontal))reasons.push('Yeni bulunan ürün için boy ve etek ölçekleri birlikte doğrulanamadı; iki L ölçüsüyle teyit edilmeli.');
+      if((scalePair==='boy_gogus'||ref.maskMethod==='acik_zemin_bolge'||ref.box.w*ref.box.h<chosen.p.width*chosen.p.height*.10)&&(!vertical||!horizontal))reasons.push(`Ürün için boy ve ${horizontalLabel} ölçekleri birlikte doğrulanamadı; gövde çizgisi ve iki L ölçüsüyle teyit edilmeli.`);
       source.verticalMmPerPx=vertical;source.horizontalMmPerPx=horizontal;
       source.scaleDifference=vertical&&horizontal?Math.abs(vertical-horizontal)/((vertical+horizontal)/2):null;
-      if(vertical&&horizontal&&source.scaleDifference>.15)reasons.push(`Boy/etek ölçek farkı %${percent(source.scaleDifference)}; %15 sınırını aşıyor (${vertical.toFixed(3)} ve ${horizontal.toFixed(3)} mm/px).`);
+      if(vertical&&horizontal&&source.scaleDifference>.15)reasons.push(`${scalePair==='boy_gogus'?'Boy/göğüs':'Boy/etek'} ölçek farkı %${percent(source.scaleDifference)}; %15 sınırını aşıyor (${vertical.toFixed(3)} ve ${horizontal.toFixed(3)} mm/px).`);
       if((vertical&&!horizontal)||(!vertical&&horizontal))source.scaleNote='Tek L ölçeği bulundu (1 eksen); ikinci eksen ölçüsü yok.';
-      source.scaleMethod=vertical&&horizontal?'omuzdan_boy ve etek ortalaması':vertical?'yalnız omuzdan_boy':horizontal?'yalnız etek':null;
-      source.mmPerPx=vertical&&horizontal?(source.scaleDifference<=.15?(vertical+horizontal)/2:null):vertical||horizontal;
+      source.scaleMethod=vertical&&horizontal?`omuzdan_boy ve ${horizontalLabel} ortalaması`:vertical?'yalnız omuzdan_boy':horizontal?`yalnız ${horizontalLabel}`:null;
+      source.mmPerPx=vertical&&horizontal?(source.scaleDifference<=.15?(vertical+horizontal)/2:null):scalePair==='boy_gogus'?null:vertical||horizontal;
+      if(scalePair==='boy_gogus'&&(!vertical||!horizontal))source.scaleMethod='eksik boy/göğüs ölçek çifti; ölçü yok';
       if(vertical&&horizontal&&source.scaleDifference>.15)source.scaleMethod='çelişen L ölçekleri; ölçü yok';
       source.scale=source.mmPerPx?source.mmPerPx/10:null;
       if(source.aspectRatioError>.01)source.aspectRatioNote=`Desen en-boy oranı farkı %${percent(source.aspectRatioError)}.`;
@@ -701,7 +788,7 @@ async function autoMeasure({image,design,flat,product,position}) {
         source.designBoxPx=match.box;
         if(source.mmPerPx) {
           width=Math.round(match.box.w*source.mmPerPx);height=Math.round(match.box.h*source.mmPerPx);
-          if(match.box.w>ref.hemWidthPx)reasons.push(`Desen eni ${match.box.w.toFixed(1)} piksel, ürün gövde eninden (${ref.hemWidthPx} piksel) büyük; hesaplanan en ${width} mm.`);
+          if(match.box.w>(scalePair==='boy_gogus'?ref.chestLine?.width:ref.hemWidthPx))reasons.push(`Desen eni ${match.box.w.toFixed(1)} piksel, ürün gövde eninden (${ref.hemWidthPx} piksel) büyük; hesaplanan en ${width} mm.`);
           if(!Number.isSafeInteger(width)||!Number.isSafeInteger(height)||width<=0||height<=0){reasons.push(`Hesaplanan ölçü fiziksel olarak geçersiz (${width} × ${height} mm); pozitif tam sayı ölçü bulunamadı.`);width=height=null;}
         }
       }

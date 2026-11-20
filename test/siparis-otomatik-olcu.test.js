@@ -181,6 +181,9 @@ test('G24b large type, script marks and filled cover rectangles are not products
 
 const {multiMockup}=require('./fixtures/siparis/oto-multi');
 const hoodieFlat={...flat,olculerL:{omuzdan_boy:71,etek:52,gogus:61,tum_omuz:61.5}};
+// G39d: this fixture has 355px length and 264px underarm chest.
+// L 71/61 averages to 2.1553mm/px; the old hem-based 2mm/px no longer applies.
+const hoodieMmPerPx=(710/355+610/264)/2;
 test('G24c two views without a design exclude lining, cords, piping and pocket; order is irrelevant',async()=>{
   for(const swap of [false,true])for(const position of ['gogus','sirt']) {
     const r=await auto.autoMeasure(input(multiMockup({swap}),{design:null,flat:hoodieFlat,product:'sweat',position}));
@@ -189,10 +192,10 @@ test('G24c two views without a design exclude lining, cords, piping and pocket; 
     assert.equal(r.measure_source.selectedView,front?'on':'arka');
     assert.ok(Math.abs(b.x-(front?(swap?845:305):(swap?202:742)))<=2,JSON.stringify(r));
     assert.ok(Math.abs(b.y-235)<=2);assert.ok(Math.abs(b.w-(front?70:135))<=2);assert.ok(Math.abs(b.h-(front?40:60))<=2);
-    assert.ok(Math.abs(r.width_mm-(front?140:270))<=3,JSON.stringify(r));
-    assert.ok(Math.abs(r.height_mm-(front?80:120))<=3,JSON.stringify(r));
+    assert.ok(Math.abs(r.width_mm-(front?151:291))<=3,JSON.stringify(r));
+    assert.ok(Math.abs(r.height_mm-(front?86:129))<=3,JSON.stringify(r));
     assert.equal(r.measure_source.shoulderY,150);assert.ok(r.measure_source.viewScaleDifference<.05);
-    assert.ok(Math.abs(r.measure_source.mmPerPx-2)<.03);
+    assert.ok(Math.abs(r.measure_source.mmPerPx-hoodieMmPerPx)<.03);
   }
 });
 test('G24c unknown views and competing prints never invent a placement; empty garments have no print',async()=>{
@@ -208,7 +211,7 @@ test('G24c touching lower sleeves split only from independent upper bodies',asyn
     const r=await auto.autoMeasure(input(multiMockup({touching:true}),{design:null,flat:hoodieFlat,product:'sweat',position}));
     assert.equal(r.measure_source.views.length,2,JSON.stringify(r));
     assert.ok(r.measure_source.views.every(v=>v.view!=='teyit'),JSON.stringify(r));
-    assert.ok(Math.abs(r.width_mm-(position==='gogus'?140:270))<=3,JSON.stringify(r));
+    assert.ok(Math.abs(r.width_mm-(position==='gogus'?151:291))<=3,JSON.stringify(r));
     assert.ok(Math.abs(r.measure_source.designBoxPx.x-(position==='gogus'?305:582))<=2);
     assert.ok(r.measure_source.viewScaleDifference<.05);
   }
@@ -225,7 +228,7 @@ test('G24c mismatched and unreadable design files fall back to compact color ink
   const m=multiMockup();
   for(const design of [{buffer:mockup().design,mime:'image/png'},{buffer:Buffer.from('invalid'),mime:'image/png'}]) {
     const r=await auto.autoMeasure(input(m,{design,flat:hoodieFlat,product:'sweat',position:'sirt'}));
-    assert.equal(r.measure_source.method,'otomatik_renk',JSON.stringify(r));assert.ok(Math.abs(r.width_mm-270)<=3,JSON.stringify(r));
+    assert.equal(r.measure_source.method,'otomatik_renk',JSON.stringify(r));assert.ok(Math.abs(r.width_mm-291)<=3,JSON.stringify(r));
   }
 });
 test('G24c API uploads the same two-view hoodie for both applications without a design and preserves manual edits',async t=>{
@@ -233,7 +236,7 @@ test('G24c API uploads the same two-view hoodie for both applications without a 
   addFlat(f,'sweat');f.db.prepare('UPDATE document_flats SET olculerL=?').run(JSON.stringify(hoodieFlat.olculerL));
   for(const view of ['on','arka'])ok(await f.upload(v,{kind:'urun_gorsel',lineId:line.id,gorunum:view,buffer:m.image}),201);
   const apps=[];
-  for(const [kind,position,width] of [['nakis','gogus',140],['baski','sirt',270]]) {
+  for(const [kind,position,width] of [['nakis','gogus',151],['baski','sirt',291]]) {
     const app=ok(await f.post(`/satirlar/${line.id}/uygulamalar`,{kind,position}),201);apps.push(app);
     assert.ok(Math.abs(app.width_mm-width)<=3,JSON.stringify(app));assert.equal(JSON.parse(app.measure_source).method,'otomatik_renk');
     assert.equal(JSON.parse(app.measure_source).desenFileId,null);

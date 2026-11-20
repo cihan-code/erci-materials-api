@@ -10,7 +10,7 @@ async function fixture(t) {
   const f=await setup();
   t.after(async()=>{await documents.settled();await f.close();fs.rmSync(f.dir,{recursive:true,force:true});});
   f.flat=(id,ad,urun='sweat',refBeden='L')=>f.db.prepare('INSERT INTO document_flats(id,ad,urun,gorunum,dosya,refBeden,refLengthCm,olculerL) VALUES(?,?,?,?,?,?,?,?)')
-    .run(id,ad,urun,'on','synthetic.png',refBeden,60,JSON.stringify({omuzdan_boy:112.2,etek:60}));
+    .run(id,ad,urun,'on','synthetic.png',refBeden,60,JSON.stringify({omuzdan_boy:112.2,etek:60,gogus:60}));
   f.read=async id=>(await f.request(`/surumler/${id}`,{token:f.token})).data;
   f.patch=(id,kalipId)=>f.request(`/satirlar/${id}`,{method:'PATCH',token:f.token,body:{kalipId}});
   return f;
