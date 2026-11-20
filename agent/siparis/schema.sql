@@ -24,9 +24,10 @@ CREATE TABLE IF NOT EXISTS stock_items (
 CREATE TABLE IF NOT EXISTS order_lines (
  id INTEGER PRIMARY KEY, version_id INTEGER NOT NULL REFERENCES order_versions(id), line_key TEXT NOT NULL,
  product_key TEXT NOT NULL, recipe_version TEXT, fabric_item_id INTEGER REFERENCES stock_items(id), color_name TEXT, kalip_id TEXT,
- quantity INTEGER NOT NULL CHECK(typeof(quantity)='integer' AND quantity>0), sizes_json TEXT NOT NULL DEFAULT '{}',
+ quantity INTEGER NOT NULL CHECK(typeof(quantity)='integer' AND quantity>=0), sizes_json TEXT NOT NULL DEFAULT '{}',
  lining INTEGER NOT NULL DEFAULT 0 CHECK(lining IN (0,1)), material_items_json TEXT NOT NULL DEFAULT '{}', note TEXT,
- UNIQUE(version_id,line_key)
+ numune INTEGER NOT NULL DEFAULT 0 CHECK(numune IN (0,1)),
+ UNIQUE(version_id,line_key), CHECK(quantity>0 OR numune=1)
 );
 CREATE TABLE IF NOT EXISTS applications (
  id INTEGER PRIMARY KEY, line_id INTEGER NOT NULL REFERENCES order_lines(id), kind TEXT NOT NULL CHECK(kind IN ('baski','nakis')),

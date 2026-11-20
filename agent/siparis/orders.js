@@ -46,7 +46,10 @@ function jsonObject(value, label) {
   return obj;
 }
 function insertLine(db, versionId, line, lineKey, sourceApplications = []) {
-  integer(line.quantity, 'quantity', 1);
+  // A sample line (numune) may have no quantity yet; every other line needs at least one piece.
+  const numune = [true,1,'var'].includes(line.numune);
+  line = { ...line, quantity: line.quantity ?? (numune ? 0 : line.quantity) };
+  integer(line.quantity, 'quantity', numune ? 0 : 1);
   if (typeof line.product_key !== 'string' || !line.product_key.trim()) fail('Ürün anahtarı gerekli');
   const sizes = jsonObject(line.sizes_json ?? line.sizes, 'sizes');
   for (const q of Object.values(sizes)) integer(q, 'beden adedi');
@@ -61,9 +64,9 @@ function insertLine(db, versionId, line, lineKey, sourceApplications = []) {
   if (note && note.length > 500) fail('Kumaş/kalıp açıklaması en çok 500 karakter olabilir');
   const kalipId = line.kalipId ?? line.kalip_id ?? null;
   if (kalipId!=null && !flats.selection(db,line).candidates.some(f=>f.id===kalipId)) fail('Kalıp bu ürünün adaylarından biri olmalı');
-  const id = Number(db.prepare(`INSERT INTO order_lines(version_id,line_key,product_key,fabric_item_id,color_name,quantity,sizes_json,lining,material_items_json)
-    VALUES(?,?,?,?,?,?,?,?,?)`).run(versionId, lineKey || crypto.randomUUID(), line.product_key, line.fabric_item_id ?? null,
-    line.color_name ?? null, line.quantity, JSON.stringify(sizes), [true,1,'var'].includes(line.lining) ? 1 : 0, JSON.stringify(materials)).lastInsertRowid);
+  const id = Number(db.prepare(`INSERT INTO order_lines(version_id,line_key,product_key,fabric_item_id,color_name,quantity,sizes_json,lining,material_items_json,numune)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run(versionId, lineKey || crypto.randomUUID(), line.product_key, line.fabric_item_id ?? null,
+    line.color_name ?? null, line.quantity, JSON.stringify(sizes), [true,1,'var'].includes(line.lining) ? 1 : 0, JSON.stringify(materials), numune ? 1 : 0).lastInsertRowid);
   if (kalipId!=null) db.prepare('UPDATE order_lines SET kalip_id=? WHERE id=?').run(kalipId,id);
   if (note) db.prepare('UPDATE order_lines SET note=? WHERE id=?').run(note,id);
   for (const a of line.applications || []) {

@@ -27,6 +27,8 @@ function approveVersion(db, { versionId, userId, fileId, recipes = recipeReader.
     if (previous) retireWorkshopJobs(db, previous.id, userId);
     const plan = [];
     for (const line of lines) {
+      // A zero-piece sample line reserves no material.
+      if (!line.quantity) continue;
       const recipe = recipes.products?.[line.product_key];
       if (!recipe || !Array.isArray(recipe.materials) || !recipe.materials.length) fail(`Reçete yok: ${line.product_key}`);
       const mapping = JSON.parse(line.material_items_json);

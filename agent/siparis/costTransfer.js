@@ -97,12 +97,15 @@ function orderFacts(db, v, recipes) {
   // One İşler record carries one product type and one cost template.
   if (products.length !== 1) throw dataError(`Birden çok ürün tipi (${products.map(key => recipes?.products?.[key]?.label || 'Bilinmeyen ürün').join(', ')}) tek İşler kaydına aktarılamaz; maliyeti elle girin`);
   const label = recipes?.products?.[products[0]]?.label || products[0];
-  const total = lines.reduce((s, l) => s + l.quantity, 0);
-  const sizeList = lines.map(l => JSON.parse(l.sizes_json));
+  // Zero-piece lines (a sample not yet counted) stay in the order but add no pieces, sizes or application units.
+  const counted = lines.filter(l => l.quantity > 0);
+  const total = counted.reduce((s, l) => s + l.quantity, 0);
+  if (!total) throw dataError('Adedi olan satır yok (numune adedi 0); maliyeti elle girin');
+  const sizeList = counted.map(l => JSON.parse(l.sizes_json));
   // A breakdown missing some lines would look complete in İşler; leave it unknown.
   const sizes = sizeList.every(s => Object.keys(s).length)
     ? sizeList.reduce((acc, s) => { for (const [k, q] of Object.entries(s)) acc[k] = (acc[k] || 0) + q; return acc; }, {}) : null;
-  const apps = applicationUnits(lines);
+  const apps = applicationUnits(counted);
   // Areas present on only some lines: express the gap with the form's own exception mechanism so per-area counts stay exact.
   const instructions = apps.filter(a => a.lineQty < total).map(a => ({
     text: `${total - a.lineQty} adette ${a.area} ${a.type === 'baski' ? 'baskısı' : 'nakışı'} yok (yalnız bazı satırlarda var)`,
@@ -321,7 +324,7 @@ function setPrice(db, orderId, body, user) {
     const fields = { unit_price: unitPrice, kdv_dahil: 0, price_by: userId, price_at: now() };
     let bnItems;
     if (Object.hasOwn(input, 'bnItems')) {
-      bnItems = input.bnItems == null ? null : validBnItems(input.bnItems, applicationUnits(snapshot(db, v.id).lines));
+      bnItems = input.bnItems == null ? null : validBnItems(input.bnItems, applicationUnits(snapshot(db, v.id).lines.filter(l => l.quantity > 0)));
       fields.bn_items_json = bnItems ? JSON.stringify(bnItems) : null;
     }
     upsert(db, v.id, orderId, fields);
@@ -332,4 +335,4 @@ function setPrice(db, orderId, body, user) {
   });
 }
 
-module.exports = { KIND, STALE_REF, ensureSchema, register, transfer, costStatus, setPrice, resolveJob, applicationUnits };
+module.exports = { KIND, STALE_REF, ensureSchema, register, transfer, costStatus, setPrice, resolveJob, applicationUnits, orderFacts };
