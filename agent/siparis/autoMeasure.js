@@ -922,6 +922,90 @@ async function autoMeasure({image,design,flat,product,position}) {
   source.timingsMs={...Object.fromEntries(Object.entries(timings).map(([k,v])=>[k,Math.round(v)])),total:Math.round(performance.now()-started)};
   return {width_mm:width,height_mm:height,measure_source:source,needs_confirmation:reasons.length>0,reasons,reason:reasons.join(' ')};
 }
+// Folds change the brightness of dyed cloth far more than its hue. Fit the
+// ring as one colour under varying light; print must lie well off that line.
+// Returns how far a pixel is beyond the ring's spread, or null when the ring
+// itself is not one shaded colour (a second colour, seam or print edge).
+const SHADE_INK=45, SHADE_CLOTH=12;
+function clothShading(data,ring,fabric) {
+  const norm=fabric[0]**2+fabric[1]**2+fabric[2]**2,mean=(fabric[0]+fabric[1]+fabric[2])/3;
+  if(norm<300)return null;
+  const fit=i=> {
+    const c=[data[i*4],data[i*4+1],data[i*4+2]],s=(c[0]*fabric[0]+c[1]*fabric[1]+c[2]*fabric[2])/norm;
+    return [s*mean,Math.max(...c.map((v,k)=>Math.abs(v-s*fabric[k])))];
+  };
+  const fits=ring.map(fit),levels=fits.map(f=>f[0]).sort((a,b)=>a-b),offs=fits.map(f=>f[1]).sort((a,b)=>a-b);
+  const at=(a,q)=>a[Math.min(a.length-1,Math.floor(a.length*q))];
+  const low=at(levels,.005),high=at(levels,.995),off=at(offs,.995);
+  if(off>20||offs.at(-1)>off+SHADE_CLOTH*2||levels.at(-1)>high+SHADE_CLOTH*2||levels[0]<low-SHADE_CLOTH*2)return null;
+  return i=> {const [level,o]=fit(i);return Math.max(o-off,level-high,low-level);};
+}
+// The placement detector drops thin strokes (star rays) and small lines
+// (dates) before joining a print. Rejoin its own contrast ink lying next to
+// the print inside the print band; a cord or seam crosses the band edge and
+// stays out.
+function wholePrint(p,ref,box,tallBack) {
+  const w=p.width,h=p.height,cx=ref.bodyCenterX??(ref.box.x+ref.box.w/2);
+  // A back has no cords or opening below the collar; its print may rise closer to it.
+  const top=Math.max(0,Math.ceil(ref.shoulderY+ref.bodyHeightPx*(tallBack?.04:.14))),bottom=Math.min(h,Math.floor(ref.shoulderY+ref.bodyHeightPx*(tallBack?.83:.62)));
+  const left=Math.max(0,Math.ceil(cx-ref.hemWidthPx*.48)),right=Math.min(w,Math.floor(cx+ref.hemWidthPx*.48));
+  const all=contrastInk(p,ref),ink=new Uint8Array(w*h);
+  for(let y=top;y<bottom;y++)for(let x=left;x<right;x++) {const i=y*w+x;ink[i]=all[i];}
+  const parts=components(ink,w,h,2).filter(c=>c.box.x>left&&c.box.y>top&&c.box.x+c.box.w<right&&c.box.y+c.box.h<bottom);
+  let b={...box},grown=true;
+  while(grown) {
+    grown=false;
+    const gap=Math.max(2,Math.round(Math.min(b.w,b.h)*.2));
+    for(const c of parts) {
+      const q=c.box;
+      if(c.joined||q.x>b.x+b.w+gap||q.x+q.w<b.x-gap||q.y>b.y+b.h+gap||q.y+q.h<b.y-gap)continue;
+      c.joined=grown=true;
+      const x0=Math.min(b.x,q.x),y0=Math.min(b.y,q.y);
+      b={x:x0,y:y0,w:Math.max(b.x+b.w,q.x+q.w)-x0,h:Math.max(b.y+b.h,q.y+q.h)-y0};
+    }
+  }
+  return b;
+}
+// Share of the neck/hood opening that is clearly darker than the cloth. Only a
+// front view shows the shadowed inside of a neckline or hood; null on light
+// cloth, where that shadow is too faint to separate from folds.
+function openingShade(p,ref) {
+  const w=p.width,d=p.data,cx=ref.bodyCenterX??(ref.box.x+ref.box.w/2);
+  const garment=dominant(p,Array.from(ref.mask.keys()).filter(i=>ref.mask[i])),level=(garment[0]+garment[1]+garment[2])/3;
+  if(level>128)return null;
+  const limit=level-Math.max(12,level*.3);
+  let total=0,dark=0;
+  for(let y=ref.box.y;y<ref.shoulderY+ref.bodyHeightPx*.05;y++)
+    for(let x=Math.ceil(cx-ref.hemWidthPx*.15);x<cx+ref.hemWidthPx*.15;x++) {
+      const i=y*w+x;
+      if(!ref.mask[i])continue;
+      total++;if((d[i*4]+d[i*4+1]+d[i*4+2])/3<limit)dark++;
+    }
+  return total?dark/total:null;
+}
+// Extraction only: settle front/back of a side-by-side pair of the same
+// garment. Two independent cues are used, and any disagreement leaves both
+// views unresolved: the opening shade above, and a chest-side print, which
+// only a front carries while the other print sits on the centre line.
+function pairViews(p,refs,cues,matches) {
+  // A front already found by hood evidence must agree with these cues.
+  const known=cues.findIndex(c=>c.view==='on');
+  if(refs.length!==2||!comparableShirts(...refs)||cues.some(c=>!['on','teyit'].includes(c.view))||cues.every(c=>c.view==='on'))return;
+  const votes=[],shade=refs.map(ref=>openingShade(p,ref));
+  if(shade.every(s=>s!=null)) {
+    const front=shade.findIndex(s=>s>=.15);
+    // Dark cloth always shows a front opening; without one, neither is a front.
+    if(front<0||shade[1-front]>.03)return;
+    votes.push(front);
+  }
+  if(matches.every(m=>m.box&&!m.ambiguous)) {
+    const offset=refs.map((ref,i)=>Math.abs(matches[i].box.x+matches[i].box.w/2-ref.bodyCenterX)/ref.hemWidthPx);
+    const front=offset.findIndex(o=>o>=.15);
+    if(front>=0&&offset[1-front]<.08)votes.push(front);
+  }
+  if(!votes.length||votes.some(v=>v!==votes[0])||(known>=0&&votes[0]!==known))return;
+  cues[votes[0]].view='on';cues[1-votes[0]].view='arka';
+}
 // Artwork recovery uses the existing placement detector but never infers a physical scale.
 async function extractArtwork({image,position,product:productKey}) {
   const view=viewForPosition(position);
@@ -935,11 +1019,13 @@ async function extractArtwork({image,position,product:productKey}) {
   let hasProduct=false, ambiguousView=false, wrongSide=false;
   for(const [i,p] of pages.entries()) {
     const refs=silhouettes(p,productKey),cues=productViewCues(p,refs,productKey);
+    const matches=refs.map(ref=>colorDesign(p,ref,position==='sirt'));
+    pairViews(p,refs,cues,matches);
     for(const [index,ref] of refs.entries()) {
       hasProduct=true;
       const cue=cues[index];
       if(cue.view!=='teyit'&&cue.view!==view)continue;
-      const match=colorDesign(p,ref,position==='sirt');
+      const match=matches[index];
       if(!match.box)continue;
       if(refs.length>1&&cue.view==='teyit') {ambiguousView=true;continue;}
       const {x,w}=match.box;
@@ -954,7 +1040,8 @@ async function extractArtwork({image,position,product:productKey}) {
     ? 'Güvenilir desen adayı yok. Düşük kontrast, dikiş veya kesik desen olabilir.'
     : 'Tam ürün maskesi bulunamadı; ürün veya desen kesilmiş olabilir.'};
 
-  const {p,ref,match,page}=candidates[0], b=match.box;
+  const {p,ref,match,page}=candidates[0];
+  let b=match.box;
   const {width:w,height:h,data}=p, mask=ref.mask;
   const unsafe={reason:'Desen kenarı kumaş, gölge veya dikişten güvenle ayrılamadı; ayrı desen dosyası bağlayın.'};
   const product=ref.box;
@@ -970,25 +1057,36 @@ async function extractArtwork({image,position,product:productKey}) {
     (product.x<3&&!sleeveOnly(product.x))||(product.x+product.w>w-3&&!sleeveOnly(product.x+product.w-1)))
     return {reason:'Ürün görüntü kenarında kesiliyor; desenin tamamı doğrulanamadı.'};
   if(ref.symmetry<MIN_SYMMETRY)return unsafe;
-  if(b.w>ref.hemWidthPx*.90||b.h>ref.bodyHeightPx*(position==='sirt'?.70:.44)) return unsafe;
-  const pad=Math.max(4,Math.round(Math.min(b.w,b.h)*.14));
-  const x=Math.max(1,b.x-pad),y=Math.max(1,b.y-pad),right=Math.min(w-1,b.x+b.w+pad),bottom=Math.min(h-1,b.y+b.h+pad);
-  const cw=right-x,ch=bottom-y,ring=[];
-  for(let yy=y;yy<bottom;yy++)for(let xx=x;xx<right;xx++) {
-    const i=yy*w+xx;
-    if(!mask[i]||data[i*4+3]<250)return unsafe;
-    if(xx<x+2||yy<y+2||xx>=right-2||yy>=bottom-2)ring.push(i);
-  }
-  const fabric=dominant(p,ring);
-  const contrast=i=>Math.max(Math.abs(data[i*4]-fabric[0]),Math.abs(data[i*4+1]-fabric[1]),Math.abs(data[i*4+2]-fabric[2]));
+  const maxW=ref.hemWidthPx*.90,maxH=ref.bodyHeightPx*(position==='sirt'?.70:.44);
+  if(b.w>maxW||b.h>maxH) return unsafe;
   const maxChannel=i=>Math.max(data[i*4],data[i*4+1],data[i*4+2]);
   const minChannel=i=>Math.min(data[i*4],data[i*4+1],data[i*4+2]);
   const white=(i,level)=>minChannel(i)>=level&&maxChannel(i)-minChannel(i)<=27;
-  const unstable=wrinkleFraction(p,ref,b)>.08||ring.some(i=>contrast(i)>22)||ring.filter(i=>contrast(i)>9).length>ring.length*.07;
-  // On charcoal cloth, folds can shift the background by dozens of levels
-  // while remaining far below a neutral white print in every channel.
-  const whiteLayer=unstable&&ring.every(i=>maxChannel(i)<=120)&&ring.filter(i=>maxChannel(i)<=90).length>=ring.length*.96;
-  if(unstable&&!whiteLayer)return unsafe;
+  // Crop a print box with a margin and read the cloth from its outer ring.
+  const isolate=b=> {
+    const pad=Math.max(4,Math.round(Math.min(b.w,b.h)*.14));
+    const x=Math.max(1,b.x-pad),y=Math.max(1,b.y-pad),right=Math.min(w-1,b.x+b.w+pad),bottom=Math.min(h-1,b.y+b.h+pad),ring=[];
+    for(let yy=y;yy<bottom;yy++)for(let xx=x;xx<right;xx++) {
+      const i=yy*w+xx;
+      if(!mask[i]||data[i*4+3]<250)return null;
+      if(xx<x+2||yy<y+2||xx>=right-2||yy>=bottom-2)ring.push(i);
+    }
+    const fabric=dominant(p,ring);
+    const contrast=i=>Math.max(Math.abs(data[i*4]-fabric[0]),Math.abs(data[i*4+1]-fabric[1]),Math.abs(data[i*4+2]-fabric[2]));
+    const unstable=wrinkleFraction(p,ref,b)>.08||ring.some(i=>contrast(i)>22)||ring.filter(i=>contrast(i)>9).length>ring.length*.07;
+    // On charcoal cloth, folds can shift the background by dozens of levels
+    // while remaining far below a neutral white print in every channel. Dyed
+    // dark cloth (navy) is left to the shading model below.
+    const whiteLayer=unstable&&Math.max(...fabric)-Math.min(...fabric)<=24&&ring.every(i=>maxChannel(i)<=120)&&ring.filter(i=>maxChannel(i)<=90).length>=ring.length*.96;
+    const shading=unstable&&!whiteLayer?clothShading(data,ring,fabric):null;
+    if(unstable&&!whiteLayer&&!shading)return null;
+    return {x,y,right,bottom,cw:right-x,ch:bottom-y,fabric,contrast,whiteLayer,shading};
+  };
+  b=wholePrint(p,ref,b,position==='sirt');
+  if(b.w>maxW||b.h>maxH)return unsafe;
+  const crop=isolate(b);
+  if(!crop)return unsafe;
+  const {x,y,right,bottom,cw,ch,fabric,contrast,whiteLayer,shading}=crop,layered=whiteLayer||!!shading;
   // The placement detector searches the usual print band. A second prominent
   // mark elsewhere on the torso makes a source crop unsafe as well.
   const outside=new Uint8Array(w*h), left=Math.max(2,Math.ceil(ref.bodyCenterX-ref.hemWidthPx*.47)),
@@ -997,52 +1095,91 @@ async function extractArtwork({image,position,product:productKey}) {
     for(let xx=left;xx<end;xx++) {
       if(xx>=x&&xx<right&&yy>=y&&yy<bottom)continue;
       const i=yy*w+xx;
-      if(mask[i]&&mask[i-2]&&mask[i+2]&&mask[i-2*w]&&mask[i+2*w]&&(whiteLayer?white(i,172):contrast(i)>75))outside[i]=1;
+      if(mask[i]&&mask[i-2]&&mask[i+2]&&mask[i-2*w]&&mask[i+2*w]&&(whiteLayer?white(i,172):shading?shading(i)>=SHADE_INK:contrast(i)>75))outside[i]=1;
     }
   if(components(outside,w,h,Math.max(12,match.score*.10)).some(c=>c.box.w>=5&&c.box.h>=5))
     return {reason:'Üründe birden çok desen adayı var; konumu teyit edin ya da ayrı desen bağlayın.'};
-  const ink=new Uint8Array(cw*ch), whiteCore=whiteLayer?new Uint8Array(cw*ch):null;
+  const ink=new Uint8Array(cw*ch), core=layered?new Uint8Array(cw*ch):null;
   let coreArea=0;
   for(let yy=0;yy<ch;yy++)for(let xx=0;xx<cw;xx++) {
     const i=(y+yy)*w+x+xx,j=yy*cw+xx;
     if(whiteLayer) {
       // Reject a second bright ink layer rather than silently making it transparent.
       if(maxChannel(i)>=150&&!white(i,128))return unsafe;
-      if(white(i,172)) {whiteCore[j]=ink[j]=1;coreArea++;}
+      if(white(i,172)) {core[j]=ink[j]=1;coreArea++;}
+    } else if(shading) {
+      if(shading(i)>=SHADE_INK) {core[j]=ink[j]=1;coreArea++;}
     } else if(contrast(i)>19)ink[j]=1;
   }
-  if(whiteLayer) {
+  if(layered) {
     if(coreArea<Math.max(24,match.score*.68))return unsafe;
-    const nearCore=dilate(whiteCore,cw,ch,1,1);
+    const nearCore=dilate(core,cw,ch,1,1);
+    let loose=0;
     for(let yy=0;yy<ch;yy++)for(let xx=0;xx<cw;xx++) {
-      const j=yy*cw+xx;
-      if(nearCore[j]&&white((y+yy)*w+x+xx,125))ink[j]=1;
+      const i=(y+yy)*w+x+xx,j=yy*cw+xx;
+      if(whiteLayer) {if(nearCore[j]&&white(i,125))ink[j]=1;}
+      else if(shading(i)>SHADE_CLOTH) {if(nearCore[j])ink[j]=1;else loose++;}
     }
+    // Off-cloth pixels away from the print edge are a fold or a faint second
+    // layer that neither the cloth model nor the print explains.
+    if(loose>coreArea*.03)return unsafe;
   }
   const parts=components(ink,cw,ch), box=bounds(ink,cw,ch);
   if(!box||box.w<8||box.h<8||box.x<2||box.y<2||box.x+box.w>cw-2||box.y+box.h>ch-2)return unsafe;
   const area=parts.reduce((sum,c)=>sum+c.area,0);
-  if(area<box.w*box.h*(whiteLayer?.035:.08)||parts.some(c=>c.area>=8&&(c.box.w>c.box.h*10||c.box.h>c.box.w*10)))return unsafe;
+  if(area<box.w*box.h*(layered?.035:.08)||parts.some(c=>c.area>=8&&(c.box.w>c.box.h*10||c.box.h>c.box.w*10)))return unsafe;
   const rowInk=new Uint16Array(box.h),colInk=new Uint16Array(box.w);
   for(let yy=0;yy<box.h;yy++)for(let xx=0;xx<box.w;xx++)if(ink[(box.y+yy)*cw+box.x+xx]) {rowInk[yy]++;colInk[xx]++;}
   const thinLimit=Math.max(2,Math.round(Math.min(box.w,box.h)*.07));
-  const hasThinEnd=counts=> {
-    const first=counts.findIndex(n=>n>thinLimit),last=counts.findLastIndex(n=>n>thinLimit);
-    return first<0||Math.max(first,counts.length-1-last)>Math.max(5,counts.length*.17);
+  // Each check returns the suspicious thin ends as [from,to) ranges along the profile.
+  const thinEnds=counts=> {
+    const first=counts.findIndex(n=>n>thinLimit),last=counts.findLastIndex(n=>n>thinLimit),limit=Math.max(5,counts.length*.17);
+    if(first<0)return [[0,counts.length]];
+    return [...(first>limit?[[0,first]]:[]),...(counts.length-1-last>limit?[[last+1,counts.length]]:[])];
   };
-  const hasFlatThinEnd=counts=> {
-    const limit=Math.max(10,Math.round(counts.length*.12));
-    for(const values of [counts,counts.slice().reverse()]) {
-      let run=0,runWidth=0;
+  const flatThinEnds=counts=> {
+    const limit=Math.max(10,Math.round(counts.length*.12)),ends=[];
+    for(const reversed of [false,true]) {
+      const values=reversed?counts.slice().reverse():counts;
+      let run=0,runWidth=0,n=0;
       for(const value of values) {
         if(value>thinLimit)break;
+        n++;
         if(Math.abs(value-runWidth)>1) {run=0;runWidth=value;}
-        if(++run>=limit)return true;
+        if(++run>=limit) {
+          const thick=values.findIndex(v=>v>thinLimit),to=thick<0?values.length:thick;
+          ends.push(reversed?[counts.length-to,counts.length]:[0,to]);break;
+        }
       }
     }
-    return false;
+    return ends;
   };
-  if(whiteLayer ? hasFlatThinEnd(rowInk)||hasFlatThinEnd(colInk) : hasThinEnd(rowInk)||hasThinEnd(colInk))return unsafe;
+  // A thin end is a seam or cord unless it grows out of the print itself and
+  // tapers: every ink pixel there belongs to a part that continues past the
+  // thin end and is broad elsewhere, and the end narrows away from it, like
+  // the ray of a star. A seam or cord keeps one width along its length.
+  const owner=new Int32Array(cw*ch).fill(-1);
+  parts.forEach((part,k)=>{for(const i of part.pixels)owner[i]=k;});
+  const attached=(rows,[from,to])=> {
+    const seen=new Set();
+    for(let a=from;a<to;a++)for(let bIndex=0;bIndex<(rows?box.w:box.h);bIndex++) {
+      const yy=box.y+(rows?a:bIndex),xx=box.x+(rows?bIndex:a),k=owner[yy*cw+xx];
+      if(k>=0)seen.add(k);
+    }
+    return [...seen].every(k=> {
+      const q=parts[k].box,start=(rows?q.y-box.y:q.x-box.x),stop=start+(rows?q.h:q.w);
+      return parts[k].area>=area*.05&&(rows?q.w:q.h)>=thinLimit*3&&(start<from||stop>to);
+    });
+  };
+  const tapered=(counts,[from,to])=> {
+    const widths=Array.from(counts.subarray(from,to)).filter(n=>n>0);
+    if(widths.length<3)return false;
+    const third=Math.max(1,Math.floor(widths.length/3)),mean=a=>a.reduce((x,y)=>x+y,0)/a.length;
+    const [far,near]=from===0?[widths.slice(0,third),widths.slice(-third)]:[widths.slice(-third),widths.slice(0,third)];
+    return mean(near)>=Math.max(2,mean(far)*1.8);
+  };
+  const ends=(layered?flatThinEnds:thinEnds);
+  if(ends(rowInk).some(r=>!attached(true,r)||!tapered(rowInk,r))||ends(colInk).some(r=>!attached(false,r)||!tapered(colInk,r)))return unsafe;
   // A real print should have a repeatable boundary. Small changes to the
   // fabric threshold must not make a substantial part of the artwork vanish.
   let weak=0,opaque=0,sameColor=0;
@@ -1053,7 +1190,7 @@ async function extractArtwork({image,position,product:productKey}) {
     if(d>=65)opaque++;
     if(Math.abs(data[offset]-data[colorOffset])<=9&&Math.abs(data[offset+1]-data[colorOffset+1])<=9&&Math.abs(data[offset+2]-data[colorOffset+2])<=9)sameColor++;
   }
-  if(whiteLayer ? coreArea>box.w*box.h*.91 : weak>area*.14||opaque<area*.28||(area>box.w*box.h*.94&&sameColor>area*.94))return unsafe;
+  if(layered ? coreArea>box.w*box.h*.91 : weak>area*.14||opaque<area*.28||(area>box.w*box.h*.94&&sameColor>area*.94))return unsafe;
   const canvas=canvasLib.createCanvas(box.w,box.h),ctx=canvas.getContext('2d'),ground=Math.max(...fabric);
   try {
     const pixels=ctx.createImageData(box.w,box.h);
@@ -1063,8 +1200,12 @@ async function extractArtwork({image,position,product:productKey}) {
       const src=((y+box.y+yy)*w+x+box.x+xx)*4,dst=(yy*box.w+xx)*4;
       if(whiteLayer) {
         const shade=minChannel(src/4);
-        const coverage=whiteCore[i]&&shade>=195 ? 255 : Math.round(255*(shade-ground)/(235-ground));
+        const coverage=core[i]&&shade>=195 ? 255 : Math.round(255*(shade-ground)/(235-ground));
         pixels.data.set([255,255,255,coverage],dst);
+      } else if(shading&&!core[i]) {
+        // Edge pixels blend print and cloth; keep their share as opacity.
+        const coverage=Math.round(255*Math.min(1,(shading(src/4)-SHADE_CLOTH)/(SHADE_INK-SHADE_CLOTH)));
+        pixels.data.set([data[src],data[src+1],data[src+2],coverage],dst);
       } else pixels.data.set(data.subarray(src,src+4),dst);
     }
     ctx.putImageData(pixels,0,0);
