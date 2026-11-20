@@ -969,7 +969,7 @@ async function extractArtwork({image,position,product:productKey}) {
   if(product.y<3||product.y+product.h>h-3||
     (product.x<3&&!sleeveOnly(product.x))||(product.x+product.w>w-3&&!sleeveOnly(product.x+product.w-1)))
     return {reason:'Ürün görüntü kenarında kesiliyor; desenin tamamı doğrulanamadı.'};
-  if(ref.symmetry<MIN_SYMMETRY||wrinkleFraction(p,ref,b)>.08) return unsafe;
+  if(ref.symmetry<MIN_SYMMETRY)return unsafe;
   if(b.w>ref.hemWidthPx*.90||b.h>ref.bodyHeightPx*(position==='sirt'?.70:.44)) return unsafe;
   const pad=Math.max(4,Math.round(Math.min(b.w,b.h)*.14));
   const x=Math.max(1,b.x-pad),y=Math.max(1,b.y-pad),right=Math.min(w-1,b.x+b.w+pad),bottom=Math.min(h-1,b.y+b.h+pad);
@@ -981,7 +981,14 @@ async function extractArtwork({image,position,product:productKey}) {
   }
   const fabric=dominant(p,ring);
   const contrast=i=>Math.max(Math.abs(data[i*4]-fabric[0]),Math.abs(data[i*4+1]-fabric[1]),Math.abs(data[i*4+2]-fabric[2]));
-  if(ring.some(i=>contrast(i)>22)||ring.filter(i=>contrast(i)>9).length>ring.length*.07)return unsafe;
+  const maxChannel=i=>Math.max(data[i*4],data[i*4+1],data[i*4+2]);
+  const minChannel=i=>Math.min(data[i*4],data[i*4+1],data[i*4+2]);
+  const white=(i,level)=>minChannel(i)>=level&&maxChannel(i)-minChannel(i)<=27;
+  const unstable=wrinkleFraction(p,ref,b)>.08||ring.some(i=>contrast(i)>22)||ring.filter(i=>contrast(i)>9).length>ring.length*.07;
+  // On charcoal cloth, folds can shift the background by dozens of levels
+  // while remaining far below a neutral white print in every channel.
+  const whiteLayer=unstable&&ring.every(i=>maxChannel(i)<=120)&&ring.filter(i=>maxChannel(i)<=90).length>=ring.length*.96;
+  if(unstable&&!whiteLayer)return unsafe;
   // The placement detector searches the usual print band. A second prominent
   // mark elsewhere on the torso makes a source crop unsafe as well.
   const outside=new Uint8Array(w*h), left=Math.max(2,Math.ceil(ref.bodyCenterX-ref.hemWidthPx*.47)),
@@ -990,16 +997,32 @@ async function extractArtwork({image,position,product:productKey}) {
     for(let xx=left;xx<end;xx++) {
       if(xx>=x&&xx<right&&yy>=y&&yy<bottom)continue;
       const i=yy*w+xx;
-      if(mask[i]&&mask[i-2]&&mask[i+2]&&mask[i-2*w]&&mask[i+2*w]&&contrast(i)>75)outside[i]=1;
+      if(mask[i]&&mask[i-2]&&mask[i+2]&&mask[i-2*w]&&mask[i+2*w]&&(whiteLayer?white(i,172):contrast(i)>75))outside[i]=1;
     }
   if(components(outside,w,h,Math.max(12,match.score*.10)).some(c=>c.box.w>=5&&c.box.h>=5))
     return {reason:'Üründe birden çok desen adayı var; konumu teyit edin ya da ayrı desen bağlayın.'};
-  const ink=new Uint8Array(cw*ch);
-  for(let yy=0;yy<ch;yy++)for(let xx=0;xx<cw;xx++)ink[yy*cw+xx]=contrast((y+yy)*w+x+xx)>19?1:0;
+  const ink=new Uint8Array(cw*ch), whiteCore=whiteLayer?new Uint8Array(cw*ch):null;
+  let coreArea=0;
+  for(let yy=0;yy<ch;yy++)for(let xx=0;xx<cw;xx++) {
+    const i=(y+yy)*w+x+xx,j=yy*cw+xx;
+    if(whiteLayer) {
+      // Reject a second bright ink layer rather than silently making it transparent.
+      if(maxChannel(i)>=150&&!white(i,128))return unsafe;
+      if(white(i,172)) {whiteCore[j]=ink[j]=1;coreArea++;}
+    } else if(contrast(i)>19)ink[j]=1;
+  }
+  if(whiteLayer) {
+    if(coreArea<Math.max(24,match.score*.68))return unsafe;
+    const nearCore=dilate(whiteCore,cw,ch,1,1);
+    for(let yy=0;yy<ch;yy++)for(let xx=0;xx<cw;xx++) {
+      const j=yy*cw+xx;
+      if(nearCore[j]&&white((y+yy)*w+x+xx,125))ink[j]=1;
+    }
+  }
   const parts=components(ink,cw,ch), box=bounds(ink,cw,ch);
   if(!box||box.w<8||box.h<8||box.x<2||box.y<2||box.x+box.w>cw-2||box.y+box.h>ch-2)return unsafe;
   const area=parts.reduce((sum,c)=>sum+c.area,0);
-  if(area<box.w*box.h*.08||parts.some(c=>c.area>=8&&(c.box.w>c.box.h*10||c.box.h>c.box.w*10)))return unsafe;
+  if(area<box.w*box.h*(whiteLayer?.035:.08)||parts.some(c=>c.area>=8&&(c.box.w>c.box.h*10||c.box.h>c.box.w*10)))return unsafe;
   const rowInk=new Uint16Array(box.h),colInk=new Uint16Array(box.w);
   for(let yy=0;yy<box.h;yy++)for(let xx=0;xx<box.w;xx++)if(ink[(box.y+yy)*cw+box.x+xx]) {rowInk[yy]++;colInk[xx]++;}
   const thinLimit=Math.max(2,Math.round(Math.min(box.w,box.h)*.07));
@@ -1007,7 +1030,19 @@ async function extractArtwork({image,position,product:productKey}) {
     const first=counts.findIndex(n=>n>thinLimit),last=counts.findLastIndex(n=>n>thinLimit);
     return first<0||Math.max(first,counts.length-1-last)>Math.max(5,counts.length*.17);
   };
-  if(hasThinEnd(rowInk)||hasThinEnd(colInk))return unsafe;
+  const hasFlatThinEnd=counts=> {
+    const limit=Math.max(10,Math.round(counts.length*.12));
+    for(const values of [counts,counts.slice().reverse()]) {
+      let run=0,runWidth=0;
+      for(const value of values) {
+        if(value>thinLimit)break;
+        if(Math.abs(value-runWidth)>1) {run=0;runWidth=value;}
+        if(++run>=limit)return true;
+      }
+    }
+    return false;
+  };
+  if(whiteLayer ? hasFlatThinEnd(rowInk)||hasFlatThinEnd(colInk) : hasThinEnd(rowInk)||hasThinEnd(colInk))return unsafe;
   // A real print should have a repeatable boundary. Small changes to the
   // fabric threshold must not make a substantial part of the artwork vanish.
   let weak=0,opaque=0,sameColor=0;
@@ -1018,15 +1053,19 @@ async function extractArtwork({image,position,product:productKey}) {
     if(d>=65)opaque++;
     if(Math.abs(data[offset]-data[colorOffset])<=9&&Math.abs(data[offset+1]-data[colorOffset+1])<=9&&Math.abs(data[offset+2]-data[colorOffset+2])<=9)sameColor++;
   }
-  if(weak>area*.14||opaque<area*.28||(area>box.w*box.h*.94&&sameColor>area*.94))return unsafe;
-  const canvas=canvasLib.createCanvas(box.w,box.h),ctx=canvas.getContext('2d');
+  if(whiteLayer ? coreArea>box.w*box.h*.91 : weak>area*.14||opaque<area*.28||(area>box.w*box.h*.94&&sameColor>area*.94))return unsafe;
+  const canvas=canvasLib.createCanvas(box.w,box.h),ctx=canvas.getContext('2d'),ground=Math.max(...fabric);
   try {
     const pixels=ctx.createImageData(box.w,box.h);
     for(let yy=0;yy<box.h;yy++)for(let xx=0;xx<box.w;xx++) {
       const i=(box.y+yy)*cw+box.x+xx;
       if(!ink[i])continue;
       const src=((y+box.y+yy)*w+x+box.x+xx)*4,dst=(yy*box.w+xx)*4;
-      pixels.data.set(data.subarray(src,src+4),dst);
+      if(whiteLayer) {
+        const shade=minChannel(src/4);
+        const coverage=whiteCore[i]&&shade>=195 ? 255 : Math.round(255*(shade-ground)/(235-ground));
+        pixels.data.set([255,255,255,coverage],dst);
+      } else pixels.data.set(data.subarray(src,src+4),dst);
     }
     ctx.putImageData(pixels,0,0);
     return {buffer:canvas.toBuffer('image/png'),placement:{page,view,rasterWidth:w,rasterHeight:h,designBoxPx:{...box,x:x+box.x,y:y+box.y}}};
