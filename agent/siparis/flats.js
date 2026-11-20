@@ -28,12 +28,18 @@ function decode(row) {
 }
 function list(db) { return db.prepare('SELECT * FROM document_flats ORDER BY ad,id').all().map(decode); }
 const normalize = value => String(value).toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i').replace(/[^a-z0-9]/g,'');
+// Products without their own L pattern borrow one with the same body (Şef kararı,
+// 20.11.2026: a half-zip sweat has the SWEAT body). The product's own pattern wins.
+const FLAT_ALIASES = { yarim_fermuar: 'sweat' };
 function selection(db, line, view, library) {
   const available = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_flats'").get();
-  const all = available ? (library ?? list(db)).filter(f=>f.urun===line.product_key && f.refBeden?.trim().toUpperCase()==='L') : [];
+  const rows = available ? (library ?? list(db)).filter(f=>f.refBeden?.trim().toUpperCase()==='L') : [];
+  const own = rows.filter(f=>f.urun===line.product_key);
+  const key = own.length || !Object.hasOwn(FLAT_ALIASES, line.product_key) ? line.product_key : FLAT_ALIASES[line.product_key];
+  const all = own.length ? own : rows.filter(f=>f.urun===key);
   const inView = all.filter(f=>f.gorunum===view);
   const candidates = view && inView.length ? inView : all;
-  const base = normalize(line.product_key);
+  const base = normalize(key);
   const name = ['kapusonlu','hoodie','sweatshirt','sweat'].includes(base) ? 'sweat' : base;
   const defaults = candidates.filter(f=>!/(oversize|owersize|zip)/.test(normalize(f.ad)) && normalize(f.ad)===name);
   const flat = line.kalip_id ? all.find(f=>f.id===line.kalip_id) ?? null

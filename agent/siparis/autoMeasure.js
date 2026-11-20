@@ -17,10 +17,11 @@ const INK_LAYER_DISTANCE = 80;
 // A refined PDF template match should span this many pixels on its long side.
 const REFINE_DESIGN_PX = 120;
 // Product keys, not inferred garment names or the presence of a chest number.
-const CHEST_SCALE_PRODUCTS = new Set(['sweat','sweatshirt','hoodie','kapusonlu','polar','tam_fermuar']);
+const CHEST_SCALE_PRODUCTS = new Set(['sweat','sweatshirt','hoodie','kapusonlu','polar','tam_fermuar','yarim_fermuar']);
 const scalePairFor = (flat,product) => CHEST_SCALE_PRODUCTS.has(String(flat?.urun||product||'').trim().toLowerCase())?'boy_gogus':'boy_etek';
 const percent = n => (n*100).toLocaleString('tr-TR',{minimumFractionDigits:1,maximumFractionDigits:4});
-const VIEW = {gogus:'on',sol_gogus:'on',sag_gogus:'on',kol:'on',sol_kol:'on',sag_kol:'on',sirt:'arka',ense:'arka',kapusan:'arka'};
+const VIEW = {gogus:'on',sol_gogus:'on',sag_gogus:'on',kol:'on',sol_kol:'on',sag_kol:'on',sirt:'arka',ense:'arka',kapusan:'arka',bacak:'on',sol_bacak:'on',sag_bacak:'on'};
+const LEGS = ['bacak','sol_bacak','sag_bacak'];
 const viewForPosition = position => VIEW[position] || 'teyit';
 const median = a => a.slice().sort((x,y)=>x-y)[Math.floor(a.length/2)];
 const distance = (a,b) => Math.max(...a.map((v,i)=>Math.abs(v-b[i])));
@@ -96,16 +97,19 @@ function fillHoles(mask,w,h) {
 function closeMask(mask,w,h) {
   // Small breaks in flat drawing outlines must close before filling their interiors.
   const r=2;
+  // Running window counts; outside the raster counts as background, so an
+  // erosion keeps a pixel only when its whole window is inside and set.
   function pass(input,horizontal,dilate) {
-    const out=new Uint8Array(input.length);
-    for(let y=0;y<h;y++)for(let x=0;x<w;x++) {
-      let v=dilate?0:1;
-      for(let k=-r;k<=r;k++) {
-        const xx=x+(horizontal?k:0),yy=y+(horizontal?0:k);
-        const bit=xx>=0&&xx<w&&yy>=0&&yy<h?input[yy*w+xx]:0;
-        if(dilate?bit:!bit){v=dilate?1:0;break;}
+    const out=new Uint8Array(input.length),lines=horizontal?h:w,length=horizontal?w:h,step=horizontal?1:w,full=2*r+1;
+    for(let line=0;line<lines;line++) {
+      const base=horizontal?line*w:line;
+      let count=0;
+      for(let k=0;k<Math.min(r,length);k++)count+=input[base+k*step];
+      for(let t=0;t<length;t++) {
+        if(t+r<length)count+=input[base+(t+r)*step];
+        if(t-r-1>=0)count-=input[base+(t-r-1)*step];
+        out[base+t*step]=dilate?(count>0?1:0):(count===full&&t-r>=0&&t+r<length?1:0);
       }
-      out[y*w+x]=v;
     }
     return out;
   }
@@ -113,16 +117,25 @@ function closeMask(mask,w,h) {
   return e;
 }
 function dominant(p, indices) {
-  const buckets=new Map();
-  for(const i of indices) {if(p.data[i*4+3]<64)continue;const rgb=[p.data[i*4],p.data[i*4+1],p.data[i*4+2]],key=rgb.map(v=>v>>4).join(',');const b=buckets.get(key)||{n:0,sum:[0,0,0]};b.n++;rgb.forEach((v,j)=>b.sum[j]+=v);buckets.set(key,b);}
-  const b=[...buckets.values()].sort((a,b)=>b.n-a.n)[0];return b ? b.sum.map(v=>v/b.n) : [255,255,255];
+  // Mode of 4-bit RGB buckets; ties go to the bucket seen first. Typed
+  // counters avoid one string and array per pixel on large masks.
+  const n=new Uint32Array(4096),sum=new Float64Array(4096*3),first=new Int32Array(4096).fill(-1),data=p.data;
+  let order=0,best=-1;
+  for(const i of indices) {
+    if(data[i*4+3]<64)continue;
+    const r=data[i*4],g=data[i*4+1],b=data[i*4+2],key=(r>>4)<<8|(g>>4)<<4|(b>>4);
+    if(first[key]<0)first[key]=order++;
+    n[key]++;sum[key*3]+=r;sum[key*3+1]+=g;sum[key*3+2]+=b;
+  }
+  for(let key=0;key<4096;key++)if(n[key]&&(best<0||n[key]>n[best]||n[key]===n[best]&&first[key]<first[best]))best=key;
+  return best<0 ? [255,255,255] : [sum[best*3]/n[best],sum[best*3+1]/n[best],sum[best*3+2]/n[best]];
 }
 function productMask(p) {
   const {width:w,height:h,data}=p,edges=[];
   for(let x=0;x<w;x++){edges.push(x,(h-1)*w+x);}for(let y=0;y<h;y++)edges.push(y*w,y*w+w-1);
   const bg=dominant(p,edges),raw=new Uint8Array(w*h),alphaBackground=edges.filter(i=>data[i*4+3]<64).length>edges.length*.7;
   for(let i=0;i<raw.length;i++) {
-    const delta=distance([data[i*4],data[i*4+1],data[i*4+2]],bg),x=i%w,y=Math.floor(i/w);
+    const delta=Math.max(Math.abs(data[i*4]-bg[0]),Math.abs(data[i*4+1]-bg[1]),Math.abs(data[i*4+2]-bg[2])),x=i%w,y=Math.floor(i/w);
     const lum=j=>(data[j*4]+data[j*4+1]+data[j*4+2])/3;
     const edge=x>0&&x<w-1&&y>0&&y<h-1?Math.max(Math.abs(lum(i+1)-lum(i-1)),Math.abs(lum(i+w)-lum(i-w))):0;
     // Smooth light shadows stay outside; a pale garment's sharp outline can
@@ -200,7 +213,18 @@ function matchDesignLocal(image,design,content,reference,initial=null,allowFine=
   const cb=content.box,ratio=cb.h/cb.w, candidates=[],art=designIntegrals(design,content);
   // Both sides are compared as cell means: point samples alias thin strokes,
   // so small line artwork would score as noise at its true placement.
-  const cellMean=(x,y,r)=>{const x0=Math.max(0,x-r),y0=Math.max(0,y-r),x1=Math.min(w,x+r+1),y1=Math.min(h,y+r+1);return x1>x0&&y1>y0?rect(integralGray,x0,y0,x1,y1)/((x1-x0)*(y1-y0)):0;};
+  // Cell means per radius are computed once; template widths share few radii.
+  const layers=new Map();
+  function cells(r) {
+    let layer=layers.get(r);
+    if(layer)return layer;
+    const g=new Float32Array(w*h),k=new Float32Array(w*h),e=new Float32Array(w*h),d=r+1;
+    for(let y=0;y<h;y++)for(let x=0;x<w;x++){const x0=Math.max(0,x-r),y0=Math.max(0,y-r),x1=Math.min(w,x+r+1),y1=Math.min(h,y+r+1),n=(x1-x0)*(y1-y0);g[y*w+x]=rect(integralGray,x0,y0,x1,y1)/n;k[y*w+x]=rect(integralInk,x0,y0,x1,y1)/n;}
+    const at=(x,y)=>g[Math.min(h-1,Math.max(0,y))*w+Math.min(w-1,Math.max(0,x))];
+    for(let y=0;y<h;y++)for(let x=0;x<w;x++)e[y*w+x]=Math.abs(at(x+d,y)-at(x-d,y))+Math.abs(at(x,y+d)-at(x,y-d));
+    layers.set(r,layer={g,k,e});
+    return layer;
+  }
   function template(width) {
     const height=width*ratio,pad=Math.max(1,width*.10),step=Math.max(1,Math.min(width/(initial?22:allowFine?11:8),height/(initial?8:allowFine?4:3))),samples=[];
     const r=Math.floor(step/2),d=r+1,sx=cb.w/width,sy=cb.h/height;
@@ -210,7 +234,7 @@ function matchDesignLocal(image,design,content,reference,initial=null,allowFine=
       const x=Math.round(xx),y=Math.round(yy),{v,a}=at(x,y);
       samples.push({x,y,v,a,e:Math.abs(at(x+d,y).v-at(x-d,y).v)+Math.abs(at(x,y+d).v-at(x,y-d).v)});
     }
-    samples.r=r;samples.d=d;
+    samples.r=r;
     const mean=samples.reduce((s,a)=>s+a.v,0)/samples.length,em=samples.reduce((s,a)=>s+a.e,0)/samples.length;
     const am=samples.reduce((s,a)=>s+a.a,0)/samples.length;
     let variance=0,ev=0,av=0;for(const a of samples){a.v-=mean;a.e-=em;a.a-=am;variance+=a.v*a.v;ev+=a.e*a.e;av+=a.a*a.a;}
@@ -224,11 +248,11 @@ function matchDesignLocal(image,design,content,reference,initial=null,allowFine=
     const inkSum=rect(integralInk,x0,y0,x1,y1);
     if(rect(integralInk2,x0,y0,x1,y1)-inkSum*inkSum/area<area*4)return -1;
     let sum=0,sq=0,cross=0,es=0,esq=0,ec=0,inside=0,ks=0,ksq=0,kc=0;
-    const r=t.samples.r,d=t.samples.d,cell=(2*r+1)**2;
+    const r=t.samples.r,L=r?cells(r):{g:gray,e:edges,k:ink};
     for(const a of t.samples){const xx=x+a.x,yy=y+a.y;if(xx<0||xx>=w||yy<0||yy>=h)return -1;const i=yy*w+xx;
-      const v=r?cellMean(xx,yy,r):gray[i],e=r?Math.abs(cellMean(xx+d,yy,r)-cellMean(xx-d,yy,r))+Math.abs(cellMean(xx,yy+d,r)-cellMean(xx,yy-d,r)):edges[i];
+      const v=L.g[i],e=L.e[i];
       sum+=v;sq+=v*v;cross+=a.v*v;es+=e;esq+=e*e;ec+=a.e*e;inside+=mask[i];
-      const k=r&&xx>=r&&yy>=r&&xx+r<w&&yy+r<h?rect(integralInk,xx-r,yy-r,xx+r+1,yy+r+1)/cell:ink[i];ks+=k;ksq+=k*k;kc+=a.a*k;}
+      const k=L.k[i];ks+=k;ksq+=k*k;kc+=a.a*k;}
     if(inside<t.samples.length*.96)return -1;
     const n=t.samples.length,v=sq-sum*sum/n,ev=esq-es*es/n;
     if(v<1||t.variance<1)return -1;
@@ -625,11 +649,11 @@ function chestLine(p,ref) {
 }
 // PDF sheets are scanned at 320 px. Redraw a page only when the thinnest
 // supplied design could not reach 8 px across at THIN_MIN_WIDTH of the chest.
-function thinDesignEdge(refs,edge,contents) {
+function thinDesignEdge(refs,edge,contents,topEdge) {
   const thin=Math.min(1,...contents.flatMap(({box})=>box?[Math.min(box.w/box.h,box.h/box.w)]:[]));
   const chest=Math.min(...refs.map(ref=>ref.chestPx).filter(n=>n>0)),needed=Math.min(THIN_CHEST_PX,8/(thin*THIN_MIN_WIDTH));
   if(!Number.isFinite(chest)||chest>=needed)return null;
-  return Math.min(PDF_THIN_MAX_EDGE,Math.ceil(edge*needed/chest));
+  return Math.min(topEdge,Math.ceil(edge*needed/chest));
 }
 function scaleFor(ref,measurements,scalePair='boy_etek',p=null) {
   if(scalePair==='boy_gogus'&&p&&ref.chestLine===undefined)ref.chestLine=chestLine(p,ref);
@@ -736,6 +760,7 @@ function sleeveMatch(p,sleeve,candidate,design,content) {
   }
   return best;
 }
+const SLEEVE_GRIDS=new WeakMap();
 function sleeveMatchAligned(p,sleeve,candidate,design,content) {
   const b=content.box;
   if(!b)return null;
@@ -753,17 +778,27 @@ function sleeveMatchAligned(p,sleeve,candidate,design,content) {
   }
   const mean=observed.reduce((s,v)=>s+v,0)/observed.length;
   let best=null;
-  for(let rotation=0;rotation<4;rotation++) {
-    const values=[];
-    for(let y=0;y<N;y++)for(let x=0;x<N;x++) {
-      let sum=0;
-      for(const dy of [.2,.5,.8])for(const dx of [.2,.5,.8]) {
-        const u=(x+dx)/N,v=(y+dy)/N;
-        const [sx,sy]=rotation===0?[u,v]:rotation===1?[v,1-u]:rotation===2?[1-u,1-v]:[1-v,u];
-        sum+=sample(content.mask,design.width,design.height,b.x+sx*b.w,b.y+sy*b.h);
+  // The artwork grid does not depend on the candidate: build it once per design.
+  let grids=SLEEVE_GRIDS.get(content);
+  if(!grids) {
+    grids=[];
+    for(let rotation=0;rotation<4;rotation++) {
+      const values=[];
+      for(let y=0;y<N;y++)for(let x=0;x<N;x++) {
+        let sum=0;
+        for(const dy of [.2,.5,.8])for(const dx of [.2,.5,.8]) {
+          const u=(x+dx)/N,v=(y+dy)/N;
+          const [sx,sy]=rotation===0?[u,v]:rotation===1?[v,1-u]:rotation===2?[1-u,1-v]:[1-v,u];
+          sum+=sample(content.mask,design.width,design.height,b.x+sx*b.w,b.y+sy*b.h);
+        }
+        values.push(sum/9);
       }
-      values.push(sum/9);
+      grids.push(values);
     }
+    SLEEVE_GRIDS.set(content,grids);
+  }
+  for(let rotation=0;rotation<4;rotation++) {
+    const values=grids[rotation];
     const tm=values.reduce((s,v)=>s+v,0)/values.length;
     let cross=0,variance=0,tv=0;
     for(let i=0;i<values.length;i++){const a=observed[i]-mean,d=values[i]-tm;cross+=a*d;variance+=a*a;tv+=d*d;}
@@ -861,8 +896,95 @@ async function autoMeasureSleeve({image,design,flat,product,position}) {
   return {width_mm:width,height_mm:height,measure_source:source,needs_confirmation:reasons.length>0,reasons,reason:reasons.join(' ')};
 }
 
+// Trousers seen from the front: waist top to hem is the L side length (yan_boy);
+// the full width just above the crotch is the L hip (basen). The crotch is the
+// top of a persistent background corridor between the two legs.
+function legSilhouette(p) {
+  const segmented=productMask(p),{mask,box}=segmented,w=p.width,h=p.height;
+  if(!box||box.h<h*.3||box.w<w*.1||box.h<box.w*1.2)return null;
+  const pixels=[];for(let i=0;i<mask.length;i++)if(mask[i])pixels.push(i);
+  const gapX=lowerBodyGap({box,pixels},w);
+  if(gapX==null)return null;
+  let crotchY=null;
+  for(let y=Math.floor(box.y+box.h*.85);y>box.y+box.h*.15;y--)if(mask[y*w+gapX]){crotchY=y+1;break;}
+  if(crotchY==null||crotchY>box.y+box.h*.7)return null;
+  const span=y=>{let l=-1,r=-1;for(let x=box.x;x<box.x+box.w;x++)if(mask[y*w+x]){if(l<0)l=x;r=x;}
+    // A hip row is one continuous run across the body.
+    for(let x=l;x<=r;x++)if(!mask[y*w+x])return null;return l<0?null:r-l+1;};
+  const widths=[];
+  for(let y=Math.round(crotchY-box.h*.06);y<=crotchY-Math.max(2,box.h*.02);y++){const width=span(y);if(width)widths.push(width);}
+  if(widths.length<Math.max(2,box.h*.02))return null;
+  const hipPx=median(widths),heightPx=box.h;
+  // A thigh print is framed by one leg, so the template search resolves
+  // artwork against half the hip width.
+  return {mask,box,raw:segmented.raw,gapX,crotchY,hipPx,heightPx,chestPx:hipPx/2,hemWidthPx:hipPx};
+}
+async function autoMeasureLeg({image,design,flat,product,position}) {
+  const started=performance.now(),reasons=[],source={scalePair:'yan_boy_basen',method:'otomatik',flatId:flat?.id??null,flatAd:flat?.ad??null,refBeden:flat?.refBeden??null,olculerL:flat?.olculerL??null,gorselFileId:image?.id??null,desenFileId:design?.id??null,selectedView:'on',designBoxPx:null,mmPerPx:null,scale:null,confidence:0};
+  let width=null,height=null;
+  const positive=n=>Number.isFinite(n)&&n>0;
+  const measurements=flat?.refBeden==='L'&&flat?.olculerL&&typeof flat.olculerL==='object'?flat.olculerL:{};
+  if(flat?.refBeden!=='L')reasons.push('Ürünün L kalıp referansı bulunamadı: bacak için L beden ölçüsü gerekli.');
+  else if(!positive(measurements.yan_boy)||!positive(measurements.basen))reasons.push('Bacak ölçeği için kalıbın L yan_boy ve basen ölçüleri gerekli; ikisi birlikte bulunamadı.');
+  try {
+    const pages=await rasterPages(image,image.mime==='application/pdf'?1000:MAX_EDGE),designs=design?await rasterPages(design,1000,null,{transparent:true}):[],candidates=[];
+    const designContents=designs.map(p=>designContent(p,true));
+    if(!designContents.some(c=>c.box))reasons.push('Bacak desen dosyası yok veya boş; desen bacakta eşleştirilemedi.');
+    let legCount=0;
+    source.pageCount=pages.length;source.designPageCount=designs.length;
+    for(let i=0;i<pages.length;i++) {
+      const ref=legSilhouette(pages[i]);
+      if(!ref)continue;
+      legCount++;
+      for(let j=0;j<designs.length;j++) {
+        if(!designContents[j].box)continue;
+        const coarse=matchDesign(pages[i],designs[j],designContents[j],ref,false);
+        if(!coarse.box)continue;
+        const match=matchDesign(pages[i],designs[j],designContents[j],ref,true,coarse);
+        if(match.box)candidates.push({p:pages[i],ref,match,page:i+1,designPage:j+1});
+      }
+    }
+    source.legCount=legCount;
+    if(!legCount)reasons.push('Eşofman/pantolon silueti bulunamadı: iki bacak arasında süren zemin boşluğu ve kalça satırı görülmedi.');
+    candidates.sort((a,b)=>b.match.confidence-a.match.confidence);
+    source.pageCandidates=candidates.slice(0,5).map(c=>({page:c.page,designPage:c.designPage,confidence:Math.round(c.match.confidence*1000)/1000}));
+    const chosen=candidates[0];
+    if(legCount&&designs.length&&!chosen)reasons.push('Bacak üzerinde desen adayı bulunamadı (0 eşleşme); yerleşim teyit edilmeli.');
+    if(chosen) {
+      const {p,ref,match}=chosen,box=match.box;
+      const competing=candidates.find(c=>c!==chosen&&(c.page!==chosen.page||overlapFraction(c.match.box,box)<.5));
+      const ambiguous=match.ambiguous||!!competing&&chosen.match.confidence-competing.match.confidence<.045;
+      Object.assign(source,{selectedPage:chosen.page,selectedDesignPage:chosen.designPage,rasterWidth:p.width,rasterHeight:p.height,productBoxPx:ref.box,legGapX:ref.gapX,crotchY:ref.crotchY,hipPx:ref.hipPx,sideLengthPx:ref.heightPx,candidateBoxPx:box,matchConfidence:Math.round(match.confidence*1000)/1000,confidence:Math.round(match.confidence*1000)/1000});
+      source.designAspectRatio=match.content.box.w/match.content.box.h;
+      if(ambiguous)reasons.push(`Bacak desen adayı belirsiz: en iyi eşleşme %${percent(match.confidence)}${competing?`, diğer aday %${percent(competing.match.confidence)}`:''}; tek yerleşim seçilemiyor.`);
+      if(match.confidence<MIN_MATCH_CONFIDENCE)reasons.push(`Bacak desen eşleştirme güveni %${percent(match.confidence)}; %${percent(MIN_MATCH_CONFIDENCE)} sınırının altında.`);
+      // Front view: the wearer's left leg is on the image right; a back view mirrors it.
+      const imageRight=box.x+box.w/2>ref.gapX,wanted=position==='sol_bacak'?'sol':position==='sag_bacak'?'sag':null;
+      const found=image.gorunum==='arka'?(imageRight?'sag':'sol'):(imageRight?'sol':'sag');
+      source.legSide=['on','arka'].includes(image.gorunum)?found:null;
+      let sideOk=true;
+      if(wanted&&!['on','arka'].includes(image.gorunum)){sideOk=false;reasons.push('Sol/sağ bacak yönü görselden kesin doğrulanamadı; ön veya arka görünüm gerekli.');}
+      else if(wanted&&found!==wanted){sideOk=false;reasons.push(`Desen ${found==='sol'?'sol':'sağ'} bacakta bulundu; uygulama ${wanted==='sol'?'sol':'sağ'} bacak olarak kayıtlı. Konum teyit edilmeli.`);}
+      if(positive(measurements.yan_boy)&&positive(measurements.basen)) {
+        const vertical=measurements.yan_boy*10/ref.heightPx,horizontal=measurements.basen*10/ref.hipPx,difference=Math.abs(vertical-horizontal)/((vertical+horizontal)/2);
+        Object.assign(source,{verticalMmPerPx:vertical,horizontalMmPerPx:horizontal,scaleDifference:difference});
+        if(difference>.15){source.scaleMethod='çelişen L ölçekleri; ölçü yok';reasons.push(`Yan boy/basen ölçek farkı %${percent(difference)}; %15 sınırını aşıyor (${vertical.toFixed(3)} ve ${horizontal.toFixed(3)} mm/px).`);}
+        else {source.scaleMethod='yan_boy ve basen ortalaması';source.mmPerPx=(vertical+horizontal)/2;source.scale=source.mmPerPx/10;}
+      }
+      if(!ambiguous&&sideOk&&match.confidence>=MIN_MATCH_CONFIDENCE&&source.mmPerPx) {
+        source.designBoxPx=box;
+        width=Math.round(box.w*source.mmPerPx);height=Math.round(box.h*source.mmPerPx);
+        if(!Number.isSafeInteger(width)||!Number.isSafeInteger(height)||width<=0||height<=0){reasons.push(`Hesaplanan ölçü fiziksel olarak geçersiz (${width} × ${height} mm); pozitif tam sayı ölçü bulunamadı.`);width=height=null;}
+      }
+    }
+  } catch(e) {reasons.push(`Bacak ürün/desen görseli okunamadı: ${e.message}`);}
+  source.timingsMs={total:Math.round(performance.now()-started)};
+  return {width_mm:width,height_mm:height,measure_source:source,needs_confirmation:reasons.length>0,reasons,reason:reasons.join(' ')};
+}
+
 async function autoMeasure({image,design,flat,product,position}) {
   if(['kol','sol_kol','sag_kol'].includes(position))return autoMeasureSleeve({image,design,flat,product,position});
+  if(LEGS.includes(position))return autoMeasureLeg({image,design,flat,product,position});
   const scalePair=scalePairFor(flat,product),pairLabel=scalePair==='boy_gogus'?'boy/göğüs':'boy/etek',horizontalLabel=scalePair==='boy_gogus'?'göğüs':'etek';
   const started=performance.now(),timings={},reasons=[],source={scalePair,method:'otomatik',flatId:flat?.id??null,flatAd:flat?.ad??null,refBeden:flat?.refBeden??null,refCm:flat?.refLengthCm??null,olculerL:flat?.olculerL??null,chestPx:null,designBoxPx:null,scale:null,mmPerPx:null,confidence:0,gorselFileId:image?.id??null,desenFileId:design?.id??null};
   let width=null,height=null;
@@ -872,7 +994,11 @@ async function autoMeasure({image,design,flat,product,position}) {
   if(!positive(measurements.omuzdan_boy)&&!positive(measurements[scalePair==='boy_gogus'?'gogus':'etek']))reasons.push(`Ürün için geçerli L beden kalıp ölçüleri bulunamadı (boy ve ${horizontalLabel} ölçüsü sayısı 0).`);
   if(viewForPosition(position)==='teyit')reasons.push('Ürün görünümü uygulama konumuyla eşleştirilemedi (geçerli görünüm sayısı 0).');
   try {
-    const pages=await rasterPages(image,image.mime==='application/pdf'?320:MAX_EDGE),candidates=[],allViews=[],pageEdges=pages.map(()=>320);
+    // PDF sheets are scanned small, then only pages whose artwork needs more
+    // pixels are redrawn. Photos are already measured at MAX_EDGE.
+    const pdf=image.mime==='application/pdf',scanEdge=pdf?320:MAX_EDGE;
+    const topEdge=pdf?PDF_THIN_MAX_EDGE:Math.min(MAX_EDGE,Math.max(...Object.values(imageSize(image.buffer,image.mime))));
+    const pages=await rasterPages(image,scanEdge),candidates=[],allViews=[],pageEdges=pages.map(()=>scanEdge);
     const tallBack=position==='sirt'&&!design;
     let designs=[];
     if(design)try {designs=await rasterPages(design,1000,null,{transparent:true});}catch(e){source.designReadError=e.message;}
@@ -884,8 +1010,8 @@ async function autoMeasure({image,design,flat,product,position}) {
     for(let i=0;i<pages.length;i++) {
       let refs=silhouettes(pages[i],product);
       const cues=productViewCues(pages[i],refs,product);
-      const edge=image.mime==='application/pdf'?thinDesignEdge(refs,pageEdges[i],designContents):null;
-      if(edge) {
+      const edge=thinDesignEdge(refs,pageEdges[i],designContents,topEdge);
+      if(edge&&edge>pageEdges[i]) {
         // View cues stay from the 320 px sheet; every product must be found again.
         const p=(await rasterPages(image,edge,[i+1]))[0],sx=p.width/pages[i].width,sy=p.height/pages[i].height,found=silhouettes(p,product);
         const mapped=refs.map(ref=>{const box={x:ref.box.x*sx,y:ref.box.y*sy,w:ref.box.w*sx,h:ref.box.h*sy};return found.find(r=>overlapFraction(r.box,box)>.5);});
@@ -922,13 +1048,20 @@ async function autoMeasure({image,design,flat,product,position}) {
       const key=`${c.page}:${c.index}`;
       if(!represented.has(key)){finalists.push(c);represented.add(key);}
     }
-    if(image.mime==='application/pdf' && finalists.length) {
-      const numbers=[...new Set(finalists.map(c=>c.page))].sort((a,b)=>a-b),high=[];
-      // One pixel of template width is 3% of a 36 px logo: draw small matches larger.
-      for(const n of numbers) {
-        const sizes=finalists.filter(c=>c.page===n&&c.designPage).map(c=>Math.max(c.match.box.w,c.match.box.h));
-        const edge=Math.max(640,pageEdges[n-1],...sizes.map(size=>Math.min(PDF_THIN_MAX_EDGE,Math.ceil(pageEdges[n-1]*REFINE_DESIGN_PX/size))));
-        high.push((await rasterPages(image,edge,[n]))[0]);
+    // One pixel of template width is 3% of a 36 px logo: draw small matches larger.
+    const refineEdge=n=>{
+      // Only the page's strongest template hit sets the size; a weaker tiny hit
+      // would redraw the page large for nothing.
+      const best=finalists.filter(c=>c.page===n&&c.designPage).sort((a,b)=>b.match.confidence-a.match.confidence)[0];
+      const size=best?Math.max(best.match.box.w,best.match.box.h):Infinity;
+      return Math.max(pdf?640:0,pageEdges[n-1],Math.min(topEdge,Math.ceil(pageEdges[n-1]*REFINE_DESIGN_PX/size)));
+    };
+    if(finalists.length && (pdf || refineEdge(1)>pageEdges[0])) {
+      const numbers=[...new Set(finalists.map(c=>c.page))].sort((a,b)=>a-b),high=[],edges=numbers.map(refineEdge);
+      // Parse the PDF once per distinct edge, not once per page.
+      for(const edge of new Set(edges)) {
+        const wanted=numbers.filter((_,k)=>edges[k]===edge),drawn=await rasterPages(image,edge,wanted);
+        wanted.forEach((n,k)=>{high[numbers.indexOf(n)]=drawn[k];});
       }
       const refs=high.map(p=>silhouettes(p,product));
       finalists=finalists.map(candidate=>{

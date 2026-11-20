@@ -12,9 +12,13 @@ const childProcess = require('node:child_process');
 const { buildWorkshopMessage, createWorkshopHandler } = require('./workshop');
 const { registerHandler } = require('./outbox');
 const UPLOAD_KINDS = ['urun_gorsel','desen_kaynak','desen_kaynak_vektor'];
-const POSITIONS = ['gogus','sol_gogus','sag_gogus','kol','sol_kol','sag_kol','sirt','ense','kapusan','kapuson'];
+const POSITIONS = ['gogus','sol_gogus','sag_gogus','kol','sol_kol','sag_kol','sirt','ense','kapusan','kapuson','bacak','sol_bacak','sag_bacak'];
 const SOURCE_KINDS = ['desen_kaynak','desen_kaynak_vektor'];
 const PREPARE_TIMEOUT_MS = 8*60e3;
+// One automatic measurement in the worker. Measured 20.11.2026: a four-page
+// PDF takes ~3 CPU-s on a laptop core and ~14 s on an efficiency core; the
+// 0.5 CPU starter plan is slower still, so 15 s timed out on live sheets.
+const MEASURE_TIMEOUT_MS = 60e3;
 const PREPARE_LOCK_MS = 10*60e3;
 const GENERATED = ['uretim_formu','onay_formu','baski_formu','nakis_formu','desen_vektor'];
 const WORKSHOP = ['baski_formu','nakis_formu','desen_vektor'];
@@ -561,7 +565,7 @@ function manuallyMeasured(app) {
   const source=provenance(app);
   return source.method==='elle' || (!['otomatik','otomatik_renk'].includes(source.method) && (app.width_mm!=null || app.height_mm!=null));
 }
-const POSITION_LABELS={gogus:'Göğüs',sol_gogus:'Sol göğüs',sag_gogus:'Sağ göğüs',kol:'Kol',sol_kol:'Sol kol',sag_kol:'Sağ kol',sirt:'Sırt',ense:'Ense',kapusan:'Kapüşon',kapuson:'Kapüşon'};
+const POSITION_LABELS={gogus:'Göğüs',sol_gogus:'Sol göğüs',sag_gogus:'Sağ göğüs',kol:'Kol',sol_kol:'Sol kol',sag_kol:'Sağ kol',sirt:'Sırt',ense:'Ense',kapusan:'Kapüşon',kapuson:'Kapüşon',bacak:'Bacak',sol_bacak:'Sol bacak',sag_bacak:'Sağ bacak'};
 const SLEEVES=['kol','sol_kol','sag_kol'];
 function productImageFor(v,line,app) {
   const view=viewForPosition(app.position),label=POSITION_LABELS[app.position] || app.position;
@@ -651,7 +655,7 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
         const image={...input.image,...await vectorInput(dataDir,input.image)};
         const design=input.design?{...input.design,...await vectorInput(dataDir,input.design)}:null;
         const {flatNote,linkDesign,...job}=input;
-        result=await generateInChild({type:'autoMeasure',input:{...job,image,design}},signal,{timeoutMs:15000});
+        result=await generateInChild({type:'autoMeasure',input:{...job,image,design}},signal,{timeoutMs:MEASURE_TIMEOUT_MS});
       } catch(e) {
         if(signal.aborted)throw e;
         result={width_mm:null,height_mm:null,needs_confirmation:true,reasons:[`Otomatik ölçü tamamlanamadı: ${e.message}`],

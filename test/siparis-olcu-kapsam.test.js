@@ -82,3 +82,54 @@ test('G41b a same-colored mark touching the sleeve logo still cannot be separate
   const r=await autoMeasure(sleeveMock({markColor:'#101824'}));
   assert.equal(r.width_mm,null);assert.equal(r.needs_confirmation,true);
 });
+
+// Pattern library rows as flats.selection reads them; the database is not consulted.
+const flats=require('../agent/siparis/flats');
+const tableDb={prepare:()=>({get:()=>1})};
+const row=(id,ad,urun,refBeden='L')=>({id,ad,urun,gorunum:'on',refBeden,olculerL:{gogus:61,omuzdan_boy:71}});
+test('G41b half-zip sweat borrows the regular SWEAT L pattern; its own pattern wins',()=>{
+  const library=[row('s','SWEAT','sweat'),row('o','OWERSİZE SWEAT','sweat'),row('z','ZIP','tam_fermuar'),row('m','SWEAT','sweat','M')];
+  const picked=flats.selection(tableDb,{product_key:'yarim_fermuar'},'on',library);
+  assert.equal(picked.flat?.id,'s');assert.deepEqual(picked.candidates.map(f=>f.id).sort(),['o','s']);
+  const own=flats.selection(tableDb,{product_key:'yarim_fermuar'},'on',[...library,row('y','YARIM FERMUAR','yarim_fermuar')]);
+  assert.equal(own.flat?.id,'y');assert.deepEqual(own.candidates.map(f=>f.id),['y']);
+  assert.equal(flats.selection(tableDb,{product_key:'tam_fermuar'},'on',library).flat?.id,'z');
+  assert.equal(flats.selection(tableDb,{product_key:'polo'},'on',library).flat,null);
+});
+
+// Light trousers, 1 mm/px on both axes: 801 px waist-to-hem, 300 px hip.
+const PANTS={id:'pants-L',ad:'EŞOFMAN',urun:'esofman',refBeden:'L',olculerL:{bel:28,basen:30,yan_boy:80.1,paca:10}};
+function pants({left=340,twice=false}={}) {
+  const d=createCanvas(80,120),a=d.getContext('2d');
+  a.fillStyle='#101824';a.fillRect(0,0,80,120);
+  a.clearRect(8,8,35,33);a.clearRect(50,16,20,64);a.clearRect(8,60,20,52);a.clearRect(35,90,36,22);
+  const c=createCanvas(600,900),x=c.getContext('2d');x.fillStyle='white';x.fillRect(0,0,600,900);x.fillStyle='#c8c2b4';
+  x.fillRect(150,50,300,300);x.fillRect(150,350,145,501);x.fillRect(305,350,145,501);
+  x.drawImage(d,left,200,80,120);if(twice)x.drawImage(d,600-left-80,200,80,120);
+  return {image:{buffer:c.toBuffer('image/png'),mime:'image/png',gorunum:'on'},design:{buffer:d.toBuffer('image/png'),mime:'image/png'},flat:PANTS,product:'esofman'};
+}
+test('G41b leg print is sized from L yan_boy and basen and lands on the wearer side',async()=>{
+  const r=await autoMeasure({...pants(),position:'sol_bacak'});
+  assert.equal(r.needs_confirmation,false,r.reason);near(r.width_mm,80,.04);near(r.height_mm,120,.04);
+  assert.equal(r.measure_source.scalePair,'yan_boy_basen');assert.equal(r.measure_source.legSide,'sol');
+  const plain=await autoMeasure({...pants(),position:'bacak'});assert.equal(plain.needs_confirmation,false,plain.reason);
+});
+test('G41b leg print on the other leg, a mirrored pair or conflicting L scales stay unmeasured',async()=>{
+  const wrong=await autoMeasure({...pants(),position:'sag_bacak'});
+  assert.equal(wrong.width_mm,null);assert.match(wrong.reason,/sol bacakta bulundu/);
+  const pair=await autoMeasure({...pants({twice:true}),position:'bacak'});
+  assert.equal(pair.width_mm,null);assert.equal(pair.needs_confirmation,true);
+  const m=pants();m.flat={...PANTS,olculerL:{...PANTS.olculerL,basen:45}};
+  const conflict=await autoMeasure({...m,position:'sol_bacak'});
+  assert.equal(conflict.width_mm,null);assert.match(conflict.reason,/Yan boy\/basen ölçek farkı/);
+  const noFlat=await autoMeasure({...pants(),flat:null,position:'sol_bacak'});
+  assert.equal(noFlat.width_mm,null);assert.match(noFlat.reason,/L kalıp referansı/);
+});
+
+test('G41b leg positions are accepted and labelled "Bacak" in the production form',async()=>{
+  const parse=require('pdf-parse'),{renderProductionForm}=require('../agent/siparis/pdf'),{makeExampleOrder}=require('./fixtures/siparis/example-order');
+  const order=makeExampleOrder();order.applications=[...order.applications,{type:'baski',position:'sol_bacak',width_mm:110,height_mm:60}];
+  const {text}=await parse(await renderProductionForm(order));
+  assert.match(text,/Bacak/);assert.match(text,/Sol bacak/);
+  const plain=await parse(await renderProductionForm(makeExampleOrder()));assert.doesNotMatch(plain.text,/Bacak/);
+});

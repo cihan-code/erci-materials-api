@@ -8,8 +8,11 @@ const PORTRAIT = [810, 1440];
 const LANDSCAPE = [1440, 810];
 const SIZES = ['XS', 'S', 'M', 'L', 'XL', 'XXL', '3XL', '4XL'];
 const POSITIONS = { gogus: 'Göğüs', sirt: 'Sırt', kol: 'Kol', ense: 'Ense', kapuson: 'Kapüşon' };
-const POSITION_ALIASES = { sol_gogus: 'gogus', sag_gogus: 'gogus', sol_kol: 'kol', sag_kol: 'kol', kapusan: 'kapuson' };
-const POSITION_LABELS = { ...POSITIONS, kapusan: POSITIONS.kapuson, sol_gogus: 'Sol göğüs', sag_gogus: 'Sağ göğüs', sol_kol: 'Sol kol', sag_kol: 'Sağ kol' };
+// Trouser legs get a table column only when an order has one (page width).
+const LEG_POSITION = { bacak: 'Bacak' };
+const POSITION_ALIASES = { sol_gogus: 'gogus', sag_gogus: 'gogus', sol_kol: 'kol', sag_kol: 'kol', kapusan: 'kapuson', sol_bacak: 'bacak', sag_bacak: 'bacak' };
+const POSITION_LABELS = { ...POSITIONS, ...LEG_POSITION, kapusan: POSITIONS.kapuson, sol_gogus: 'Sol göğüs', sag_gogus: 'Sağ göğüs', sol_kol: 'Sol kol', sag_kol: 'Sağ kol', sol_bacak: 'Sol bacak', sag_bacak: 'Sağ bacak' };
+const SIDED = ['sol_gogus', 'sag_gogus', 'sol_kol', 'sag_kol', 'sol_bacak', 'sag_bacak'];
 const TYPES = { baski: 'Baskı', nakis: 'Nakış' };
 const FONT = path.join(__dirname, 'fonts');
 const TERMS_TITLE = 'SİPARİŞ ONAY FORMU – ŞARTLAR VE KOŞULLAR';
@@ -335,17 +338,19 @@ const HEAD_LIGHT = '#bdd7ee';
 const SIZE_BLUE = '#b4c6e7';
 
 function applicationTable(doc, apps, y) {
-  const x = 82, labelWidth = 188, cellWidth = 92, headHeight = 36;
-  const positions = Object.keys(POSITIONS);
+  const legs = apps.some(app => (POSITION_ALIASES[app.position] || app.position) === 'bacak');
+  const columns = legs ? { ...POSITIONS, ...LEG_POSITION } : POSITIONS;
+  const x = 82, labelWidth = 188, cellWidth = legs ? 460 / 6 : 92, headHeight = 36;
+  const positions = Object.keys(columns);
   const cells = ['baski', 'nakis'].map(type => positions.map(position =>
     apps.filter(app => app.type === type && (POSITION_ALIASES[app.position] || app.position) === position).map(app =>
-      ['sol_gogus', 'sag_gogus', 'sol_kol', 'sag_kol'].includes(app.position) ? `${POSITION_LABELS[app.position]} · ${dimensions(app)}` : dimensions(app))));
+      SIDED.includes(app.position) ? `${POSITION_LABELS[app.position]} · ${dimensions(app)}` : dimensions(app))));
   const heights = cells.map(row => Math.max(36, ...row.map(list => list.length
     ? 40 + doc.font('Regular').fontSize(9).heightOfString(list.join('\n'), { width: cellWidth - 6, lineGap: 2 }) : 0)));
   const height = headHeight + heights[0] + heights[1];
   if (height > 1120) throw new RangeError('Tek konumda sayfaya sığmayacak kadar çok uygulama var.');
   if (y + height > 1230) { page(doc); y = 65; }
-  const headers = ['Özellikler', ...Object.values(POSITIONS)];
+  const headers = ['Özellikler', ...Object.values(columns)];
   let cx = x;
   for (let i = 0; i < headers.length; i++) {
     const width = i ? cellWidth : labelWidth;
