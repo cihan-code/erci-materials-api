@@ -9,6 +9,13 @@ const MIN_SYMMETRY = .85, MIN_MATCH_CONFIDENCE = .78;
 // A photo may distort either axis. This guard catches a distinctly different
 // motif before sizing; the production vector has its own aspect policy.
 const COLOR_ASPECT_TOLERANCE = .30;
+// A thin design at least this fraction of the chest wide must keep 8 px
+// across its short side in the template search, within a bounded raster.
+const THIN_MIN_WIDTH = .2, THIN_CHEST_PX = 240, PDF_THIN_MAX_EDGE = 1600;
+// Ink colors farther apart than this (max channel) are separate print layers.
+const INK_LAYER_DISTANCE = 80;
+// A refined PDF template match should span this many pixels on its long side.
+const REFINE_DESIGN_PX = 120;
 // Product keys, not inferred garment names or the presence of a chest number.
 const CHEST_SCALE_PRODUCTS = new Set(['sweat','sweatshirt','hoodie','kapusonlu','polar','tam_fermuar']);
 const scalePairFor = (flat,product) => CHEST_SCALE_PRODUCTS.has(String(flat?.urun||product||'').trim().toLowerCase())?'boy_gogus':'boy_etek';
@@ -145,6 +152,24 @@ function resize(p,w,h) {
   const b=canvasLib.createCanvas(w,h);b.getContext('2d').drawImage(a,0,0,w,h);
   const pixels=b.getContext('2d').getImageData(0,0,w,h);a.width=a.height=b.width=b.height=0;return pixels;
 }
+// Summed-area tables of the artwork alpha and alpha-weighted gray, cached per content.
+const ART_INTEGRALS=new WeakMap();
+function designIntegrals(design,content) {
+  let art=ART_INTEGRALS.get(content);
+  if(art)return art;
+  const {width:w,height:h,data}=design,stride=w+1,A=new Float64Array((w+1)*(h+1)),AG=new Float64Array((w+1)*(h+1));
+  for(let y=0;y<h;y++){let a=0,ag=0;for(let x=0;x<w;x++){const j=y*w+x,alpha=content.mask[j]?data[j*4+3]/255:0;a+=alpha;ag+=alpha*(data[j*4]+data[j*4+1]+data[j*4+2])/3;A[(y+1)*stride+x+1]=A[y*stride+x+1]+a;AG[(y+1)*stride+x+1]=AG[y*stride+x+1]+ag;}}
+  const rect=(t,x0,y0,x1,y1)=>t[y1*stride+x1]-t[y0*stride+x1]-t[y1*stride+x0]+t[y0*stride+x0];
+  art={mean(x0,y0,x1,y1) {
+    // Area outside the artwork raster is transparent and still counts.
+    const area=Math.max(1,(x1-x0)*(y1-y0)),cx0=Math.max(0,Math.min(w,Math.floor(x0))),cy0=Math.max(0,Math.min(h,Math.floor(y0)));
+    const cx1=Math.max(cx0,Math.min(w,Math.max(cx0+1,Math.ceil(x1)))),cy1=Math.max(cy0,Math.min(h,Math.max(cy0+1,Math.ceil(y1))));
+    const n=Math.max(1,(cx1-cx0)*(cy1-cy0)),cover=Math.min(1,n/area);
+    return {a:rect(A,cx0,cy0,cx1,cy1)/n*cover,ag:rect(AG,cx0,cy0,cx1,cy1)/n*cover};
+  }};
+  ART_INTEGRALS.set(content,art);
+  return art;
+}
 function matchDesign(image,design,content,reference,refine=true,initial=null) {
   const b=reference.box,pad=8,x0=Math.max(0,b.x-pad),y0=Math.max(0,b.y-pad),w=Math.min(image.width-x0,b.w+pad*2),h=Math.min(image.height-y0,b.h+pad*2);
   const data=new Uint8ClampedArray(w*h*4),mask=new Uint8Array(w*h);
@@ -155,7 +180,11 @@ function matchDesign(image,design,content,reference,refine=true,initial=null) {
 }
 function matchDesignLocal(image,design,content,reference,initial=null,allowFine=true) {
   if(!content.box)return {box:null,confidence:0,ambiguous:false,content};
-  const factor=Math.min(1,(initial?720:allowFine?320:160)/Math.max(image.width,image.height)),small=resize(image,Math.round(image.width*factor),Math.round(image.height*factor));
+  // Thin artwork (wide lettering) needs pixels across its short side; a
+  // square-sized raster budget alone would shrink it below recognition.
+  const thin=content.box?Math.min(content.box.w/content.box.h,content.box.h/content.box.w):1;
+  const needed=reference.chestPx>0?Math.min(THIN_CHEST_PX,8/(thin*THIN_MIN_WIDTH))/reference.chestPx:0;
+  const factor=Math.min(1,Math.max(needed,(initial?720:allowFine?320:160)/Math.max(image.width,image.height))),small=resize(image,Math.round(image.width*factor),Math.round(image.height*factor));
   const w=small.width,h=small.height,mask=new Uint8Array(w*h);
   for(let y=0;y<h;y++)for(let x=0;x<w;x++)mask[y*w+x]=reference.mask[Math.min(image.height-1,Math.floor(y/factor))*image.width+Math.min(image.width-1,Math.floor(x/factor))];
   const garment=dominant(small,Array.from(mask.keys()).filter(i=>mask[i])),bg=garment.reduce((s,v)=>s+v,0)/3;
@@ -166,16 +195,22 @@ function matchDesignLocal(image,design,content,reference,initial=null,allowFine=
   const stride=w+1,integralMask=new Int32Array((w+1)*(h+1)),integralInk=new Float64Array((w+1)*(h+1)),integralInk2=new Float64Array((w+1)*(h+1));
   for(let y=0;y<h;y++){let m=0,k=0,k2=0;for(let x=0;x<w;x++){const i=y*w+x,j=(y+1)*stride+x+1;m+=mask[i];k+=ink[i];k2+=ink[i]*ink[i];integralMask[j]=integralMask[j-stride]+m;integralInk[j]=integralInk[j-stride]+k;integralInk2[j]=integralInk2[j-stride]+k2;}}
   const rect=(a,x0,y0,x1,y1)=>a[y1*stride+x1]-a[y0*stride+x1]-a[y1*stride+x0]+a[y0*stride+x0];
-  const cb=content.box,ratio=cb.h/cb.w, candidates=[];
+  const integralGray=new Float64Array((w+1)*(h+1));
+  for(let y=0;y<h;y++){let g=0;for(let x=0;x<w;x++){g+=gray[y*w+x];integralGray[(y+1)*stride+x+1]=integralGray[y*stride+x+1]+g;}}
+  const cb=content.box,ratio=cb.h/cb.w, candidates=[],art=designIntegrals(design,content);
+  // Both sides are compared as cell means: point samples alias thin strokes,
+  // so small line artwork would score as noise at its true placement.
+  const cellMean=(x,y,r)=>{const x0=Math.max(0,x-r),y0=Math.max(0,y-r),x1=Math.min(w,x+r+1),y1=Math.min(h,y+r+1);return x1>x0&&y1>y0?rect(integralGray,x0,y0,x1,y1)/((x1-x0)*(y1-y0)):0;};
   function template(width) {
-    const height=width*ratio,pad=Math.max(1,width*.10),step=Math.max(1,width/(initial?22:allowFine?11:8)),samples=[];
+    const height=width*ratio,pad=Math.max(1,width*.10),step=Math.max(1,Math.min(width/(initial?22:allowFine?11:8),height/(initial?8:allowFine?4:3))),samples=[];
+    const r=Math.floor(step/2),d=r+1,sx=cb.w/width,sy=cb.h/height;
+    // Composite of the artwork cell over the garment gray, in template pixels.
+    const at=(xx,yy)=>{const m=art.mean(cb.x+(xx-r)*sx,cb.y+(yy-r)*sy,cb.x+(xx+r+1)*sx,cb.y+(yy+r+1)*sy);return {v:bg+m.ag-bg*m.a,a:m.a};};
     for(let yy=-pad;yy<height+pad;yy+=step)for(let xx=-pad;xx<width+pad;xx+=step) {
-      const sx=cb.x+Math.floor(xx/width*cb.w),sy=cb.y+Math.floor(yy/height*cb.h);
-      const at=(x,y)=> {if(x<cb.x||y<cb.y||x>=cb.x+cb.w||y>=cb.y+cb.h)return bg;const j=y*design.width+x,a=content.mask[j]?design.data[j*4+3]/255:0;return a*(design.data[j*4]+design.data[j*4+1]+design.data[j*4+2])/3+(1-a)*bg;};
-      const v=at(sx,sy),d=Math.max(1,Math.round(cb.w/width));
-      const a=sx>=cb.x&&sy>=cb.y&&sx<cb.x+cb.w&&sy<cb.y+cb.h?content.mask[sy*design.width+sx]:0;
-      samples.push({x:Math.round(xx),y:Math.round(yy),v,a,e:Math.abs(at(sx+d,sy)-at(sx-d,sy))+Math.abs(at(sx,sy+d)-at(sx,sy-d))});
+      const x=Math.round(xx),y=Math.round(yy),{v,a}=at(x,y);
+      samples.push({x,y,v,a,e:Math.abs(at(x+d,y).v-at(x-d,y).v)+Math.abs(at(x,y+d).v-at(x,y-d).v)});
     }
+    samples.r=r;samples.d=d;
     const mean=samples.reduce((s,a)=>s+a.v,0)/samples.length,em=samples.reduce((s,a)=>s+a.e,0)/samples.length;
     const am=samples.reduce((s,a)=>s+a.a,0)/samples.length;
     let variance=0,ev=0,av=0;for(const a of samples){a.v-=mean;a.e-=em;a.a-=am;variance+=a.v*a.v;ev+=a.e*a.e;av+=a.a*a.a;}
@@ -189,7 +224,11 @@ function matchDesignLocal(image,design,content,reference,initial=null,allowFine=
     const inkSum=rect(integralInk,x0,y0,x1,y1);
     if(rect(integralInk2,x0,y0,x1,y1)-inkSum*inkSum/area<area*4)return -1;
     let sum=0,sq=0,cross=0,es=0,esq=0,ec=0,inside=0,ks=0,ksq=0,kc=0;
-    for(const a of t.samples){const xx=x+a.x,yy=y+a.y;if(xx<0||xx>=w||yy<0||yy>=h)return -1;const i=yy*w+xx,v=gray[i],e=edges[i];sum+=v;sq+=v*v;cross+=a.v*v;es+=e;esq+=e*e;ec+=a.e*e;inside+=mask[i];const k=ink[i];ks+=k;ksq+=k*k;kc+=a.a*k;}
+    const r=t.samples.r,d=t.samples.d,cell=(2*r+1)**2;
+    for(const a of t.samples){const xx=x+a.x,yy=y+a.y;if(xx<0||xx>=w||yy<0||yy>=h)return -1;const i=yy*w+xx;
+      const v=r?cellMean(xx,yy,r):gray[i],e=r?Math.abs(cellMean(xx+d,yy,r)-cellMean(xx-d,yy,r))+Math.abs(cellMean(xx,yy+d,r)-cellMean(xx,yy-d,r)):edges[i];
+      sum+=v;sq+=v*v;cross+=a.v*v;es+=e;esq+=e*e;ec+=a.e*e;inside+=mask[i];
+      const k=r&&xx>=r&&yy>=r&&xx+r<w&&yy+r<h?rect(integralInk,xx-r,yy-r,xx+r+1,yy+r+1)/cell:ink[i];ks+=k;ksq+=k*k;kc+=a.a*k;}
     if(inside<t.samples.length*.96)return -1;
     const n=t.samples.length,v=sq-sum*sum/n,ev=esq-es*es/n;
     if(v<1||t.variance<1)return -1;
@@ -584,6 +623,14 @@ function chestLine(p,ref) {
   }
   return null;
 }
+// PDF sheets are scanned at 320 px. Redraw a page only when the thinnest
+// supplied design could not reach 8 px across at THIN_MIN_WIDTH of the chest.
+function thinDesignEdge(refs,edge,contents) {
+  const thin=Math.min(1,...contents.flatMap(({box})=>box?[Math.min(box.w/box.h,box.h/box.w)]:[]));
+  const chest=Math.min(...refs.map(ref=>ref.chestPx).filter(n=>n>0)),needed=Math.min(THIN_CHEST_PX,8/(thin*THIN_MIN_WIDTH));
+  if(!Number.isFinite(chest)||chest>=needed)return null;
+  return Math.min(PDF_THIN_MAX_EDGE,Math.ceil(edge*needed/chest));
+}
 function scaleFor(ref,measurements,scalePair='boy_etek',p=null) {
   if(scalePair==='boy_gogus'&&p&&ref.chestLine===undefined)ref.chestLine=chestLine(p,ref);
   const chest=scalePair==='boy_gogus',horizontalCm=chest?measurements.gogus:measurements.etek,horizontalPx=chest?ref.chestLine?.width:ref.hemWidthPx;
@@ -634,13 +681,44 @@ function sleevePrints(p,sleeve) {
     const i=y*w+x;
     if(ink[i]&&mask[i-2]&&mask[i+2]&&mask[i-2*w]&&mask[i+2*w])clean[i]=1;
   }
-  const r=Math.max(2,Math.round(sleeve.lengthPx*.012)),joined=dilate(clean,w,h,r,r);
-  return components(joined,w,h,8).map(c=>{
-    const pixels=c.pixels.filter(i=>clean[i]),extent=sleeve.project(pixels);
-    if(pixels.length<8||extent.alongPx<4||extent.acrossPx<4||extent.alongPx>sleeve.lengthPx*.65)return null;
-    const mask=new Uint8Array(w*h);for(const i of pixels)mask[i]=1;
-    return {mask,pixels,box:bounds(mask,w,h),...extent};
-  }).filter(Boolean);
+  const r=Math.max(2,Math.round(sleeve.lengthPx*.012)),found=[];
+  // Every ink color also forms its own layer: a differently colored mark
+  // beside the artwork (dimension line, label, seam tape) must not be joined
+  // into the only candidate. The all-color candidates remain hypotheses.
+  // A single color layer may join over twice the radius: its gaps cannot
+  // pull in a mark of another color.
+  for(const [layer,radius] of [[clean,r],...inkLayers(p,clean).map(layer=>[layer,r*2])]) {
+    const joined=dilate(layer,w,h,radius,radius);
+    for(const c of components(joined,w,h,8)) {
+      const pixels=c.pixels.filter(i=>layer[i]),extent=sleeve.project(pixels);
+      if(pixels.length<8||extent.alongPx<4||extent.acrossPx<4||extent.alongPx>sleeve.lengthPx*.65)continue;
+      const mask=new Uint8Array(w*h);for(const i of pixels)mask[i]=1;
+      const box=bounds(mask,w,h);
+      if(!found.some(f=>f.pixels.length===pixels.length&&f.box.x===box.x&&f.box.y===box.y&&f.box.w===box.w&&f.box.h===box.h))found.push({mask,pixels,box,...extent});
+    }
+  }
+  return found;
+}
+// Split ink into color groups; a single-color mark returns no extra layer.
+function inkLayers(p,ink) {
+  const groups=[];
+  for(let i=0;i<ink.length;i++) {
+    if(!ink[i])continue;
+    const rgb=[p.data[i*4],p.data[i*4+1],p.data[i*4+2]];
+    let g=groups.find(g=>distance(g.rgb,rgb)<=INK_LAYER_DISTANCE);
+    if(!g)groups.push(g={rgb,sum:[0,0,0],n:0});
+    g.n++;rgb.forEach((v,j)=>g.sum[j]+=v);
+  }
+  const total=groups.reduce((s,g)=>s+g.n,0),major=groups.filter(g=>g.n>=total*.08).map(g=>g.sum.map(v=>v/g.n));
+  if(major.length<2)return [];
+  const layers=major.map(()=>new Uint8Array(ink.length));
+  for(let i=0;i<ink.length;i++) {
+    if(!ink[i])continue;
+    const rgb=[p.data[i*4],p.data[i*4+1],p.data[i*4+2]];
+    let best=0;for(let k=1;k<major.length;k++)if(distance(major[k],rgb)<distance(major[best],rgb))best=k;
+    layers[best][i]=1;
+  }
+  return layers;
 }
 function sleeveMatch(p,sleeve,candidate,design,content) {
   let best=null;
@@ -794,7 +872,7 @@ async function autoMeasure({image,design,flat,product,position}) {
   if(!positive(measurements.omuzdan_boy)&&!positive(measurements[scalePair==='boy_gogus'?'gogus':'etek']))reasons.push(`Ürün için geçerli L beden kalıp ölçüleri bulunamadı (boy ve ${horizontalLabel} ölçüsü sayısı 0).`);
   if(viewForPosition(position)==='teyit')reasons.push('Ürün görünümü uygulama konumuyla eşleştirilemedi (geçerli görünüm sayısı 0).');
   try {
-    const pages=await rasterPages(image,image.mime==='application/pdf'?320:MAX_EDGE),candidates=[],allViews=[];
+    const pages=await rasterPages(image,image.mime==='application/pdf'?320:MAX_EDGE),candidates=[],allViews=[],pageEdges=pages.map(()=>320);
     const tallBack=position==='sirt'&&!design;
     let designs=[];
     if(design)try {designs=await rasterPages(design,1000,null,{transparent:true});}catch(e){source.designReadError=e.message;}
@@ -804,8 +882,15 @@ async function autoMeasure({image,design,flat,product,position}) {
     global.gc?.(); // Release full-resolution native decode surfaces before scanning masks.
     source.pageCount=pages.length;source.designPageCount=designs.length;timings.raster=performance.now()-started;
     for(let i=0;i<pages.length;i++) {
-      const refs=silhouettes(pages[i],product);
+      let refs=silhouettes(pages[i],product);
       const cues=productViewCues(pages[i],refs,product);
+      const edge=image.mime==='application/pdf'?thinDesignEdge(refs,pageEdges[i],designContents):null;
+      if(edge) {
+        // View cues stay from the 320 px sheet; every product must be found again.
+        const p=(await rasterPages(image,edge,[i+1]))[0],sx=p.width/pages[i].width,sy=p.height/pages[i].height,found=silhouettes(p,product);
+        const mapped=refs.map(ref=>{const box={x:ref.box.x*sx,y:ref.box.y*sy,w:ref.box.w*sx,h:ref.box.h*sy};return found.find(r=>overlapFraction(r.box,box)>.5);});
+        if(mapped.every(Boolean)&&new Set(mapped).size===mapped.length){pages[i]=p;pageEdges[i]=edge;refs=mapped;}
+      }
       for(let k=0;k<refs.length;k++) {
         const ref=refs[k],cue=cues[k],scale=scaleFor(ref,measurements,scalePair,pages[i]);
         allViews.push({page:i+1,index:k,view:cue.view,hooded:cue.hooded,viewEvidence:{lining:cue.lining,cords:cue.cords,...(cue.neckDepth!==undefined?{neckDepth:cue.neckDepth}:{})},maskMethod:ref.maskMethod,...(ref.splitMethod?{splitMethod:ref.splitMethod}:{}),productBoxPx:ref.box,shoulderY:ref.shoulderY,hemY:ref.hemY,hemWidthPx:ref.hemWidthPx,chestLinePx:ref.chestLine??null,bodyHeightPx:ref.bodyHeightPx,...scale});
@@ -838,7 +923,13 @@ async function autoMeasure({image,design,flat,product,position}) {
       if(!represented.has(key)){finalists.push(c);represented.add(key);}
     }
     if(image.mime==='application/pdf' && finalists.length) {
-      const numbers=[...new Set(finalists.map(c=>c.page))].sort((a,b)=>a-b),high=await rasterPages(image,640,numbers);
+      const numbers=[...new Set(finalists.map(c=>c.page))].sort((a,b)=>a-b),high=[];
+      // One pixel of template width is 3% of a 36 px logo: draw small matches larger.
+      for(const n of numbers) {
+        const sizes=finalists.filter(c=>c.page===n&&c.designPage).map(c=>Math.max(c.match.box.w,c.match.box.h));
+        const edge=Math.max(640,pageEdges[n-1],...sizes.map(size=>Math.min(PDF_THIN_MAX_EDGE,Math.ceil(pageEdges[n-1]*REFINE_DESIGN_PX/size))));
+        high.push((await rasterPages(image,edge,[n]))[0]);
+      }
       const refs=high.map(p=>silhouettes(p,product));
       finalists=finalists.map(candidate=>{
         const n=numbers.indexOf(candidate.page),p=high[n],sx=p.width/candidate.p.width,sy=p.height/candidate.p.height;
