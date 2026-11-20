@@ -579,7 +579,7 @@ function colorDesign(p,ref,tallBack=false) {
   }
   candidates.sort((a,b)=>b.score-a.score);
   if(!candidates.length)return {box:null,confidence:0,ambiguous:false,content:{box:null},method:'otomatik_renk'};
-  return {...candidates[0],ambiguous:!!candidates[1]&&candidates[1].score>candidates[0].score*.4};
+  return {...candidates[0],ambiguous:!!candidates[1]&&candidates[1].score>candidates[0].score*.4,others:candidates.slice(1)};
 }
 
 function chestLine(p,ref) {
@@ -1232,20 +1232,47 @@ function clothShading(data,ring,fabric) {
 // the print inside the print band; a cord or seam crosses the band edge and
 // stays out.
 function wholePrint(p,ref,box,tallBack) {
-  const w=p.width,h=p.height,cx=ref.bodyCenterX??(ref.box.x+ref.box.w/2);
-  // A back has no cords or opening below the collar; its print may rise closer to it.
-  const top=Math.max(0,Math.ceil(ref.shoulderY+ref.bodyHeightPx*(tallBack?.04:.14))),bottom=Math.min(h,Math.floor(ref.shoulderY+ref.bodyHeightPx*(tallBack?.83:.62)));
-  const left=Math.max(0,Math.ceil(cx-ref.hemWidthPx*.48)),right=Math.min(w,Math.floor(cx+ref.hemWidthPx*.48));
+  const w=p.width,h=p.height,d=p.data,cx=ref.bodyCenterX??(ref.box.x+ref.box.w/2);
+  // Cords hang below the collar of a front; only a part that is not a long
+  // vertical strand may sit that high, and a back has none.
+  const top=Math.max(0,Math.ceil(ref.shoulderY+ref.bodyHeightPx*.04)),cordFree=Math.ceil(ref.shoulderY+ref.bodyHeightPx*.14);
+  // A back print may run down to the ribbed hem band.
+  const bottom=Math.min(h,Math.floor(ref.shoulderY+ref.bodyHeightPx*(tallBack?.9:.62)));
+  // A wide back print can pass the width of a ribbed hem; side seams at the
+  // garment outline stay out because ink there touches the mask edge.
+  const reach=tallBack?.55:.48,margin=Math.max(3,Math.round(ref.hemWidthPx*.02));
+  const left=Math.max(0,Math.ceil(cx-ref.hemWidthPx*reach)),right=Math.min(w,Math.floor(cx+ref.hemWidthPx*reach));
   const all=contrastInk(p,ref),ink=new Uint8Array(w*h);
-  for(let y=top;y<bottom;y++)for(let x=left;x<right;x++) {const i=y*w+x;ink[i]=all[i];}
-  const parts=components(ink,w,h,2).filter(c=>c.box.x>left&&c.box.y>top&&c.box.x+c.box.w<right&&c.box.y+c.box.h<bottom);
+  const inside=i=>ref.mask[i-margin]&&ref.mask[i+margin]&&ref.mask[i-margin*w]&&ref.mask[i+margin*w];
+  for(let y=top;y<bottom;y++)for(let x=left;x<right;x++) {const i=y*w+x;ink[i]=all[i]&&inside(i)?1:0;}
+  const garment=dominant(p,Array.from(ref.mask.keys()).filter(i=>ref.mask[i]));
+  const far=i=>Math.max(Math.abs(d[i*4]-garment[0]),Math.abs(d[i*4+1]-garment[1]),Math.abs(d[i*4+2]-garment[2]));
+  // Ink colours of the detected print; a joined part must share one of them
+  // (a gold zipper or a label of another colour is not part of a white print).
+  const buckets=new Map();let total=0;
+  for(let y=box.y;y<box.y+box.h;y++)for(let x=box.x;x<box.x+box.w;x++) {
+    const i=y*w+x;if(!all[i])continue;
+    const key=(d[i*4]>>6)*16+(d[i*4+1]>>6)*4+(d[i*4+2]>>6),b=buckets.get(key)||{n:0,rgb:[0,0,0]};
+    b.n++;for(let k=0;k<3;k++)b.rgb[k]+=d[i*4+k];buckets.set(key,b);total++;
+  }
+  // Main inks only: edge blends spread over many small buckets.
+  const palette=[...buckets.values()].filter(b=>b.n>=total*.15).map(b=>b.rgb.map(v=>v/b.n));
+  const inkColor=c=> {
+    let best=c.pixels[0];for(const i of c.pixels)if(far(i)>far(best))best=i;
+    return palette.some(rgb=>Math.max(...rgb.map((v,k)=>Math.abs(v-d[best*4+k])))<=70);
+  };
+  const parts=components(ink,w,h,2).filter(c=>c.box.x>left&&c.box.y>top&&c.box.x+c.box.w<right&&c.box.y+c.box.h<bottom&&
+    (tallBack||c.box.y>=cordFree||c.box.h<c.box.w*3));
+  // On a front, what hangs above a print is a zipper pull, cord end or collar
+  // detail unless it lies flat like a line of text.
   let b={...box},grown=true;
   while(grown) {
     grown=false;
     const gap=Math.max(2,Math.round(Math.min(b.w,b.h)*.2));
     for(const c of parts) {
       const q=c.box;
-      if(c.joined||q.x>b.x+b.w+gap||q.x+q.w<b.x-gap||q.y>b.y+b.h+gap||q.y+q.h<b.y-gap)continue;
+      if(c.joined||q.x>b.x+b.w+gap||q.x+q.w<b.x-gap||q.y>b.y+b.h+gap||q.y+q.h<b.y-gap||!inkColor(c))continue;
+      if(!tallBack&&q.y+q.h<=b.y&&q.w<q.h)continue;
       c.joined=grown=true;
       const x0=Math.min(b.x,q.x),y0=Math.min(b.y,q.y);
       b={x:x0,y:y0,w:Math.max(b.x+b.w,q.x+q.w)-x0,h:Math.max(b.y+b.h,q.y+q.h)-y0};
@@ -1259,7 +1286,8 @@ function wholePrint(p,ref,box,tallBack) {
 function openingShade(p,ref) {
   const w=p.width,d=p.data,cx=ref.bodyCenterX??(ref.box.x+ref.box.w/2);
   const garment=dominant(p,Array.from(ref.mask.keys()).filter(i=>ref.mask[i])),level=(garment[0]+garment[1]+garment[2])/3;
-  if(level>128)return null;
+  // Saturated bright cloth (red) has a low mean but is not dark cloth.
+  if(level>128||Math.max(...garment)>160)return null;
   const limit=level-Math.max(12,level*.3);
   let total=0,dark=0;
   for(let y=ref.box.y;y<ref.shoulderY+ref.bodyHeightPx*.05;y++)
@@ -1270,88 +1298,301 @@ function openingShade(p,ref) {
     }
   return total?dark/total:null;
 }
-// Extraction only: settle front/back of a side-by-side pair of the same
-// garment. Two independent cues are used, and any disagreement leaves both
-// views unresolved: the opening shade above, and a chest-side print, which
-// only a front carries while the other print sits on the centre line.
-function pairViews(p,refs,cues,matches) {
+// Colour and product words, as written on order lines and mockup sheets.
+const foldText=value=>String(value??'').toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/ı/g,'i');
+// Letter-spaced headings ("S w e a t s h i r t") become words before matching.
+const textWords=value=>foldText(value).replace(/\b([a-z0-9]) (?=[a-z0-9]\b)/g,'$1').replace(/-/g,'').split(/[^a-z0-9]+/).filter(Boolean);
+const COLOR_WORDS={beyaz:'beyaz',white:'beyaz',krem:'krem',ekru:'krem',siyah:'siyah',black:'siyah',antrasit:'gri',gri:'gri',fume:'gri',grey:'gri',gray:'gri',
+  lacivert:'lacivert',navy:'lacivert',bordo:'bordo',maroon:'bordo',burgundy:'bordo',kirmizi:'kirmizi',red:'kirmizi',mavi:'mavi',saks:'mavi',blue:'mavi',
+  yesil:'yesil',green:'yesil',haki:'yesil',sari:'sari',yellow:'sari',turuncu:'turuncu',orange:'turuncu',mor:'mor',purple:'mor',pembe:'pembe',pink:'pembe'};
+const PRODUCT_WORDS={tshirt:'tisort',shirt:'tisort',tisort:'tisort',sweatshirt:'sweat',sweat:'sweat',hoodie:'sweat',kapusonlu:'sweat',sort:'sort',short:'sort',shorts:'sort',
+  bornoz:'bornoz',bone:'bone',esofman:'esofman',jogger:'esofman'};
+const LINE_PRODUCTS={tisort:'tisort',sweat:'sweat',sweatshirt:'sweat',hoodie:'sweat',kapusonlu:'sweat',polar:'sweat',tam_fermuar:'sweat',sort:'sort',esofman:'esofman'};
+const named=(text,table)=>[...new Set(textWords(text).map(w=>table[w]).filter(Boolean))];
+// Garment colour family from its dominant RGB; null where no family is clear.
+function garmentColor([r,g,b]) {
+  const max=Math.max(r,g,b),min=Math.min(r,g,b),v=max/255,s=max?(max-min)/max:0;
+  if(s<.18)return v>.8?'beyaz':v<.25?'siyah':'gri';
+  let hue=max===r?((g-b)/(max-min))*60:max===g?(2+(b-r)/(max-min))*60:(4+(r-g)/(max-min))*60;
+  if(hue<0)hue+=360;
+  if(s<.3&&v>.75&&hue>=20&&hue<70)return 'krem';
+  if(hue<15||hue>=340)return v<.6?'bordo':'kirmizi';
+  if(hue<40)return 'turuncu';
+  if(hue<70)return 'sari';
+  if(hue<170)return 'yesil';
+  if(hue<260)return v<.55?'lacivert':'mavi';
+  return hue<300?'mor':'pembe';
+}
+// Text of each PDF page with item positions in the raster used for extraction.
+async function pdfText(image,maxEdge,selectedPages) {
+  const pdf=await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const task=pdf.getDocument({data:Uint8Array.from(image.buffer),isEvalSupported:false,useSystemFonts:true,verbosity:0});
+  let doc;
+  try {
+    doc=await task.promise;const pages=[];
+    for(let n=1;n<=doc.numPages;n++) {
+      if(!selectedPages.includes(n))continue;
+      const page=await doc.getPage(n),raw=page.getViewport({scale:1});
+      const viewport=page.getViewport({scale:Math.min(2,maxEdge/Math.max(raw.width,raw.height))});
+      const items=(await page.getTextContent()).items.filter(item=>item.str?.trim()).map(item=> {
+        const [x,y]=viewport.convertToViewportPoint(item.transform[4],item.transform[5]);
+        return {text:item.str,x,y};
+      });
+      pages.push({text:items.map(item=>item.text).join(' '),items});
+      page.cleanup();
+    }
+    return pages;
+  } finally {if(doc)await doc.destroy();else await task.destroy();}
+}
+// A printed "ÖN"/"ARKA" caption belongs to the nearest garment when it sits
+// just above or below it and no other garment is as close.
+function captionViews(items,refs) {
+  const views=refs.map(()=>null);
+  for(const item of items||[]) {
+    const words=textWords(item.text).join(' ');
+    const view=/^(on|front)( (gorunus|gorunum|yuz|view))?$/.test(words)?'on':/^(arka|back)( (gorunus|gorunum|yuz|view))?$/.test(words)?'arka':null;
+    if(!view)continue;
+    const gaps=refs.map(ref=> {
+      const b=ref.box,dx=Math.max(0,b.x-item.x,item.x-b.x-b.w),dy=Math.max(0,b.y-item.y,item.y-b.y-b.h);
+      return dx>0?Infinity:dy/ref.bodyHeightPx;
+    });
+    const best=gaps.indexOf(Math.min(...gaps)),heading=item.y<=refs[best].box.y;
+    // A caption is a heading: just above its garment, it wins a close call
+    // against the garment it trails; otherwise the nearer must be clearly nearer.
+    if(gaps[best]>.35||gaps.some((g,k)=>k!==best&&g<=gaps[best]*(heading&&item.y>=refs[k].box.y+refs[k].box.h?1:2)))continue;
+    if(views[best]&&views[best]!==view)views[best]='celiski';else views[best]=view;
+  }
+  return views;
+}
+// A hood lining shows as two mirrored wedges of a lighter tone of the same
+// cloth colour beside the opening; only a front shows it. Highlights on the
+// back of a hood are one-sided or gradual and do not pair up.
+function liningPair(p,ref) {
+  const w=p.width,h=p.height,d=p.data,cx=ref.bodyCenterX??(ref.box.x+ref.box.w/2);
+  const f=dominant(p,Array.from(ref.mask.keys()).filter(i=>ref.mask[i])),norm=f[0]**2+f[1]**2+f[2]**2;
+  if(norm<300)return false;
+  const lighter=new Uint8Array(w*h);
+  for(let y=Math.max(0,ref.box.y);y<ref.shoulderY;y++)
+    for(let x=Math.max(0,Math.ceil(cx-ref.hemWidthPx*.35));x<Math.min(w,cx+ref.hemWidthPx*.35);x++) {
+      const i=y*w+x;
+      if(!ref.mask[i])continue;
+      const c=[d[i*4],d[i*4+1],d[i*4+2]],s=(c[0]*f[0]+c[1]*f[1]+c[2]*f[2])/norm;
+      if(s>=1.3&&s<=2.2&&Math.max(...c.map((v,k)=>Math.abs(v-s*f[k])))<=20)lighter[i]=1;
+    }
+  const parts=components(lighter,w,h,Math.max(6,ref.hemWidthPx*ref.bodyHeightPx*.001)).map(q=>({
+    x:(q.box.x+q.box.w/2-cx)/ref.hemWidthPx,y:(q.box.y+q.box.h/2-ref.shoulderY)/ref.bodyHeightPx,area:q.area}));
+  return parts.some(l=>l.x<-.05&&parts.some(r=>r.x>.05&&Math.abs(l.x+r.x)<=.06&&Math.abs(l.y-r.y)<=.05&&
+    Math.max(l.area,r.area)<=2*Math.min(l.area,r.area)));
+}
+// Front and back of one garment shown side by side or one above the other.
+function pairedGarments(a,b) {
+  const height=Math.max(a.bodyHeightPx,b.bodyHeightPx),hem=Math.max(a.hemWidthPx,b.hemWidthPx);
+  if(Math.abs(a.hemWidthPx-b.hemWidthPx)>hem*.12||Math.abs(a.bodyHeightPx-b.bodyHeightPx)>height*.12)return false;
+  return comparableShirts(a,b)||Math.abs(a.bodyCenterX-b.bodyCenterX)<=hem*.08;
+}
+// Extraction only: settle front/back of a pair of the same garment. Each cue
+// is independent and any disagreement leaves both views unresolved:
+// - a printed label next to a garment ("ÖN", "ARKA"),
+// - on dark cloth, the shadowed neck/hood opening or a mirrored hood lining,
+// - a chest-side print, which only a front carries; the other garment then
+//   has a print on the centre line or none in the print band.
+function pairViews(p,refs,cues,matches,labels=[]) {
   // A front already found by hood evidence must agree with these cues.
   const known=cues.findIndex(c=>c.view==='on');
-  if(refs.length!==2||!comparableShirts(...refs)||cues.some(c=>!['on','teyit'].includes(c.view))||cues.every(c=>c.view==='on'))return;
-  const votes=[],shade=refs.map(ref=>openingShade(p,ref));
+  // Hood evidence naming both garments a front contradicts itself; the cues
+  // below must then settle the pair on their own.
+  if(refs.length!==2||!pairedGarments(...refs)||cues.some(c=>!['on','teyit'].includes(c.view)))return;
+  const hoodSaysBoth=cues.every(c=>c.view==='on');
+  const votes=[];
+  if(labels.includes('celiski'))return;
+  const labelled=labels.findIndex(l=>l==='on'),labelledBack=labels.findIndex(l=>l==='arka');
+  if(labelled>=0||labelledBack>=0) {
+    if(labelled>=0&&labelledBack>=0&&labelled===labelledBack)return;
+    votes.push(labelled>=0?labelled:1-labelledBack);
+  }
+  const shade=refs.map(ref=>openingShade(p,ref));
   if(shade.every(s=>s!=null)) {
-    const front=shade.findIndex(s=>s>=.15);
+    const lining=refs.map(ref=>liningPair(p,ref));
+    const front=refs.map((_,i)=>shade[i]>=.15||lining[i]),back=refs.map((_,i)=>shade[i]<=.03&&!lining[i]);
+    const index=front.findIndex(Boolean);
     // Dark cloth always shows a front opening; without one, neither is a front.
-    if(front<0||shade[1-front]>.03)return;
-    votes.push(front);
+    if(index<0||front[1-index]||!back[1-index])return;
+    votes.push(index);
   }
-  if(matches.every(m=>m.box&&!m.ambiguous)) {
-    const offset=refs.map((ref,i)=>Math.abs(matches[i].box.x+matches[i].box.w/2-ref.bodyCenterX)/ref.hemWidthPx);
-    const front=offset.findIndex(o=>o>=.15);
-    if(front>=0&&offset[1-front]<.08)votes.push(front);
+  if(matches.every(m=>!m.ambiguous)) {
+    const offset=refs.map((ref,i)=>matches[i].box?Math.abs(matches[i].box.x+matches[i].box.w/2-ref.bodyCenterX)/ref.hemWidthPx:null);
+    const front=offset.findIndex(o=>o!=null&&o>=.15);
+    if(front>=0&&(offset[1-front]==null||offset[1-front]<.08))votes.push(front);
   }
-  if(!votes.length||votes.some(v=>v!==votes[0])||(known>=0&&votes[0]!==known))return;
+  if(!votes.length||votes.some(v=>v!==votes[0])||(!hoodSaysBoth&&known>=0&&votes[0]!==known))return;
   cues[votes[0]].view='on';cues[1-votes[0]].view='arka';
 }
+// Re-reading a page at a higher resolution keeps the garment found on the
+// scan raster: its mask is enlarged and its measurements scaled.
+const HI_RES_SHORT=120, HI_RES_TARGET=160, HI_RES_EDGE=1600, HI_RES_PIXELS=2.5e6, SMALL_PRINT_PX=64;
+function scaledBox(box,k,p) {
+  const x=Math.max(0,Math.floor(box.x*k)),y=Math.max(0,Math.floor(box.y*k));
+  return {x,y,w:Math.min(p.width-x,Math.ceil(box.w*k)),h:Math.min(p.height-y,Math.ceil(box.h*k))};
+}
+function scaledRef(ref,low,high) {
+  const kx=high.width/low.width,ky=high.height/low.height,mask=new Uint8Array(high.width*high.height);
+  for(let y=0;y<high.height;y++) {
+    const row=Math.min(low.height-1,Math.floor(y/ky))*low.width;
+    for(let x=0;x<high.width;x++)mask[y*high.width+x]=ref.mask[row+Math.min(low.width-1,Math.floor(x/kx))];
+  }
+  return {...ref,mask,raw:null,maskScale:kx,box:scaledBox(ref.box,kx,high),bodyCenterX:ref.bodyCenterX*kx,hemWidthPx:ref.hemWidthPx*kx,chestPx:ref.chestPx*kx,
+    hemY:ref.hemY*ky,shoulderY:ref.shoulderY*ky,bodyHeightPx:ref.bodyHeightPx*ky};
+}
+// The same print on the same garment: equal placement on the body, equal
+// garment colour and matching ink pattern on a coarse grid.
+function sameArtwork(a,b) {
+  if(a.color!==b.color||a.match.ambiguous||b.match.ambiguous)return false;
+  const place=({ref,match:{box}})=>[(box.x+box.w/2-ref.bodyCenterX)/ref.hemWidthPx,(box.y-ref.shoulderY)/ref.bodyHeightPx,box.w/ref.hemWidthPx,box.h/ref.bodyHeightPx];
+  const pa=place(a),pb=place(b);
+  if(pa.some((v,i)=>Math.abs(v-pb[i])>.04))return false;
+  const grid=({p,ref,match:{box}})=> {
+    const garment=dominant(p,Array.from(ref.mask.keys()).filter(i=>ref.mask[i])),out=[];
+    for(let gy=0;gy<12;gy++)for(let gx=0;gx<24;gx++) {
+      const i=(Math.floor(box.y+(gy+.5)*box.h/12)*p.width+Math.floor(box.x+(gx+.5)*box.w/24))*4;
+      out.push(Math.max(...[0,1,2].map(k=>Math.abs(p.data[i+k]-garment[k]))));
+    }
+    return out;
+  };
+  const ga=grid(a),gb=grid(b);
+  return ga.reduce((sum,v,i)=>sum+Math.abs(v-gb[i]),0)/ga.length<=20;
+}
+// Several prints on one garment: the application's position names one of
+// them. On a front the centre-most print is the chest print and the outermost
+// on the named side is the chest-side logo, each only when clearly apart from
+// the next one. On a back, prints stacked on the centre line form one
+// composition. Anything else stays ambiguous.
+function positionPrint(match,ref,position) {
+  const all=[match,...(match.others||[])].map(c=>({...c,o:(c.box.x+c.box.w/2-ref.bodyCenterX)/ref.hemWidthPx}));
+  if(position==='sirt') {
+    // A small second print (a neck label) is another application, not part of the back print.
+    if(!match.ambiguous)return {...match,known:all.slice(1).map(c=>c.box)};
+    const column=all.filter(c=>Math.abs(c.o)<.1).sort((a,b)=>a.box.y-b.box.y);
+    if(column.length<2||all.some(c=>Math.abs(c.o)>=.1&&c.score>match.score*.4))return match;
+    let box=column[0].box;
+    for(const c of column.slice(1)) {
+      const q=c.box,overlap=Math.min(box.x+box.w,q.x+q.w)-Math.max(box.x,q.x);
+      if(overlap<Math.min(box.w,q.w)*.6||q.y-(box.y+box.h)>Math.max(box.h,q.h)*2.5)return match;
+      const x0=Math.min(box.x,q.x),y0=Math.min(box.y,q.y);
+      box={x:x0,y:y0,w:Math.max(box.x+box.w,q.x+q.w)-x0,h:Math.max(box.y+box.h,q.y+q.h)-y0};
+    }
+    return {...match,box,score:column.reduce((sum,c)=>sum+c.score,0),ambiguous:false,others:[],known:all.filter(c=>!column.includes(c)).map(c=>c.box)};
+  }
+  const side=position==='sol_gogus'?1:position==='sag_gogus'?-1:0;
+  const ranked=all.map(c=>({c,key:side?c.o*side:-Math.abs(c.o)})).sort((a,b)=>b.key-a.key);
+  if(side&&ranked[0].key<.05)return match;
+  if(ranked[1]&&ranked[0].key-ranked[1].key<.12)return match;
+  const {o,...chosen}=ranked[0].c;
+  // The other prints belong to other applications on the same garment.
+  return {...chosen,ambiguous:false,others:[],known:ranked.slice(1).map(r=>r.c.box)};
+}
 // Artwork recovery uses the existing placement detector but never infers a physical scale.
-async function extractArtwork({image,position,product:productKey}) {
+async function extractArtwork({image,position,product:productKey,color}) {
   const view=viewForPosition(position);
   const supported=['gogus','sol_gogus','sag_gogus','sirt'];
   if(!supported.includes(position))return {reason:'Bu konumda üründen güvenilir desen ayrıştırılamadı; ayrı desen dosyası bağlayın.'};
   if(image.gorunum&&image.gorunum!==view)return {reason:'Ürün görünümü bildirilen uygulama konumuyla eşleşmedi.'};
   // An extra page detects overflow without decoding the rest of a large sheet.
   const pageLimit=12, selectedPages=Array.from({length:pageLimit+1},(_,i)=>i+1);
-  const pages=await rasterPages(image,image.mime==='application/pdf'?640:1000,selectedPages), candidates=[];
+  const edge=image.mime==='application/pdf'?640:1000;
+  const pages=await rasterPages(image,edge,selectedPages), candidates=[];
   if(pages.length>pageLimit)return {reason:`${pageLimit} sayfadan uzun üründen güvenle desen ayrılamıyor; tek ürün görünümü yükleyin.`};
+  const texts=image.mime==='application/pdf'?await pdfText(image,edge,selectedPages):null;
+  const lineColor=named(color,COLOR_WORDS),wantColor=lineColor.length===1?lineColor[0]:null;
+  const wantProduct=LINE_PRODUCTS[String(productKey??'').trim().toLowerCase()]??null;
   let hasProduct=false, ambiguousView=false, wrongSide=false;
+  const sheets=[];
   for(const [i,p] of pages.entries()) {
-    const refs=silhouettes(p,productKey),cues=productViewCues(p,refs,productKey);
+    // A catalogue page titled with another product or colour is not this line's garment.
+    const title=texts?.[i]?.text,products=named(title,PRODUCT_WORDS),colors=named(title,COLOR_WORDS);
+    if(wantProduct&&products.length===1&&products[0]!==wantProduct)continue;
+    if(wantColor&&colors.length===1&&colors[0]!==wantColor)continue;
+    const refs=silhouettes(p,productKey);
+    hasProduct||=refs.length>0;
+    sheets.push({i,p,refs,colors:refs.map(ref=>garmentColor(dominant(p,Array.from(ref.mask.keys()).filter(k=>ref.mask[k])))),captions:captionViews(texts?.[i]?.items,refs)});
+  }
+  // Colour variants repeat one design on garments of different colours. With
+  // the line colour known, only garments of that colour are considered, when
+  // the sheet shows any.
+  const byColor=wantColor&&sheets.some(sheet=>sheet.colors.includes(wantColor));
+  for(const {i,p,refs:all,colors,captions} of sheets) {
+    const kept=all.map((_,k)=>!byColor||colors[k]===wantColor);
+    const refs=all.filter((_,k)=>kept[k]),labels=captions.filter((_,k)=>kept[k]);
+    const cues=productViewCues(p,refs,productKey);
     const matches=refs.map(ref=>colorDesign(p,ref,position==='sirt'));
-    pairViews(p,refs,cues,matches);
+    pairViews(p,refs,cues,matches,labels);
     for(const [index,ref] of refs.entries()) {
-      hasProduct=true;
       const cue=cues[index];
       if(cue.view!=='teyit'&&cue.view!==view)continue;
-      const match=matches[index];
+      let match=matches[index];
       if(!match.box)continue;
       if(refs.length>1&&cue.view==='teyit') {ambiguousView=true;continue;}
+      if(match.others?.length)match=positionPrint(match,ref,position);
       const {x,w}=match.box;
       const offset=(x+w/2-ref.bodyCenterX)/ref.hemWidthPx;
       if((position==='sol_gogus'&&offset<.05)||(position==='sag_gogus'&&offset>-.05)) {wrongSide=true;continue;}
-      candidates.push({p,ref,match,page:i+1});
+      candidates.push({p,ref,match,page:i+1,color:colors[all.indexOf(ref)]});
     }
   }
+  // A sheet may repeat the same garment and print on several pages; one copy is enough.
+  if(!ambiguousView&&candidates.length>1&&candidates.every(c=>sameArtwork(candidates[0],c)))candidates.splice(1);
+  if(!ambiguousView&&candidates.length>1&&!wantColor&&new Set(candidates.map(c=>c.color)).size===candidates.length)
+    return {reason:'Desen birden çok renk varyantında görünüyor; satırın rengini girin ya da tek görünüm yükleyin.'};
   if(ambiguousView||candidates.length>1||candidates[0]?.match.ambiguous)
     return {reason:'Üründe birden çok görünüm veya desen adayı var; konumu teyit edin ya da ayrı desen bağlayın.'};
   if(!candidates.length) return {reason:wrongSide ? 'Desen bildirilen göğüs tarafıyla eşleşmedi.' : hasProduct
     ? 'Güvenilir desen adayı yok. Düşük kontrast, dikiş veya kesik desen olabilir.'
     : 'Tam ürün maskesi bulunamadı; ürün veya desen kesilmiş olabilir.'};
 
-  const {p,ref,match,page}=candidates[0];
+  let {p,ref,match,page}=candidates[0];
+  const unsafe={reason:'Desen kenarı kumaş, gölge veya dikişten güvenle ayrılamadı; ayrı desen dosyası bağlayın.'};
+  {
+    const {width:w,height:h}=p,mask=ref.mask,product=ref.box;
+    const sleeveOnly=x=> {
+      // A slight crop of the outer sleeve is independent of a complete torso
+      // print. Any border contact at torso height remains unsafe.
+      if(Math.abs(x-ref.bodyCenterX)<ref.hemWidthPx*.52)return false;
+      for(let y=Math.floor(ref.shoulderY+ref.bodyHeightPx*.42);y<product.y+product.h;y++)
+        if(mask[y*w+x])return false;
+      return true;
+    };
+    // A hem cut by the page edge leaves the chest and back print bands whole;
+    // the print itself must then end well above that edge.
+    const hemCut=product.y+product.h>h-3&&match.box.y+match.box.h<h-ref.bodyHeightPx*.15;
+    if(product.y<3||(product.y+product.h>h-3&&!hemCut)||
+      (product.x<3&&!sleeveOnly(product.x))||(product.x+product.w>w-3&&!sleeveOnly(product.x+product.w-1)))
+      return {reason:'Ürün görüntü kenarında kesiliyor; desenin tamamı doğrulanamadı.'};
+    if(ref.symmetry<MIN_SYMMETRY)return unsafe;
+  }
+  // A small print loses thin strokes and small lettering at the scan size.
+  // Read the same page again with more pixels when the source has them.
+  const short=Math.min(match.box.w,match.box.h);
+  if(short<HI_RES_SHORT) {
+    const base=Math.max(p.width,p.height),area=p.width*p.height;
+    const edge=Math.min(HI_RES_EDGE,Math.round(base*Math.min(4,HI_RES_TARGET/short,Math.sqrt(HI_RES_PIXELS/area))));
+    if(edge>base*1.2) {
+      const [hi]=await rasterPages(image,edge,[page]),k=hi.width/p.width;
+      if(k>1.2&&Math.abs(hi.height/p.height-k)<.02*k) {
+        // Prefer the garment found again on the sharper raster; its outline
+        // is exact, where an enlarged mask is blocky at the edges.
+        const expected=scaledBox(ref.box,k,hi),again=silhouettes(hi,productKey).find(r=>overlapFraction(r.box,expected)>.8);
+        ref=again?{...again,maskScale:1}:scaledRef(ref,p,hi);match={...match,box:scaledBox(match.box,k,hi),score:match.score*k*k,known:(match.known||[]).map(box=>scaledBox(box,k,hi))};p=hi;
+      }
+    }
+  }
   let b=match.box;
   const {width:w,height:h,data}=p, mask=ref.mask;
-  const unsafe={reason:'Desen kenarı kumaş, gölge veya dikişten güvenle ayrılamadı; ayrı desen dosyası bağlayın.'};
-  const product=ref.box;
-  const sleeveOnly=x=> {
-    // A slight crop of the outer sleeve is independent of a complete torso
-    // print. Any border contact at torso height remains unsafe.
-    if(Math.abs(x-ref.bodyCenterX)<ref.hemWidthPx*.52)return false;
-    for(let y=Math.floor(ref.shoulderY+ref.bodyHeightPx*.42);y<product.y+product.h;y++)
-      if(mask[y*w+x])return false;
-    return true;
-  };
-  if(product.y<3||product.y+product.h>h-3||
-    (product.x<3&&!sleeveOnly(product.x))||(product.x+product.w>w-3&&!sleeveOnly(product.x+product.w-1)))
-    return {reason:'Ürün görüntü kenarında kesiliyor; desenin tamamı doğrulanamadı.'};
-  if(ref.symmetry<MIN_SYMMETRY)return unsafe;
   const maxW=ref.hemWidthPx*.90,maxH=ref.bodyHeightPx*(position==='sirt'?.70:.44);
   if(b.w>maxW||b.h>maxH) return unsafe;
   const maxChannel=i=>Math.max(data[i*4],data[i*4+1],data[i*4+2]);
   const minChannel=i=>Math.min(data[i*4],data[i*4+1],data[i*4+2]);
   const white=(i,level)=>minChannel(i)>=level&&maxChannel(i)-minChannel(i)<=27;
   // Crop a print box with a margin and read the cloth from its outer ring.
-  const isolate=b=> {
-    const pad=Math.max(4,Math.round(Math.min(b.w,b.h)*.14));
+  const isolate=(b,pad)=> {
     const x=Math.max(1,b.x-pad),y=Math.max(1,b.y-pad),right=Math.min(w-1,b.x+b.w+pad),bottom=Math.min(h-1,b.y+b.h+pad),ring=[];
     for(let yy=y;yy<bottom;yy++)for(let xx=x;xx<right;xx++) {
       const i=yy*w+xx;
@@ -1370,21 +1611,35 @@ async function extractArtwork({image,position,product:productKey}) {
     return {x,y,right,bottom,cw:right-x,ch:bottom-y,fabric,contrast,whiteLayer,shading};
   };
   b=wholePrint(p,ref,b,position==='sirt');
-  if(b.w>maxW||b.h>maxH)return unsafe;
-  const crop=isolate(b);
+  // A back print may be wider than the ribbed hem it is measured against.
+  if(b.w>(position==='sirt'?ref.hemWidthPx*1.1:maxW)||b.h>maxH)return unsafe;
+  // The margin only has to be clean cloth all round. A print close to an
+  // arm gap or seam may keep a narrower one; the ring checks stay the same.
+  const widest=Math.max(4,Math.round(Math.min(b.w,b.h)*.14));
+  const crop=[widest,Math.round(widest/2),4].filter((pad,i,all)=>pad>=4&&all.indexOf(pad)===i).reduce((found,pad)=>found||isolate(b,pad),null);
   if(!crop)return unsafe;
   const {x,y,right,bottom,cw,ch,fabric,contrast,whiteLayer,shading}=crop,layered=whiteLayer||!!shading;
   // The placement detector searches the usual print band. A second prominent
   // mark elsewhere on the torso makes a source crop unsafe as well.
+  // An enlarged mask is blocky by its scale; keep that far from its edge.
+  const e=Math.max(2,Math.ceil(2*(ref.maskScale||1)));
+  // A crease or shadow darkens the cloth without changing its hue; ink differs
+  // in hue or is far darker than any fold.
+  const norm=fabric[0]**2+fabric[1]**2+fabric[2]**2;
+  const crease=i=> {
+    const c=[data[i*4],data[i*4+1],data[i*4+2]],s=norm?(c[0]*fabric[0]+c[1]*fabric[1]+c[2]*fabric[2])/norm:0;
+    return s>=.3&&s<1&&Math.max(...c.map((v,k)=>Math.abs(v-s*fabric[k])))<=20;
+  };
   const outside=new Uint8Array(w*h), left=Math.max(2,Math.ceil(ref.bodyCenterX-ref.hemWidthPx*.47)),
     end=Math.min(w-2,Math.floor(ref.bodyCenterX+ref.hemWidthPx*.47));
   for(let yy=Math.max(2,Math.ceil(ref.shoulderY+ref.bodyHeightPx*.14));yy<Math.min(h-2,ref.hemY-ref.bodyHeightPx*.08);yy++)
     for(let xx=left;xx<end;xx++) {
       if(xx>=x&&xx<right&&yy>=y&&yy<bottom)continue;
       const i=yy*w+xx;
-      if(mask[i]&&mask[i-2]&&mask[i+2]&&mask[i-2*w]&&mask[i+2*w]&&(whiteLayer?white(i,172):shading?shading(i)>=SHADE_INK:contrast(i)>75))outside[i]=1;
+      if(mask[i]&&mask[i-e]&&mask[i+e]&&mask[i-e*w]&&mask[i+e*w]&&(whiteLayer?white(i,172):(shading?shading(i)>=SHADE_INK:contrast(i)>75)&&!crease(i)))outside[i]=1;
     }
-  if(components(outside,w,h,Math.max(12,match.score*.10)).some(c=>c.box.w>=5&&c.box.h>=5))
+  const known=q=>(match.known||[]).some(k=>q.x<k.x+k.w&&k.x<q.x+q.w&&q.y<k.y+k.h&&k.y<q.y+q.h);
+  if(components(outside,w,h,Math.max(12,match.score*.10)).some(c=>c.box.w>=5&&c.box.h>=5&&!known(c.box)))
     return {reason:'Üründe birden çok desen adayı var; konumu teyit edin ya da ayrı desen bağlayın.'};
   const ink=new Uint8Array(cw*ch), core=layered?new Uint8Array(cw*ch):null;
   let coreArea=0;
@@ -1496,7 +1751,10 @@ async function extractArtwork({image,position,product:productKey}) {
       } else pixels.data.set(data.subarray(src,src+4),dst);
     }
     ctx.putImageData(pixels,0,0);
-    return {buffer:canvas.toBuffer('image/png'),placement:{page,view,rasterWidth:w,rasterHeight:h,designBoxPx:{...box,x:x+box.x,y:y+box.y}}};
+    // The source has no more pixels for a small print: thin strokes and small
+    // lettering may be missing, so its outline and proportions need a look.
+    const warnings=Math.min(box.w,box.h)<SMALL_PRINT_PX?[`Küçük baskı ${box.w}×${box.h} pikselden ayrıldı; ince uçlar ve küçük yazılar eksik olabilir, en-boy oranını kaynakla teyit edin.`]:[];
+    return {buffer:canvas.toBuffer('image/png'),placement:{page,view,rasterWidth:w,rasterHeight:h,designBoxPx:{...box,x:x+box.x,y:y+box.y}},warnings};
   } finally {canvas.width=canvas.height=0;}
 }
 module.exports={autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette,silhouettes,extractArtwork};
