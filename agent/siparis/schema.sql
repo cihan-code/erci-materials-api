@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS stock_items (
 );
 CREATE TABLE IF NOT EXISTS order_lines (
  id INTEGER PRIMARY KEY, version_id INTEGER NOT NULL REFERENCES order_versions(id), line_key TEXT NOT NULL,
- product_key TEXT NOT NULL, recipe_version TEXT, fabric_item_id INTEGER REFERENCES stock_items(id), color_name TEXT,
+ product_key TEXT NOT NULL, recipe_version TEXT, fabric_item_id INTEGER REFERENCES stock_items(id), color_name TEXT, kalip_id TEXT,
  quantity INTEGER NOT NULL CHECK(typeof(quantity)='integer' AND quantity>0), sizes_json TEXT NOT NULL DEFAULT '{}',
  lining INTEGER NOT NULL DEFAULT 0 CHECK(lining IN (0,1)), material_items_json TEXT NOT NULL DEFAULT '{}',
  UNIQUE(version_id,line_key)

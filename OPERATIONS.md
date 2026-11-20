@@ -346,3 +346,39 @@ Release order:
 4. Give the new key to the server-to-server clients above.
 
 Tests: `node --test test/eski-uc-oturum.test.js`.
+
+## G39b: kalıp seçimi ve render belleği
+
+Sürümün `lines` yanıtı ve satır ekleme/güncelleme yanıtları
+`kalipAdaylari: [{id, ad, refBeden}]` ve `kalipId` içerir. Yalnız ürünün L
+kalıpları adaydır. Birden çok adayda ürünün temel adıyla aynı adlı, oversize,
+owersize veya zip içermeyen tek kayıt varsayılandır (kapüşonlu/sweat → SWEAT).
+Belirsizlikte ölçü teyitte kalır: “Bu ürün için birden çok kalıp var; kalıbı seçin”.
+Mevcut ön/arka görünüm eşleştirmesi otomatik ölçümde korunur.
+
+`PATCH /api/siparis/satirlar/:id` gövdesi `{ "kalipId": "aday-id" }` kabul eder.
+Aday dışı değer 400, düzenlenemeyen sürüm 409 döner. Seçim satırda saklanır,
+revizyona taşınır ve `satir_kalip_sec` audit kaydı oluşturur. Yalnız o satırın
+otomatik ölçüleri yenilenir; elle girilen ölçüler korunur. Yeniden ölçüm
+başarısızsa eski otomatik ölçü kullanılamaz, satır teyitte kalır. Kullanılan kalıbın
+adı uygulamanın `measure_source.flatAd` alanındadır.
+
+Önizleme, otomatik ölçüm, kalite yenileme ve belge hazırlama aynı süreç içi
+`renderQueue` üzerinden seri çalışır. Alt süreç kapanmadan sıra ilerlemez.
+4 MP üzerindeki PNG/JPEG kaynaklar önce ayrı, kısa ömürlü bir süreçte küçültülür;
+bu süreç kapandıktan sonra asıl render işçisi başlar. Ölçüm için uzun kenar
+1000 px, raster vektörleştirme için 800 px çalışma sınırı kullanılır. Vektörün
+doğal fiziksel boyutu korunur; özgün yükleme değişmez. Küçültülen desenlerin
+nihai kalitesi ince detaylar için özgün dosya teyidi gerektirir. İşçiler 64 MiB
+V8 old-space ve 1 MiB semi-space bütçesi kullanır; bu RSS sınırı değildir.
+
+Tekrarlanabilir sentetik deney: `node test/siparis-bellek.cjs`.
+3600×2400 PNG desen, vektör PDF desen, 2400×2600 PNG ön ürün görseli, PDF arka
+ürün görseli ve üç uygulama eşzamanlı yüklenir; PNG desen üç uygulamaya bağlanır.
+Altı otomatik ölçüm ve iki vektör önizleme tamamlanır. macOS üzerinde 25 ms
+örneklemeli `ps` ile sunucu + bütün alt süreçlerin eşzamanlı RSS toplamı ölçüldü:
+önce 677,2 MiB (710,1 MB), sonra 364,3 MiB (382,0 MB). Son deneyde ana süreç
+tepe RSS 133,8 MiB, alt süreçler 251,7 MiB; bu ayrı tepeler aynı anda değildir.
+İş türüne göre toplam tepeler: küçültme 247,7 MiB, vektör 362,4 MiB, ölçüm
+364,3 MiB. Bunlar bu sentetik akışın ölçümleri; Render/Linux üzerinde ayrıca
+izlenmelidir. Deney geçici dosyalarını siler, gerçek görsel/müşteri verisi kullanmaz.

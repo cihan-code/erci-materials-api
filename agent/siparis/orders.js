@@ -2,6 +2,7 @@
 const crypto = require('crypto');
 const { tx, audit, fail, integer } = require('./db');
 const { assertUser } = require('./auth');
+const flats = require('./flats');
 const uid = user => user && typeof user === 'object' ? user.id : user;
 function version(db, id) {
   const v = db.prepare('SELECT * FROM order_versions WHERE id=?').get(id);
@@ -24,7 +25,7 @@ function snapshot(db, versionId) {
     ? 'SELECT a.*,(SELECT s.file_id FROM document_application_sources s WHERE s.application_id=a.id) AS desenDosyaId FROM applications a WHERE a.line_id=? ORDER BY a.id'
     : 'SELECT * FROM applications WHERE line_id=? ORDER BY id';
   return { ...v, lines: db.prepare('SELECT * FROM order_lines WHERE version_id=? ORDER BY id').all(versionId).map(l => ({
-    ...l, applications: db.prepare(appsSql).all(l.id).map(a => ({ ...a, desenDosyaId: a.desenDosyaId ?? null }))
+    ...l, ...flats.lineSelection(db,l), applications: db.prepare(appsSql).all(l.id).map(a => ({ ...a, desenDosyaId: a.desenDosyaId ?? null }))
   })), files: db.prepare(filesSql).all(versionId) };
 }
 function insertApplication(db, lineId, app) {
@@ -56,9 +57,12 @@ function insertLine(db, versionId, line, lineKey, sourceApplications = []) {
     if (!db.prepare('SELECT id FROM stock_items WHERE id=?').get(item)) fail('Malzeme stok kalemi bulunamadı');
   }
   if (line.lining != null && ![true,false,0,1,'var','yok'].includes(line.lining)) fail('Geçersiz astar seçimi');
+  const kalipId = line.kalipId ?? line.kalip_id ?? null;
+  if (kalipId!=null && !flats.selection(db,line).candidates.some(f=>f.id===kalipId)) fail('Kalıp bu ürünün adaylarından biri olmalı');
   const id = Number(db.prepare(`INSERT INTO order_lines(version_id,line_key,product_key,fabric_item_id,color_name,quantity,sizes_json,lining,material_items_json)
     VALUES(?,?,?,?,?,?,?,?,?)`).run(versionId, lineKey || crypto.randomUUID(), line.product_key, line.fabric_item_id ?? null,
     line.color_name ?? null, line.quantity, JSON.stringify(sizes), [true,1,'var'].includes(line.lining) ? 1 : 0, JSON.stringify(materials)).lastInsertRowid);
+  if (kalipId!=null) db.prepare('UPDATE order_lines SET kalip_id=? WHERE id=?').run(kalipId,id);
   for (const a of line.applications || []) {
     const appId = insertApplication(db, id, a);
     const source = sourceApplications.find(old => old.id === a.id &&
@@ -91,7 +95,9 @@ function addLine(db, versionId, line, user) {
   return tx(db, () => {
     assertUser(db, uid(user)); editable(db, versionId);
     const id = insertLine(db, versionId, line);
-    audit(db, uid(user), 'satir_ekle', id); return db.prepare('SELECT * FROM order_lines WHERE id=?').get(id);
+    audit(db, uid(user), 'satir_ekle', id);
+    const row=db.prepare('SELECT * FROM order_lines WHERE id=?').get(id);
+    return {...row,...flats.lineSelection(db,row)};
   });
 }
 function addApplication(db, lineId, app, user) {

@@ -533,3 +533,15 @@ test('G29 compact blob without a 1 mm skeleton segment is checked by closed area
   assert.equal(result.report.rasterQuality.minLineMm,null);
   assert.ok(result.report.rasterQuality.minShapeMm2>1);
 });
+
+test('G39b large rasters keep natural physical dimensions and require original-detail review at output size',async()=>{
+  const canvas=createCanvas(1600,800),ctx=canvas.getContext('2d');ctx.fillStyle='#d02030';ctx.fillRect(0,0,1600,800);
+  const buffer=canvas.toBuffer('image/png');
+  const natural=await vectorize({buffer,mime:'image/png'});
+  assert.ok(Math.abs(natural.report.pages[0].widthMm-1600*25.4/96)<.5);
+  assert.ok(Math.abs(natural.report.pages[0].heightMm-800*25.4/96)<.5);
+  const output=await vectorize({buffer,mime:'image/png',targetMm:{w:200,h:100}});
+  assert.equal(output.report.quality,'teyit');assert.match(output.report.reasons.join(' '),/küçültüldü.*özgün dosyayla teyit/);
+  assert.equal(output.report.pages[0].imageCount,0);
+  assert.ok(output.report.designBox.w<=800);
+});

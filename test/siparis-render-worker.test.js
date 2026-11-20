@@ -91,9 +91,9 @@ test('G20 HTTP timeout clears the lock, leaves no partial files and opens one co
   assert.equal((await f.measure(o.version.lines[0].id,{desenDosyaId:source.data.id})).status,201);
   const children=interceptWorker(t,'hang');
   const sourceFiles=f.db.prepare('SELECT count(*) n FROM files WHERE version_id=?').get(id).n;
-  // Exercise the actual worker timer and HTTP error path without waiting two minutes.
+  // Exercise the remaining pipeline deadline (up to two minutes) without waiting for it.
   const setTimer=global.setTimeout;
-  t.mock.method(global,'setTimeout',(fn,ms,...args)=>setTimer(fn,ms===120000 ? 100 : ms,...args));
+  t.mock.method(global,'setTimeout',(fn,ms,...args)=>setTimer(fn,ms>=119000 && ms<=120000 ? 100 : ms,...args));
   for (let i=0;i<2;i++) {
     const response=await f.post(`/surumler/${id}/hazirla`);
     assert.equal(response.status,504);assert.equal(response.data.error,'Hazırlama zaman aşımına uğradı');

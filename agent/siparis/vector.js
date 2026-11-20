@@ -88,6 +88,19 @@ function alphaBounds({width,height,pixels}) {
   return right<0 ? null : {x:left,y:top,w:right-left+1,h:bottom-top+1};
 }
 
+// Bound native tracing allocations. Keep physical source dimensions and require review
+// whenever resampling could hide artwork details; original uploads remain untouched.
+async function boundedRaster(buffer) {
+  const size=imageSize(buffer,buffer[0]===137?'image/png':'image/jpeg');
+  const scale=Math.min(1,800/Math.max(size.width,size.height));
+  if(scale===1)return {buffer,resampled:false};
+  const image=await canvasLib.loadImage(buffer);
+  const canvas=canvasLib.createCanvas(Math.max(1,Math.round(size.width*scale)),Math.max(1,Math.round(size.height*scale)));
+  try {
+    canvas.getContext('2d').drawImage(image,0,0,canvas.width,canvas.height);
+    return {buffer:canvas.toBuffer('image/png'),resampled:true,source:{width:size.width*.75,height:size.height*.75}};
+  } finally {canvas.width=canvas.height=0;}
+}
 async function rasterInput(buffer, source, assessRaster = false) {
   const jpeg=buffer[0]!==137;
   imageSize(buffer,jpeg ? 'image/jpeg' : 'image/png');
@@ -99,7 +112,7 @@ async function rasterInput(buffer, source, assessRaster = false) {
     || (assessRaster ? alphaBounds(decoded) : null);
   if (!bounds) throw new Error('Desen içerik kutusu boş');
   const cropped = new PNG({width:bounds.w,height:bounds.h});
-  const pixels = Buffer.from(decoded.pixels);
+  const pixels = Buffer.from(decoded.pixels.buffer,decoded.pixels.byteOffset,decoded.pixels.byteLength);
   for (let y=0;y<bounds.h;y++) pixels.copy(cropped.data,y*bounds.w*4,
     ((bounds.y+y)*decoded.width+bounds.x)*4,((bounds.y+y)*decoded.width+bounds.x+bounds.w)*4);
   buffer=PNG.sync.write(cropped);
@@ -616,16 +629,21 @@ function resizePage(page, target, crop) {
 }
 
 /** Local only. targetMm is the artwork content boundary in millimetres. */
-async function vectorize({ buffer, mime, targetMm, manualVector = false, applicationType = 'baski', qualitySource } = {}) {
+async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = false, applicationType = 'baski', qualitySource } = {}) {
   if (!Buffer.isBuffer(buffer) || !buffer.length) throw new TypeError('buffer gerekli');
   const target = targetSize(targetMm);
   mime = String(mime || '').split(';')[0].toLowerCase();
-  let pdf, kind, inputPages, rasterQualityReport, rasterDetails = [], reasons = [], aspectRatioError = 0;
+  let pdf, kind, inputPages, rasterQualityReport, designBox, rasterDetails = [], reasons = [], aspectRatioError = 0;
   if (!['baski','nakis'].includes(applicationType)) throw new TypeError('applicationType baski veya nakis olmalı');
   if (manualVector && mime!=='application/pdf') throw new Error('Hazır vektör PDF gerekli');
   if (['image/png', 'image/jpeg', 'image/jpg'].includes(mime)) {
-    const result = await trace(buffer, null, target, true);
+    const bounded=await boundedRaster(buffer);
+    if(rasterSource)Object.assign(bounded,{resampled:true,source:{width:rasterSource.width*.75,height:rasterSource.height*.75}});
+    global.gc?.(); // Drop the original native decode before tracing the bounded raster.
+    const result = await trace(bounded.buffer, bounded.source??null, target, true);
+    if(bounded.resampled)reasons.push('Büyük raster bellek sınırı için küçültüldü; ince detayları özgün dosyayla teyit edin.');
     pdf = result.pdf; kind = 'raster';
+    designBox={w:result.image.width,h:result.image.height};
     inputPages = [{ width: result.image.width, height: result.image.height }];
     const source = { width: result.image.width * 0.75, height: result.image.height * 0.75 };
     if (target) aspectRatioError=Math.abs((target.width/target.height)/(source.width/source.height)-1);
@@ -672,7 +690,11 @@ async function vectorize({ buffer, mime, targetMm, manualVector = false, applica
   if (qualitySource) {
     if (!manualVector || !target || !Buffer.isBuffer(qualitySource.buffer)
       || !['image/png','image/jpeg','image/jpg'].includes(qualitySource.mime)) throw new TypeError('Geçerli kalite kaynağı gerekli');
-    const original=await rasterInput(qualitySource.buffer,null,true);
+    const bounded=await boundedRaster(qualitySource.buffer);
+    if(qualitySource.rasterSource)bounded.resampled=true;
+    global.gc?.();
+    const original=await rasterInput(bounded.buffer,bounded.source??null,true);
+    if(bounded.resampled)reasons.push('Büyük raster bellek sınırı için küçültüldü; ince detayları özgün dosyayla teyit edin.');
     aspectRatioError=Math.abs((target.width/target.height)/(original.image.width/original.image.height)-1);
     rasterQualityReport=await rasterQuality(original.image,pdf,'',target,applicationType,target,qualitySource.metrics);
     rasterDetails.push(rasterQualityReport.metrics.minLineMm);reasons.push(...rasterQualityReport.reasons);
@@ -698,6 +720,7 @@ async function vectorize({ buffer, mime, targetMm, manualVector = false, applica
     minLineWidthUnit: 'mm', minLineWidthEstimated: true, aspectRatioPreserved: aspectRatioError <= 0.01,
     aspectRatioError, aspectRatioMethod: 'content-boundary-transform',
     rasterQuality: rasterQualityReport?.metrics,
+    ...(designBox?{designBox}:{}),
     quality: manualVector && !qualitySource ? 'iyi' : rasterQualityReport && !target ? 'beklemede' : reasons.length ? 'teyit' : 'iyi',
     qualityLabel: rasterQualityReport && !target ? 'Kalite ölçüden sonra değerlendirilecek' : undefined,
     reasons: rasterQualityReport && !target ? [] : [...new Set(reasons)],

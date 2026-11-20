@@ -84,8 +84,8 @@ test('G24 absent refBeden stays null; ambiguous product flats and missing design
   assert.equal(JSON.parse(app.measure_source).refBeden,null);assert.equal(app.needs_confirmation,1);assert.equal(app.width_mm,null);
   addFlat(f,'tisort','on','two');
   await f.post(`/surumler/${v}/otomatik-olc`);
-  // The previous measurement pins the chosen flat; explicitly invalidating it
-  // must require selection rather than guess between competing product patterns.
+  // Only L patterns are candidates; add another L to exercise genuine ambiguity.
+  addFlat(f,'tisort','on','three');
   f.db.prepare('UPDATE applications SET measure_source=NULL WHERE id=?').run(app.id);
   const r=ok(await f.post(`/surumler/${v}/otomatik-olc`)).results[0];assert.equal(r.measure_source.flatId,null);assert.match(r.reason,/kalıp/);
   assert.equal(f.db.prepare("SELECT count(*) n FROM confirmations WHERE kind='olcu' AND ref_id=? AND status='acik'").get(app.id).n,1);

@@ -27,6 +27,23 @@ function decode(row) {
   return row;
 }
 function list(db) { return db.prepare('SELECT * FROM document_flats ORDER BY ad,id').all().map(decode); }
+const normalize = value => String(value).toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i').replace(/[^a-z0-9]/g,'');
+function selection(db, line, view, library) {
+  const available = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_flats'").get();
+  const all = available ? (library ?? list(db)).filter(f=>f.urun===line.product_key && f.refBeden?.trim().toUpperCase()==='L') : [];
+  const inView = all.filter(f=>f.gorunum===view);
+  const candidates = view && inView.length ? inView : all;
+  const base = normalize(line.product_key);
+  const name = ['kapusonlu','hoodie','sweatshirt','sweat'].includes(base) ? 'sweat' : base;
+  const defaults = candidates.filter(f=>!/(oversize|owersize|zip)/.test(normalize(f.ad)) && normalize(f.ad)===name);
+  const flat = line.kalip_id ? all.find(f=>f.id===line.kalip_id) ?? null
+    : candidates.length===1 ? candidates[0] : defaults.length===1 ? defaults[0] : null;
+  return {candidates,flat};
+}
+function lineSelection(db,line) {
+  const {candidates,flat}=selection(db,line);
+  return {kalipId:flat?.id??null,kalipAdaylari:candidates.map(({id,ad,refBeden})=>({id,ad,refBeden}))};
+}
 function upload(db, dataDir, input, file, user) {
   assertUser(db, user.id);
   if (!['on','arka'].includes(input.gorunum) || !input.ad?.trim() || !input.urun?.trim())
@@ -65,4 +82,4 @@ function saveReference(db, id, input, user) {
     return get(db, id);
   });
 }
-module.exports = { init, get, list, upload, saveReference };
+module.exports = { init, get, list, upload, saveReference, selection, lineSelection };

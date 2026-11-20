@@ -7,7 +7,7 @@ const REBUILDS = {
   confirmations: sql => !sql.includes("'eski_surum'"),
   files: sql => /UNIQUE\s*\(\s*version_id\s*,\s*kind\s*\)/i.test(sql),
 };
-const ADDED_COLUMNS = { stock_items: { color_hex: 'TEXT' }, stock_movements: { allocation_id: 'INTEGER REFERENCES allocations(id)' },
+const ADDED_COLUMNS = { order_lines: { kalip_id: 'TEXT' }, stock_items: { color_hex: 'TEXT' }, stock_movements: { allocation_id: 'INTEGER REFERENCES allocations(id)' },
   invoice_lines: { source: 'TEXT', invoice_no: 'TEXT', invoice_date: 'TEXT', supplier_vkn: 'TEXT', unit_price: 'REAL', content_hash: 'TEXT',
     match_reasons_json: 'TEXT', created_at: 'TEXT', updated_at: 'TEXT', delivery_request_json: 'TEXT' } };
 const columns = (db, table) => db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);

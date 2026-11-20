@@ -3,6 +3,7 @@
 // No database or filesystem access here: this module runs in the render worker.
 let canvasLib; // Native canvas is loaded only in the child, never by HTTP routing.
 const { imageSize } = require('./measure');
+// Measurement uses a bounded raster; original uploads and their dimensions stay intact.
 const MAX_EDGE = 2000;
 const MIN_SYMMETRY = .85, MIN_MATCH_CONFIDENCE = .78;
 const percent = n => (n*100).toLocaleString('tr-TR',{minimumFractionDigits:1,maximumFractionDigits:4});
@@ -33,17 +34,23 @@ async function rasterPages({buffer,mime}, maxEdge=1000, selectedPages=null) {
         const viewport=page.getViewport({scale:Math.min(2,maxEdge/Math.max(raw.width,raw.height))});
         const canvas=canvasLib.createCanvas(Math.ceil(viewport.width),Math.ceil(viewport.height));
         await page.render({canvasContext:canvas.getContext('2d'),viewport,canvasFactory:new CanvasFactory()}).promise;
-        pages.push(canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height));page.cleanup();
+        pages.push(canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height));
+        canvas.width=canvas.height=0;page.cleanup();
       }
       return pages;
     } finally {if(doc)await doc.destroy();else await task.destroy();}
   }
   if(!['image/png','image/jpeg'].includes(mime))throw new Error('Otomatik ölçü için PNG, JPG veya PDF gerekli.');
   imageSize(buffer,mime);
-  const source=await canvasLib.loadImage(buffer),scale=Math.min(1,maxEdge/Math.max(source.width,source.height));
+  const source=await canvasLib.loadImage(buffer);
+  // A large source already holds >16 MB of decoded pixels; reserve memory for masks.
+  const edge=source.width*source.height>4e6 ? Math.min(maxEdge,1000) : maxEdge;
+  const scale=Math.min(1,edge/Math.max(source.width,source.height));
   const c=canvasLib.createCanvas(Math.max(1,Math.round(source.width*scale)),Math.max(1,Math.round(source.height*scale)));
   c.getContext('2d').drawImage(source,0,0,c.width,c.height);
-  return [c.getContext('2d').getImageData(0,0,c.width,c.height)];
+  const pixels=c.getContext('2d').getImageData(0,0,c.width,c.height);
+  c.width=c.height=0;
+  return [pixels];
 }
 async function raster(input,maxEdge=MAX_EDGE) {return (await rasterPages(input,maxEdge))[0];}
 
@@ -120,7 +127,8 @@ function designContent(p) {
 }
 function resize(p,w,h) {
   const a=canvasLib.createCanvas(p.width,p.height);a.getContext('2d').putImageData(new canvasLib.ImageData(new Uint8ClampedArray(p.data),p.width,p.height),0,0);
-  const b=canvasLib.createCanvas(w,h);b.getContext('2d').drawImage(a,0,0,w,h);return b.getContext('2d').getImageData(0,0,w,h);
+  const b=canvasLib.createCanvas(w,h);b.getContext('2d').drawImage(a,0,0,w,h);
+  const pixels=b.getContext('2d').getImageData(0,0,w,h);a.width=a.height=b.width=b.height=0;return pixels;
 }
 function matchDesign(image,design,reference,refine=true,initial=null) {
   const b=reference.box,pad=8,x0=Math.max(0,b.x-pad),y0=Math.max(0,b.y-pad),w=Math.min(image.width-x0,b.w+pad*2),h=Math.min(image.height-y0,b.h+pad*2);
@@ -412,6 +420,7 @@ async function autoMeasure({image,design,flat,product,position}) {
     const pages=await rasterPages(image,image.mime==='application/pdf'?320:MAX_EDGE),candidates=[],allViews=[];
     let designs=[];
     if(design)try {designs=await rasterPages(design);}catch(e){source.designReadError=e.message;}
+    global.gc?.(); // Release full-resolution native decode surfaces before scanning masks.
     source.pageCount=pages.length;source.designPageCount=designs.length;timings.raster=performance.now()-started;
     for(let i=0;i<pages.length;i++) {
       const refs=silhouettes(pages[i]);

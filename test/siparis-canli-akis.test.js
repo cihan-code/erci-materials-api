@@ -120,15 +120,15 @@ test('G39 an application that cannot be measured states the concrete reason, nev
   assert.equal(openConfirmation(f,sleeve.id).length,1);
 });
 
-test('G39 two L patterns for one product are named instead of a missing-reference reason',{timeout:60000},async t=>{
+test('G39b two L patterns without a unique base name require explicit selection',{timeout:60000},async t=>{
   const f=await fixture(t),o=await f.order(),v=o.version.id,line=o.version.lines[0].id,m=mockup();
-  addFlat(f,{id:'normal',ad:'TİŞÖRT'});addFlat(f,{id:'oversize',ad:'Oversize Tişört'});
+  addFlat(f,{id:'normal',ad:'TİŞÖRT özel'});addFlat(f,{id:'oversize',ad:'Oversize Tişört'});
   ok(await f.upload(v,{kind:'urun_gorsel',lineId:line,gorunum:'on',buffer:m.image}),201);
   const design=ok(await f.upload(v,{lineId:line,buffer:m.design}),201);
   const app=ok(await f.post(`/satirlar/${line}/uygulamalar`,{kind:'baski',position:'gogus',desenDosyaId:design.id}),201);
   assert.equal(app.width_mm,null);
   const [c]=openConfirmation(f,app.id);
-  assert.match(c.message,/^Bu ürün için 2 L kalıp kaydı var \(Oversize Tişört, TİŞÖRT\)/);
+  assert.match(c.message,/^Bu ürün için birden çok kalıp var; kalıbı seçin/);
   assert.doesNotMatch(c.message,/L kalıp referansı bulunamadı/);
 });
 

@@ -457,14 +457,8 @@ function autoInputs(db,v,line,app) {
   if(meta?.line_id && meta.line_id!==line.id)return {gap:'Desen dosyası başka bir ürün satırına ait; bu satırın desenini bağlayın.'};
   if(!image)return {gap:SLEEVES.includes(app.position) ? `${label} görünümü için ürün görseli yok: kol konumu ön görselde ölçülür ve bu satırda ön görsel yüklenmedi.`
     : view==='teyit' ? `${label} konumu için ön veya arka ürün görseli yok.` : `${view==='on'?'Ön':'Arka'} görünüm için ürün görseli yok (${label} konumu ${view==='on'?'ön':'arka'} görselde ölçülür).`};
-  const productFlats=flats.list(db).filter(f=>f.urun===line.product_key);
-  const viewFlats=productFlats.filter(f=>f.gorunum===(view==='teyit'?image.gorunum:view));
-  // A front library drawing also supplies the same garment's back chest width.
-  const candidates=viewFlats.length?viewFlats:productFlats;
-  const requested=provenance(app).flatId;
-  const flat=requested ? productFlats.find(f=>f.id===requested)??null : candidates.length===1?candidates[0]:null;
-  // Two L patterns for one product (e.g. regular and oversize) differ in size: never pick one silently.
-  const flatNote=!requested && candidates.length>1 ? `Bu ürün için ${candidates.length} L kalıp kaydı var (${candidates.map(f=>f.ad).join(', ')}); hangisinin kullanılacağı belli değil.` : null;
+  const {candidates,flat}=flats.selection(db,line,view==='teyit'?image.gorunum:view,flats.list(db));
+  const flatNote=!flat && candidates.length>1 ? 'Bu ürün için birden çok kalıp var; kalıbı seçin' : null;
   return {image,design,flat,product:line.product_key,position:app.position,...(flatNote?{flatNote}:{}),...(design && linked==null?{linkDesign:true}:{})};
 }
 function autoFingerprint({desenDosyaId,...app},input) {return JSON.stringify({app,input});}
@@ -502,12 +496,13 @@ async function measureAfterSave(db,dataDir,versionId,user,changedOnly) {
     return `Otomatik ölçü şimdi çalışmadı (${e.message}); kayıt oluşturuldu, ölçüyü sonra yeniden deneyin`;
   }
 }
-async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,changedOnly=false) {
+async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,changedOnly=false,lineId=null) {
   assertUser(db,user.id);draft(db,versionId);unlocked(db,versionId);
   return renderQueue(async signal=> {
     const v=draft(db,versionId);unlocked(db,versionId);
     const results=[];
     for(const line of v.lines) for(const original of line.applications) {
+      if(lineId!=null && line.id!==lineId)continue;
       signal.throwIfAborted();
       const app=db.prepare('SELECT * FROM applications WHERE id=?').get(original.id);
       if(!app || (!regenerate && manuallyMeasured(app)))continue;
@@ -557,6 +552,29 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
     return {results};
   }).then(r=>{requalifyVersion(db,dataDir,versionId,user);return r;});
 }
+async function editLine(db,dataDir,lineId,input,user) {
+  const line=tx(db,()=> {
+    assertUser(db,user.id);
+    const line=db.prepare('SELECT * FROM order_lines WHERE id=?').get(lineId);
+    if(!line)fail('Satır bulunamadı',404);
+    draft(db,line.version_id);unlocked(db,line.version_id);
+    if(typeof input.kalipId!=='string' || !flats.selection(db,line).candidates.some(f=>f.id===input.kalipId))
+      fail('Kalıp bu ürünün adaylarından biri olmalı');
+    db.prepare('UPDATE order_lines SET kalip_id=? WHERE id=?').run(input.kalipId,lineId);
+    for(const app of line.kalip_id===input.kalipId ? [] : db.prepare('SELECT * FROM applications WHERE line_id=?').all(lineId)) {
+      if(manuallyMeasured(app))continue;
+      db.prepare('UPDATE applications SET width_mm=NULL,height_mm=NULL,measure_source=?,needs_confirmation=1 WHERE id=?')
+        .run(JSON.stringify({...provenance(app),method:'kalip_secimi',flatId:input.kalipId}),app.id);
+      noteReason(db,user,app.id,'Kalıp seçimi değişti; ölçü yeniden hesaplanmalı');
+    }
+    audit(db,user.id,'satir_kalip_sec',lineId,{oncekiKalipId:line.kalip_id,kalipId:input.kalipId});
+    return line;
+  });
+  let olcuHatasi;
+  try {await automaticMeasure(db,dataDir,line.version_id,user,false,true,lineId);}
+  catch(e) {olcuHatasi=`Otomatik ölçü şimdi çalışmadı (${e.message}); kalıp seçimi kaydedildi`;}
+  return {...orders.snapshot(db,line.version_id).lines.find(l=>l.id===lineId),...(olcuHatasi?{olcuHatasi}:{})};
+}
 async function addApplication(db,dataDir,lineId,input,user) {
   const app=tx(db,()=> {
     const line=db.prepare('SELECT * FROM order_lines WHERE id=?').get(lineId);
@@ -575,11 +593,38 @@ async function addApplication(db,dataDir,lineId,input,user) {
   const saved=db.prepare('SELECT * FROM applications WHERE id=?').get(app.id);
   return olcuHatasi ? {...saved,olcuHatasi} : saved;
 }
-function generateInChild(input,signal,{timeoutMs=120000}={}) {
+// Decode large source images in a separate one-shot process. Native decoder
+// arenas then exit before the tracer/mask worker loads its own libraries.
+async function generateInChild(input,signal,{timeoutMs=120000}={}) {
+  if (!(Number.isFinite(timeoutMs) && timeoutMs>0)) throw new TypeError('Geçerli render süresi gerekli');
+  signal?.throwIfAborted();
+  const deadline=Date.now()+timeoutMs;
+  const run=job=> {
+    if(Date.now()>=deadline)throw preparationTimeout();
+    return generateRawChild(job,signal,{timeoutMs:deadline-Date.now()});
+  };
+  async function shrink(source,edge) {
+    if(!source || !['image/png','image/jpeg','image/jpg'].includes(source.mime))return source;
+    const size=imageSize(source.buffer,source.mime);
+    if(size.width*size.height<=4e6)return source;
+    const result=await run({type:'raster',input:{buffer:source.buffer,edge}});
+    return {...source,buffer:result.buffer,mime:'image/png',rasterSource:size};
+  }
+  if(input.type==='vector') {
+    const source=await shrink(input.input,800);
+    const qualitySource=await shrink(source.qualitySource,800);
+    input={...input,input:{...source,...(qualitySource?{qualitySource}:{})}};
+  } else if(input.type==='autoMeasure') {
+    const image=await shrink(input.input.image,1000),design=await shrink(input.input.design,1000);
+    input={...input,input:{...input.input,image,design}};
+  }
+  return run(input);
+}
+function generateRawChild(input,signal,{timeoutMs=120000}={}) {
   if (!(Number.isFinite(timeoutMs) && timeoutMs>0)) throw new TypeError('Geçerli render süresi gerekli');
   signal?.throwIfAborted();
   return new Promise((resolve,reject)=> {
-    const child=childProcess.fork(__filename,['--vector-worker'],{serialization:'advanced',execArgv:[],stdio:['ignore','ignore','pipe','ipc']});
+    const child=childProcess.fork(__filename,['--vector-worker'],{serialization:'advanced',execArgv:['--max-old-space-size=64','--max-semi-space-size=1','--expose-gc'],stdio:['ignore','ignore','pipe','ipc']});
     let result,error,received=false;
     const stop=e=> {error ||= e;child.kill('SIGKILL');};
     const abort=()=>stop(signal.reason);
@@ -819,7 +864,7 @@ function registerWorkshop(boundDb,dataDir) {
     return {providerRef:result.providerRef};
   });
 }
-module.exports={queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+module.exports={editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
 function vectorModule() {
   // Native tracer/canvas binaries come from npm; a platform without them must say so, not fail anonymously.
   try { return require('./vector'); }
@@ -840,12 +885,20 @@ if (require.main===module && process.argv[2]==='--vector-worker') {
   process.once('message',async job=> {
     try {
       let result;
-      if (job.type==='autoMeasure') result=await require('./autoMeasure').autoMeasure(job.input);
+      if(job.type==='raster') {
+        const canvasLib=require('@napi-rs/canvas'),image=await canvasLib.loadImage(job.input.buffer);
+        const scale=Math.min(1,job.input.edge/Math.max(image.width,image.height));
+        const canvas=canvasLib.createCanvas(Math.max(1,Math.round(image.width*scale)),Math.max(1,Math.round(image.height*scale)));
+        canvas.getContext('2d').drawImage(image,0,0,canvas.width,canvas.height);
+        result={buffer:canvas.toBuffer('image/png')};
+      }
+      else if (job.type==='autoMeasure') result=await require('./autoMeasure').autoMeasure(job.input);
       else if (job.type==='vector') {
         const input=await normalizeVectorInput(job.input);
         result=await vectorModule().vectorize(input);
         // Upload previews also record the source kind and the artwork content box (ratio for manual sizing).
-        if (job.designBox) Object.assign(result.report,{sourceKind:result.kind,designBox:await designBoxOf(input)});
+        global.gc?.();
+        if (job.designBox) Object.assign(result.report,{sourceKind:result.kind,designBox:result.report.designBox??await designBoxOf(input)});
       }
       else {
         const forms=require('./pdf'); result=[];
