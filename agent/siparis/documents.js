@@ -579,7 +579,7 @@ function autoInputs(db,v,line,app) {
   const linked=db.prepare('SELECT file_id FROM document_application_sources WHERE application_id=?').get(app.id)?.file_id;
   // Applications registered before G24 kept their design only in the panel's provenance.
   const recorded=linked==null ? Number(provenance(app).desenDosyaId) : null;
-  const design=v.files.find(f=>f.id===(linked ?? recorded) && f.kind==='desen_kaynak');
+  const design=v.files.find(f=>f.id===(linked ?? recorded) && SOURCE_KINDS.includes(f.kind));
   const meta=design && db.prepare('SELECT line_id FROM document_file_meta WHERE file_id=?').get(design.id);
   if(meta?.line_id && meta.line_id!==line.id)return {gap:'Desen dosyası başka bir ürün satırına ait; bu satırın desenini bağlayın.'};
   if(gap)return {gap};
@@ -1068,7 +1068,15 @@ if (require.main===module && process.argv[2]==='--vector-worker') {
         canvas.getContext('2d').drawImage(image,0,0,canvas.width,canvas.height);
         result={buffer:canvas.toBuffer('image/png')};
       }
-      else if (job.type==='autoMeasure') result=await require('./autoMeasure').autoMeasure(job.input);
+      else if (job.type==='autoMeasure') {
+        const {design,...input}=job.input;
+        let reference=design;
+        if (design?.mime==='image/svg+xml') {
+          // Keep a failed SVG as an unreadable reference so measurement can still report a color candidate.
+          try { reference=await normalizeVectorInput(design); } catch {}
+        }
+        result=await require('./autoMeasure').autoMeasure({...input,design:reference});
+      }
       else if (job.type==='extractArtwork') result=await require('./autoMeasure').extractArtwork(job.input);
       else if (job.type==='vector') {
         const input=await normalizeVectorInput(job.input);

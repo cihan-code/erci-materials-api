@@ -6,7 +6,7 @@ const fs=require('node:fs');
 const os=require('node:os');
 const path=require('node:path');
 const childProcess=require('node:child_process');
-const {PDFDocument}=require('pdf-lib');
+const {PDFDocument,rgb}=require('pdf-lib');
 const PDFKit=require('pdfkit');
 const documents=require('../agent/siparis/documents');
 const orders=require('../agent/siparis/orders');
@@ -14,6 +14,7 @@ const {openDb}=require('../agent/siparis/db');
 const {createUser}=require('../agent/siparis/auth');
 const {setup}=require('./fixtures/siparis/belge-fixture');
 const {mockup}=require('./fixtures/siparis/oto-mockup');
+const {multiMockup}=require('./fixtures/siparis/oto-multi');
 const deadline=setTimeout(()=>{console.error('G39 test dosyası 150 saniyeyi aştı');process.exit(1);},150000);
 deadline.unref();after(()=>clearTimeout(deadline));
 
@@ -100,6 +101,27 @@ test('G39 automatic measurement runs after uploads and applications, images firs
   const measured=application(f,backApp.id);
   assert.ok(Math.abs(measured.width_mm-back.expectedWidth)<=6,JSON.stringify(measured));assert.equal(openConfirmation(f,backApp.id).length,0);
   assert.ok(f.db.prepare("SELECT count(*) n FROM audit_log WHERE action='uygulama_otomatik_olc' AND ref=?").get(String(backApp.id)).n>=1);
+});
+
+test('G40 bağlı hazır PDF ve SVG vektörleri renk adayının oranını sınar',{timeout:45000},async t=>{
+  const f=await fixture(t),o=await f.order({lines:[{product_key:'sweat',quantity:1}]}),v=o.version.id,line=o.version.lines[0].id;
+  addFlat(f,{product:'sweat',view:'arka'});
+  f.db.prepare('UPDATE document_flats SET olculerL=?').run(JSON.stringify({omuzdan_boy:71,etek:52,gogus:61,tum_omuz:61.5}));
+  ok(await f.upload(v,{kind:'urun_gorsel',lineId:line,gorunum:'arka',buffer:multiMockup().image}),201);
+  const pdf=await PDFDocument.create(),page=pdf.addPage([180,80]);
+  const shapes=[[20,6,10,45],[36,7,15,7],[26,45,9,6]];
+  for(const [x,y,width,height] of shapes)page.drawRectangle({x,y,width,height,color:rgb(1,1,1)});
+  const rects=shapes.map(([x,y,w,h])=>`<rect x="${x}" y="${80-y-h}" width="${w}" height="${h}" fill="white"/>`).join('');
+  const svg=Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="180" height="80" viewBox="0 0 180 80">${rects}</svg>`);
+  for(const [buffer,mime,ext] of [[Buffer.from(await pdf.save()),'application/pdf','pdf'],[svg,'image/svg+xml','svg']]) {
+    const file=ok(await f.upload(v,{kind:'desen_kaynak_vektor',lineId:line,buffer,mime,name:`baski.${ext}`}),201);
+    const app=ok(await f.post(`/satirlar/${line}/uygulamalar`,{kind:'baski',position:'sirt',desenDosyaId:file.id}),201);
+    const source=JSON.parse(app.measure_source);
+    assert.equal(source.desenFileId,file.id);
+    assert.ok(Math.abs(source.designAspectRatio-31/45)<.04,JSON.stringify(source));
+    assert.equal(app.width_mm,null);assert.equal(app.height_mm,null);assert.equal(source.designBoxPx,null);
+    assert.match(openConfirmation(f,app.id)[0].message,/en-boy oranı .* uyuşmuyor/);
+  }
 });
 
 test('G39 an application that cannot be measured states the concrete reason, never only the generic text',{timeout:90000},async t=>{
