@@ -43,6 +43,8 @@ function normalize(order) {
     ids.add(line.id);
     for (const field of ['product', 'color', 'fabric']) requiredText(line[field], `line.${field}`);
     if (omitQuantities) return { ...line, sizes: {}, quantity: 0, distributed: false, blank: true, images: line.images || {} };
+    // A sample line without a count prints empty quantity fields.
+    if (line.numune && !line.quantity && !Object.values(line.sizes || {}).some(Boolean)) return { ...line, sizes: {}, quantity: 0, distributed: false, blank: true, images: line.images || {} };
     if (line.sizes != null && (typeof line.sizes !== 'object' || Array.isArray(line.sizes))) throw new TypeError('line.sizes nesne olmalıdır.');
     const sizes = Object.fromEntries(SIZES.map(size => [size, 0]));
     for (const [size, qty] of Object.entries(line.sizes || {})) {
@@ -92,7 +94,18 @@ function appsFor(order, lines, type) {
 
 // Every form uses this formatter and the stored millimetres, never image geometry.
 function cm(mm) { return String(mm / 10).replace('.', ','); }
-function dimensions(app) { return app.pending ? PENDING_LABEL : `${cm(app.width_mm)} × ${cm(app.height_mm)} cm`; }
+function dimensions(app) { return app.pending ? PENDING_LABEL : `${cm(app.width_mm)} × ${cm(app.height_mm)} cm${app.scaleNote ? ' ≈' : ''}`; }
+
+// Measurements taken with the geometric mean of two scales carry "≈"; the note is printed once as a footnote.
+function scaleFootnote(doc, apps, x, y, width) {
+  const notes = [...new Set(apps.filter(app => app.scaleNote && !app.pending).map(app => app.scaleNote))];
+  if (notes.length) text(doc, `≈ ${notes.join(' · ')}`, x, y, width, 10, false, { color: '#555555' });
+}
+
+function numuneBadge(doc, x, y) {
+  doc.save().roundedRect(x, y, 150, 30, 6).fill(RED).restore();
+  text(doc, 'NUMUNE', x, y + 5, 150, 18, true, { color: '#ffffff', align: 'center', lineBreak: false });
+}
 
 function text(doc, value, x, y, width, size = 18, bold = false, extra = {}) {
   doc.font(bold ? 'Bold' : 'Regular').fontSize(size).fillColor(extra.color || '#111111');
@@ -372,7 +385,7 @@ const HEAD_DARK = '#8ea9db';
 const HEAD_LIGHT = '#bdd7ee';
 const SIZE_BLUE = '#b4c6e7';
 
-function applicationTable(doc, apps, y) {
+function applicationTableLayout(doc, apps) {
   const legs = apps.some(app => (POSITION_ALIASES[app.position] || app.position) === 'bacak');
   const columns = legs ? { ...POSITIONS, ...LEG_POSITION } : POSITIONS;
   const x = 82, labelWidth = 188, cellWidth = legs ? 460 / 6 : 92, headHeight = 36;
@@ -384,6 +397,11 @@ function applicationTable(doc, apps, y) {
     ? 40 + doc.font('Regular').fontSize(9).heightOfString(list.join('\n'), { width: cellWidth - 6, lineGap: 2 }) : 0)));
   const height = headHeight + heights[0] + heights[1];
   if (height > 1120) throw new RangeError('Tek konumda sayfaya sığmayacak kadar çok uygulama var.');
+  return { x, labelWidth, cellWidth, headHeight, columns, positions, cells, heights, height };
+}
+
+function applicationTable(doc, apps, y) {
+  const { x, labelWidth, cellWidth, headHeight, columns, positions, cells, heights, height } = applicationTableLayout(doc, apps);
   if (y + height > 1230) { page(doc); y = 65; }
   const headers = ['Özellikler', ...Object.values(columns)];
   let cx = x;
@@ -459,6 +477,7 @@ async function renderProductionForm(input, options = {}) {
     for (const line of order.lines) {
       page(doc);
       title(doc, 'Üretim Formu');
+      if (line.numune) numuneBadge(doc, 630, 10);
       fittedText(doc, `Sipariş No: ${order.orderNo}`, 40, 140, 730, 60, 40, true, { align: 'center' });
       let y = 209;
       y += fittedText(doc, `Sipariş Adı: ${order.name}`, 40, y, 730, 75, 30, true, { align: 'center' }) + 20;
@@ -470,16 +489,20 @@ async function renderProductionForm(input, options = {}) {
       text(doc, 'Ürün Açıklaması:', 54, y, 700, 24, true);
       y = bulletList(doc, [`${line.product} · ${line.color} · ${line.fabric}`, ...(line.note ? [line.note] : []), ...order.description], y + 34);
       const appsList = appsFor(order, [line]);
-      const tableHeight = 36 * 3 + 40 * appsList.length;
-      const fixed = 30 + 13 + Math.min(tableHeight, 200) + 31 + (line.distributed || line.blank ? 150 + 40 : 40);
+      const tableHeight = applicationTableLayout(doc, appsList).height;
+      const note = appsList.some(app => app.scaleNote && !app.pending) ? 16 : 0;
+      // The table and the size table are never split: the product image shrinks to what is left of the page.
+      const sizeNeed = (sizeColumns([line]).length ? 34 + 3 * 37 : 0) + 60;
+      const room = top => Math.min(411, 1230 - top - 13 - tableHeight, 1330 - top - 13 - tableHeight - 31 - note - sizeNeed);
       y = Math.max(y + 12, 497);
-      let imageHeight = Math.min(411, 1345 - y - fixed);
-      if (imageHeight < 220) { page(doc); y = 60; imageHeight = 411; }
+      let imageHeight = room(y + 34);
+      if (imageHeight < 130) { page(doc); y = 60; imageHeight = room(y + 34); }
       text(doc, 'Ürün Görseli:', 28, y, 700, 24, true);
       const both = line.images.front != null && line.images.back != null;
       if (both) productPair(doc, line, appsList, y + 34, { x: 82, width: 648, height: imageHeight - 30, labelSize: 14 });
       else productImage(doc, line.images.front ?? line.images.back, appsList, 182, y + 34, 452, imageHeight);
-      y = applicationTable(doc, appsList, y + 34 + imageHeight + 13) ;
+      y = applicationTable(doc, appsList, y + 34 + imageHeight + 13);
+      scaleFootnote(doc, appsList, 82, y - 24, 646);
       sizeTable(doc, [line], y, total(order.lines));
     }
   });
@@ -537,11 +560,12 @@ async function renderApprovalForm(input, options = {}) {
         const batch = lines.slice(offset, offset + 2);
         page(doc, LANDSCAPE);
         fittedText(doc, 'Onay Formu', 40, 6, 1360, 80, 62, true, { align: 'center' });
+        if (batch.some(line => line.numune)) numuneBadge(doc, 1230, 20);
         band(doc, 'Ürün Modeli', [...new Set(batch.map(line => line.product))].join(', '), -30, 90, 570, '#454655', 206);
         band(doc, 'Ürün Rengi', color, -30, 126, 570, '#8f8f99', 206);
         band(doc, 'Sipariş Kodu', order.orderNo, 750, 81, 720, '#454655', 941);
         band(doc, 'Tarih', order.date, 750, 126, 720, '#8f8f99', 941);
-        wholeBand(doc, `Bedenler ve Adetler : ${sizeSummary(lines)}   Toplam:${order.omitQuantities ? '' : total(lines)}`, 171, '#454655');
+        wholeBand(doc, `Bedenler ve Adetler : ${sizeSummary(lines)}   Toplam:${isBlank(lines) ? '' : total(lines)}`, 171, '#454655');
         const apps = appsFor(order, batch);
         batch.forEach((line, i) => {
           const y = 250 + i * 270;
@@ -552,6 +576,7 @@ async function renderApprovalForm(input, options = {}) {
         logo(doc, brand, 940, 335, 320, 290);
         paragraphs(doc, apps.map(app => `${TYPES[app.type]} · ${POSITION_LABELS[app.position]}: ${dimensions(app)}`), 650,
           { size: LANDSCAPE, x: 900, width: 500, fontSize: 18, bottom: 750 });
+        scaleFootnote(doc, apps, 40, 752, 1360);
       }
     }
     termsPage(doc, brand.termsText === undefined ? loadDefaultTerms() : requiredText(brand.termsText, 'brand.termsText'));
@@ -582,8 +607,9 @@ function renderWorkshop(input, options, type) {
     const lines = order.lines.filter(line => apps.some(app => !app.lineIds || app.lineIds.includes(line.id)));
     page(doc);
     title(doc, `${TYPES[type]} Formu`, `Ürün: ${[...new Set(lines.map(line => line.product))].join(', ')}`);
+    if (lines.some(line => line.numune)) numuneBadge(doc, 630, 10);
     text(doc, 'Ürün Açıklaması:', 54, 270, 700, 24, true);
-    const blank = order.omitQuantities;
+    const blank = isBlank(lines);
     const quantities = [`Toplam adet:${blank ? '' : ` ${total(lines)}`}`, ...(sizeColumns(lines).length ? [`Bedenler ve Adetler: ${sizeSummary(lines)}`] : [])];
     const notes = lines.filter(line => line.note).map(line => `${line.product}: ${line.note}`);
     let visualY = bulletList(doc, [...quantities, ...notes, ...order.description, ...missing], 304) + 15;
@@ -613,6 +639,7 @@ function renderWorkshop(input, options, type) {
       if (app.lineIds) text(doc, lines.filter(line => app.lineIds.includes(line.id)).map(line => `${line.product} / ${line.color}`).join(', '), 45, y + 42, 720, 16, false, { align: 'center' });
       image(doc, app.preview, 175, y + 85, 460, 230, 'Desen önizlemesi sağlanmadı');
       text(doc, dimensions(app), 45, y + 335, 720, 26, true, { align: 'center' });
+      scaleFootnote(doc, [app], 45, y + 368, 720);
       if (app.previewCropped) text(doc, 'Ürün görselinden kırpıldı', 175, y + 318, 460, 11, false, { align: 'center', color: '#666666' });
       y += 420;
     }

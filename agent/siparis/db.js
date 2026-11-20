@@ -5,6 +5,8 @@ const path = require('path');
 // Constraint changes since the first schema. SQLite cannot alter CHECK/UNIQUE, so an older table is rebuilt once.
 const REBUILDS = {
   confirmations: sql => !sql.includes("'eski_surum'"),
+  // G45c: sample lines may carry zero pieces; the old CHECK(quantity>0) forces a table rebuild.
+  order_lines: sql => /quantity>0\)/.test(sql) && !sql.includes('numune'),
   files: sql => /UNIQUE\s*\(\s*version_id\s*,\s*kind\s*\)/i.test(sql),
 };
 const ADDED_COLUMNS = { order_lines: { kalip_id: 'TEXT', note: 'TEXT' }, stock_items: { color_hex: 'TEXT' }, stock_movements: { allocation_id: 'INTEGER REFERENCES allocations(id)' },

@@ -515,12 +515,13 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPendi
         const source=provenance(app);
         const image=Object.values(images).find(image=>image.fileId===source.gorselFileId);
         applications.push({type:app.kind,position:app.position,width_mm:app.width_mm,height_mm:app.height_mm,lineIds:[lineId],
-          preview:preview(design)||extractedByApp.get(app.id),placement:formPlacement(app,source,image,design)});
+          preview:preview(design)||extractedByApp.get(app.id),placement:formPlacement(app,source,image,design),
+          ...(source.scaleMode==='geo_ortalama'&&source.scaleNote?{scaleNote:String(source.scaleNote)}:{})});
       }
       const sizes=JSON.parse(l.sizes_json);
       if (!omitQuantities && Object.keys(sizes).length && Object.values(sizes).reduce((a,b)=>a+b,0)!==l.quantity) fail(`Satır ${l.id}: PDF için adetlere eşit beden dağılımı gerekli`,409);
       const item=l.fabric_item_id ? db.prepare('SELECT name,color_name,color_no FROM stock_items WHERE id=?').get(l.fabric_item_id) : null;
-      return {id:lineId,product:l.product_key,color:l.color_name ? require('./pdf').stockColorLabel(l.color_name,item) : 'Renk belirtilmedi',fabric:item ? item.name : 'Kumaş belirtilmedi',sizes,quantity:l.quantity,images,...(l.note?{note:l.note}:{})};
+      return {id:lineId,product:l.product_key,color:l.color_name ? require('./pdf').stockColorLabel(l.color_name,item) : 'Renk belirtilmedi',fabric:item ? item.name : 'Kumaş belirtilmedi',sizes,quantity:l.quantity,images,...(l.numune?{numune:true}:{}),...(l.note?{note:l.note}:{})};
     }),
     applications,
   };
