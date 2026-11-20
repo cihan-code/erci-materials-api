@@ -2,7 +2,7 @@
 const {test,after}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
-const {PDFDocument}=require('pdf-lib');
+const {PDFDocument,rgb}=require('pdf-lib');
 const auto=require('../agent/siparis/autoMeasure');
 const documents=require('../agent/siparis/documents');
 const {setup}=require('./fixtures/siparis/belge-fixture');
@@ -224,11 +224,50 @@ test('G24c view scale differences above 5% and axis differences above 15% requir
   assert.equal(within.needs_confirmation,false,JSON.stringify(within));
   assert.equal(within.measure_source.mmPerPx,(within.measure_source.verticalMmPerPx+within.measure_source.horizontalMmPerPx)/2);
 });
-test('G24c mismatched and unreadable design files fall back to compact color ink',async()=>{
-  const m=multiMockup();
-  for(const design of [{buffer:mockup().design,mime:'image/png'},{buffer:Buffer.from('invalid'),mime:'image/png'}]) {
-    const r=await auto.autoMeasure(input(m,{design,flat:hoodieFlat,product:'sweat',position:'sirt'}));
-    assert.equal(r.measure_source.method,'otomatik_renk',JSON.stringify(r));assert.ok(Math.abs(r.width_mm-291)<=3,JSON.stringify(r));
+test('G40 ayrı desen oranı uyuşmazsa veya içerik okunamazsa renk kutusu yalnız aday kalır',async()=>{
+  const m=multiMockup(),options={flat:hoodieFlat,product:'sweat',position:'sirt'};
+  const blank=await PDFDocument.create();blank.addPage([180,80]);
+  const tall=await PDFDocument.create(),page=tall.addPage([180,80]),ink=rgb(1,1,1);
+  // The page ratio agrees with the mock-up's wide motif. The actual white artwork is tall.
+  page.drawRectangle({x:20,y:6,width:10,height:45,color:ink});
+  page.drawRectangle({x:36,y:7,width:15,height:7,color:ink});
+  page.drawRectangle({x:26,y:45,width:9,height:6,color:ink});
+  for(const artwork of [tall,blank,null]) {
+    const design=artwork?{buffer:Buffer.from(await artwork.save()),mime:'application/pdf'}:{buffer:Buffer.from('invalid'),mime:'image/png'};
+    const r=await auto.autoMeasure(input(m,{...options,design})),source=r.measure_source;
+    assert.equal(source.method,'otomatik_renk',JSON.stringify(r));
+    assert.ok(source.candidateBoxPx.w/source.candidateBoxPx.h>2,JSON.stringify(r));
+    assert.equal(source.designBoxPx,null);
+    assert.equal(r.width_mm,null);assert.equal(r.height_mm,null);assert.equal(r.needs_confirmation,true);
+    if(artwork===tall) {
+      assert.equal(source.aspectReferencePage,1);
+      assert.ok(Math.abs(source.designAspectRatio-31/45)<.02);
+      assert.match(r.reason,/en-boy oranı .* uyuşmuyor.*sınır %30/);
+    } else {
+      assert.equal(source.designAspectRatio,null);
+      assert.match(r.reason,/okunur içerik kutusu yok/);
+    }
+  }
+  const unlinked=await auto.autoMeasure(input(m,{...options,design:null}));
+  assert.equal(unlinked.needs_confirmation,false,JSON.stringify(unlinked));
+  assert.ok(Math.abs(unlinked.width_mm-291)<=3,JSON.stringify(unlinked));
+  const nearRatio=await auto.autoMeasure(input(m,{...options,design:{buffer:mockup().design,mime:'image/png'}}));
+  assert.equal(nearRatio.measure_source.method,'otomatik_renk',JSON.stringify(nearRatio));
+  assert.equal(nearRatio.needs_confirmation,false,JSON.stringify(nearRatio));
+  assert.equal(nearRatio.width_mm,unlinked.width_mm);
+});
+test('G40 beyaz PDF deseni saydam zeminde ve dört kenarı tek renk olan provada eşleşir',async()=>{
+  const m=multiMockup(),options={flat:hoodieFlat,product:'sweat',position:'sirt'};
+  for(const matte of [false,true]) {
+    const design=await PDFDocument.create(),page=design.addPage([175,100]);
+    if(matte)page.drawRectangle({x:0,y:0,width:175,height:100,color:rgb(.10,.14,.20)});
+    const w=135,h=60,ink=rgb(1,1,1);
+    const rect=(x,y,width,height)=>page.drawRectangle({x:20+x,y:80-y-height,width,height,color:ink});
+    rect(0,0,w*.24,h*.65);rect(w*.32,0,w*.68,h*.65);rect(w*.16,h*.78,w*.84,h*.22);
+    const r=await auto.autoMeasure(input(m,{...options,design:{buffer:Buffer.from(await design.save()),mime:'application/pdf'}}));
+    assert.equal(r.measure_source.selectedDesignPage,1,JSON.stringify(r));
+    assert.equal(r.needs_confirmation,false,JSON.stringify(r));
+    assert.ok(Math.abs(r.width_mm-291)<=8 && Math.abs(r.height_mm-130)<=8,JSON.stringify(r));
   }
 });
 test('G24c API uploads the same two-view hoodie for both applications without a design and preserves manual edits',async t=>{

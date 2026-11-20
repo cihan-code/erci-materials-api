@@ -6,6 +6,9 @@ const { imageSize, measureSleeve } = require('./measure');
 // Measurement uses a bounded raster; original uploads and their dimensions stay intact.
 const MAX_EDGE = 2000;
 const MIN_SYMMETRY = .85, MIN_MATCH_CONFIDENCE = .78;
+// A photo may distort either axis. This guard catches a distinctly different
+// motif before sizing; the production vector has its own aspect policy.
+const COLOR_ASPECT_TOLERANCE = .30;
 // Product keys, not inferred garment names or the presence of a chest number.
 const CHEST_SCALE_PRODUCTS = new Set(['sweat','sweatshirt','hoodie','kapusonlu','polar','tam_fermuar']);
 const scalePairFor = (flat,product) => CHEST_SCALE_PRODUCTS.has(String(flat?.urun||product||'').trim().toLowerCase())?'boy_gogus':'boy_etek';
@@ -15,7 +18,7 @@ const viewForPosition = position => VIEW[position] || 'teyit';
 const median = a => a.slice().sort((x,y)=>x-y)[Math.floor(a.length/2)];
 const distance = (a,b) => Math.max(...a.map((v,i)=>Math.abs(v-b[i])));
 
-async function rasterPages({buffer,mime}, maxEdge=1000, selectedPages=null) {
+async function rasterPages({buffer,mime}, maxEdge=1000, selectedPages=null, {transparent=false}={}) {
   canvasLib ||= require('@napi-rs/canvas');
   if (mime==='application/pdf') {
     for (const k of ['DOMMatrix','ImageData','Path2D']) globalThis[k] ||= canvasLib[k];
@@ -36,7 +39,8 @@ async function rasterPages({buffer,mime}, maxEdge=1000, selectedPages=null) {
         if(raw.width*raw.height>40e6)throw new Error('PDF sayfası 40 MP sınırını aşıyor.');
         const viewport=page.getViewport({scale:Math.min(2,maxEdge/Math.max(raw.width,raw.height))});
         const canvas=canvasLib.createCanvas(Math.ceil(viewport.width),Math.ceil(viewport.height));
-        await page.render({canvasContext:canvas.getContext('2d'),viewport,canvasFactory:new CanvasFactory()}).promise;
+        const background=transparent?'rgba(0,0,0,0)':undefined;
+        await page.render({canvasContext:canvas.getContext('2d'),viewport,background,canvasFactory:new CanvasFactory()}).promise;
         pages.push(canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height));
         canvas.width=canvas.height=0;page.cleanup();
       }
@@ -122,10 +126,18 @@ function productMask(p) {
   return {mask,raw,background:bg,box:bounds(mask,w,h)};
 }
 
-function designContent(p) {
+function designContent(p,removeMatte=false) {
   const mask=new Uint8Array(p.width*p.height);
   const transparent=p.data.some((v,i)=>i%4===3 && v<128);
-  for(let i=0;i<mask.length;i++)mask[i]=p.data[i*4+3]>32 && (transparent || Math.min(p.data[i*4],p.data[i*4+1],p.data[i*4+2])<240) ? 1:0;
+  const [r,g,b]=p.data,delta=i=>Math.max(Math.abs(p.data[i*4]-r),Math.abs(p.data[i*4+1]-g),Math.abs(p.data[i*4+2]-b));
+  let matte=removeMatte&&!transparent&&Math.min(r,g,b)<240;
+  // A colored proof background is used only when the four edges agree.
+  // Leave transparent artwork and existing light-background masks alone.
+  if(matte) {
+    for(let x=0;x<p.width&&matte;x++)matte=delta(x)<=12&&delta((p.height-1)*p.width+x)<=12;
+    for(let y=0;y<p.height&&matte;y++)matte=delta(y*p.width)<=12&&delta((y+1)*p.width-1)<=12;
+  }
+  for(let i=0;i<mask.length;i++)mask[i]=p.data[i*4+3]>32 && (transparent || (matte ? delta(i)>20 : Math.min(p.data[i*4],p.data[i*4+1],p.data[i*4+2])<240)) ? 1:0;
   return {mask,box:bounds(mask,p.width,p.height)};
 }
 function resize(p,w,h) {
@@ -133,16 +145,15 @@ function resize(p,w,h) {
   const b=canvasLib.createCanvas(w,h);b.getContext('2d').drawImage(a,0,0,w,h);
   const pixels=b.getContext('2d').getImageData(0,0,w,h);a.width=a.height=b.width=b.height=0;return pixels;
 }
-function matchDesign(image,design,reference,refine=true,initial=null) {
+function matchDesign(image,design,content,reference,refine=true,initial=null) {
   const b=reference.box,pad=8,x0=Math.max(0,b.x-pad),y0=Math.max(0,b.y-pad),w=Math.min(image.width-x0,b.w+pad*2),h=Math.min(image.height-y0,b.h+pad*2);
   const data=new Uint8ClampedArray(w*h*4),mask=new Uint8Array(w*h);
   for(let y=0;y<h;y++) {data.set(image.data.subarray(((y+y0)*image.width+x0)*4,((y+y0)*image.width+x0+w)*4),y*w*4);mask.set(reference.mask.subarray((y+y0)*image.width+x0,(y+y0)*image.width+x0+w),y*w);}
-  const result=matchDesignLocal({width:w,height:h,data},design,{...reference,mask,box:{...b,x:b.x-x0,y:b.y-y0}},initial?{...initial,box:{...initial.box,x:initial.box.x-x0,y:initial.box.y-y0}}:null,refine);
+  const result=matchDesignLocal({width:w,height:h,data},design,content,{...reference,mask,box:{...b,x:b.x-x0,y:b.y-y0}},initial?{...initial,box:{...initial.box,x:initial.box.x-x0,y:initial.box.y-y0}}:null,refine);
   if(result.box){result.box.x+=x0;result.box.y+=y0;}
   return result;
 }
-function matchDesignLocal(image,design,reference,initial=null,allowFine=true) {
-  const content=designContent(design);
+function matchDesignLocal(image,design,content,reference,initial=null,allowFine=true) {
   if(!content.box)return {box:null,confidence:0,ambiguous:false,content};
   const factor=Math.min(1,(initial?720:allowFine?320:160)/Math.max(image.width,image.height)),small=resize(image,Math.round(image.width*factor),Math.round(image.height*factor));
   const w=small.width,h=small.height,mask=new Uint8Array(w*h);
@@ -214,7 +225,7 @@ function matchDesignLocal(image,design,reference,initial=null,allowFine=true) {
   if(!best)return {box:null,confidence:0,ambiguous:false,content,garment};
   const result={box:{x:Math.round(best.x/factor),y:Math.round(best.y/factor),w:best.width/factor,h:best.width*ratio/factor},confidence:best.score,ambiguous:!!second&&best.score-second.score<.045,content,garment};
   if(allowFine && !initial && result.confidence>.65) {
-    const fine=matchDesignLocal(image,design,reference,result);
+    const fine=matchDesignLocal(image,design,content,reference,result);
     fine.ambiguous ||= result.ambiguous;
     return fine;
   }
@@ -587,8 +598,8 @@ async function autoMeasureSleeve({image,design,flat,product,position}) {
   if(flat?.refBeden!=='L')reasons.push('Ürünün L kalıp referansı bulunamadı: kol için L beden ölçüsü gerekli.');
   try {
     // Small cuff artwork needs full raster resolution even on PDF sheets.
-    const pages=await rasterPages(image,image.mime==='application/pdf'?1000:MAX_EDGE),designs=design?await rasterPages(design):[],candidates=[];
-    const designContents=designs.map(designContent);
+    const pages=await rasterPages(image,image.mime==='application/pdf'?1000:MAX_EDGE),designs=design?await rasterPages(design,1000,null,{transparent:true}):[],candidates=[];
+    const designContents=designs.map(p=>designContent(p,true));
     let sleeveCount=0,bodyCount=0;
     source.pageCount=pages.length;source.designPageCount=designs.length;
     for(let i=0;i<pages.length;i++) {
@@ -618,7 +629,7 @@ async function autoMeasureSleeve({image,design,flat,product,position}) {
     }
     source.sleeveCount=sleeveCount;source.bodyCount=bodyCount;
     if(!sleeveCount)reasons.push('Kol bulunamadı: ürün maskesinde gövdeden ayrılan kol veya tamamı görünen ayrı kol silueti yok.');
-    if(!designs.length)reasons.push('Kol desen dosyası yok veya boş; en-boy oranı ve desen eşleşmesi doğrulanamadı.');
+    if(!designContents.some(content=>content.box))reasons.push('Kol desen dosyası yok veya boş; en-boy oranı ve desen eşleşmesi doğrulanamadı.');
     candidates.sort((a,b)=>b.match.confidence-a.match.confidence);
     source.pageCandidates=candidates.slice(0,5).map(c=>({page:c.page,designPage:c.designPage,confidence:c.match.confidence,box:c.candidate.box}));
     const chosen=candidates[0];
@@ -681,7 +692,10 @@ async function autoMeasure({image,design,flat,product,position}) {
   try {
     const pages=await rasterPages(image,image.mime==='application/pdf'?320:MAX_EDGE),candidates=[],allViews=[];
     let designs=[];
-    if(design)try {designs=await rasterPages(design);}catch(e){source.designReadError=e.message;}
+    if(design)try {designs=await rasterPages(design,1000,null,{transparent:true});}catch(e){source.designReadError=e.message;}
+    const designContents=designs.map(p=>designContent(p,true));
+    const designRatios=designContents.flatMap(({box},i)=>box?[{page:i+1,ratio:box.w/box.h}]:[]);
+    if(design && !designRatios.length)reasons.push('Bağlı desen dosyasının okunur içerik kutusu yok; renk adayının en-boy oranı doğrulanamadı.');
     global.gc?.(); // Release full-resolution native decode surfaces before scanning masks.
     source.pageCount=pages.length;source.designPageCount=designs.length;timings.raster=performance.now()-started;
     for(let i=0;i<pages.length;i++) {
@@ -698,7 +712,7 @@ async function autoMeasure({image,design,flat,product,position}) {
         if(cue.view!=='teyit'&&cue.view!==viewForPosition(position))continue;
         if(refs.length>1&&cue.view==='teyit'&&!designs.length)continue;
         if(designs.length)for(let j=0;j<designs.length;j++) {
-          const match=matchDesign(pages[i],designs[j],ref,false);
+          const match=matchDesign(pages[i],designs[j],designContents[j],ref,false);
           if(match.box)candidates.push({p:pages[i],ref,match,page:i+1,designPage:j+1,index:k});
         }
         // Also retain the color hypothesis: refinement may reject the template.
@@ -734,7 +748,7 @@ async function autoMeasure({image,design,flat,product,position}) {
         return {...candidate,p,ref,match:{...candidate.match,box:scaled(candidate.match.box)}};
       }).filter(c=>c.ref);
     }
-    const refined=finalists.map(candidate=>({...candidate,match:candidate.designPage?matchDesign(candidate.p,designs[candidate.designPage-1],candidate.ref,true,candidate.match):colorDesign(candidate.p,candidate.ref)}));
+    const refined=finalists.map(candidate=>({...candidate,match:candidate.designPage?matchDesign(candidate.p,designs[candidate.designPage-1],designContents[candidate.designPage-1],candidate.ref,true,candidate.match):colorDesign(candidate.p,candidate.ref)}));
     timings.refine=performance.now()-started-timings.raster-timings.scan;
     refined.sort((a,b)=>((!!b.designPage&&b.match.confidence>=.78?1:0)-(!!a.designPage&&a.match.confidence>=.78?1:0))||b.match.confidence-a.match.confidence);
     const chosen=refined[0];
@@ -770,6 +784,17 @@ async function autoMeasure({image,design,flat,product,position}) {
       source.candidateBoxPx=match.box;
       source.designAspectRatio=match.content.box?match.content.box.w/match.content.box.h:null;
       source.aspectRatioError=match.box&&source.designAspectRatio?Math.abs(match.box.w/match.box.h/source.designAspectRatio-1):null;
+      let colorAspectVerified=true;
+      if(!designPage && design && match.box) {
+        const ratio=match.box.w/match.box.h;
+        const difference=reference=>Math.max(ratio/reference,reference/ratio)-1;
+        const closest=designRatios.reduce((best,candidate)=>!best||difference(candidate.ratio)<difference(best.ratio)?candidate:best,null);
+        source.aspectReferencePage=closest?.page??null;
+        source.designAspectRatio=closest?.ratio??null;
+        source.aspectRatioError=closest?difference(closest.ratio):null;
+        colorAspectVerified=!!closest&&source.aspectRatioError<=COLOR_ASPECT_TOLERANCE;
+        if(closest&&!colorAspectVerified)reasons.push(`Renk adayının en-boy oranı (${ratio.toFixed(2)}) bağlı desenin ${closest.page}. sayfasındaki içerik oranıyla (${closest.ratio.toFixed(2)}) uyuşmuyor: fark %${percent(source.aspectRatioError)}, sınır %${percent(COLOR_ASPECT_TOLERANCE)}.`);
+      }
       if(ref.symmetry<MIN_SYMMETRY)reasons.push(`Ürün maskesinin sol-sağ simetrisi %${percent(ref.symmetry)}; %${percent(MIN_SYMMETRY)} sınırının altında.`);
       if(placementAmbiguous)reasons.push(`Desen/ürün eşleşme güveni düşük: birden fazla aday var (en iyi güven %${percent(match.confidence)}${competing?`, diğer ürün güveni %${percent(competing.match.confidence)}`:''}); tek yerleşim teyit edilmeli.`);
       if((scalePair==='boy_gogus'||ref.maskMethod==='acik_zemin_bolge'||ref.box.w*ref.box.h<chosen.p.width*chosen.p.height*.10)&&(!vertical||!horizontal))reasons.push(`Ürün için boy ve ${horizontalLabel} ölçekleri birlikte doğrulanamadı; gövde çizgisi ve iki L ölçüsüyle teyit edilmeli.`);
@@ -784,7 +809,7 @@ async function autoMeasure({image,design,flat,product,position}) {
       source.scale=source.mmPerPx?source.mmPerPx/10:null;
       if(source.aspectRatioError>.01)source.aspectRatioNote=`Desen en-boy oranı farkı %${percent(source.aspectRatioError)}.`;
       if(match.confidence<MIN_MATCH_CONFIDENCE)reasons.push(`Desen eşleştirme güveni %${percent(match.confidence)}; %${percent(MIN_MATCH_CONFIDENCE)} sınırının altında.`);
-      else if(!placementAmbiguous) {
+      else if(!placementAmbiguous && colorAspectVerified) {
         source.designBoxPx=match.box;
         if(source.mmPerPx) {
           width=Math.round(match.box.w*source.mmPerPx);height=Math.round(match.box.h*source.mmPerPx);
