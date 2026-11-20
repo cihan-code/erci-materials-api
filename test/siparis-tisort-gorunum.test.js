@@ -25,6 +25,9 @@ function touchingShirts({depths=[35,11],lowerBridge=false}={}) {
     ctx.ellipse(0,0,43,depth,0,0,Math.PI*2);
     ctx.fill();
     ctx.fillRect(i===0?-40:-48,119,i===0?80:96,i===0?32:41);
+    // An interior knockout keeps the invented motif distinct from a solid fabric panel.
+    ctx.fillStyle='#191921';
+    ctx.fillRect(-15,128,30,14);
     ctx.restore();
   }
   if(lowerBridge){
@@ -95,7 +98,6 @@ test('G40e PDF raster refinement preserves the same separated product and physic
   assert.equal(result.measure_source.rasterWidth,640);
   assert.ok(Math.abs(result.width_mm-192)<=5);
 });
-
 
 test('G40b/G40e extraction uses the same observed views and refuses two front variants',async()=>{
   const image=touchingShirts({depths:[11,35]});
