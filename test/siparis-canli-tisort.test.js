@@ -54,7 +54,8 @@ test('G47 a small letter-spaced word on the front of a dark pair is found as one
   assert.deepEqual(r.reasons,[],r.reason);
   const s=r.measure_source;
   assert.deepEqual(s.views.map(v=>v.view),['on','arka']);
-  assert.equal(s.selectedProductIndex,0);assert.equal(s.method,'otomatik_renk');
+  // G47b: the component-group path finds the word as the linked design itself.
+  assert.equal(s.selectedProductIndex,0);assert.ok(['otomatik','otomatik_renk'].includes(s.method),s.method);
   // The letters join into one box of the whole word.
   assert.ok(Math.abs(s.candidateBoxPx.w-TEXT_W)<=2&&Math.abs(s.candidateBoxPx.h-TEXT_H)<=2,JSON.stringify(s.candidateBoxPx));
   assert.ok(s.aspectRatioError<=.3);
@@ -234,4 +235,55 @@ test('G47 kalip-l-tamamla runs from the CLI against DATA_DIR, --kuru writes noth
   assert.match(lines.join('\n'),/KURU ÇALIŞTIRMA[\s\S]*UYDURMA TİŞÖRT\tdoldurulacak\trefBeden, olculerL[\s\S]*UYDURMA TİŞÖRT\tdolduruldu/);
   assert.equal(flats.get(db,'tee').refBeden,'L');
   await assert.rejects(main(['kalip-l-tamamla']),/Kullanım/);
+});
+
+// G47b: a thin multi-part mark (three bars) under the back collar, located by
+// the component-group path; the linked source is the same mark.
+function bars(ctx,x,y,k=1,color='#f0f0f0') {ctx.fillStyle=color;for(const dy of [0,7,14])ctx.fillRect(x,y+dy*k,24*k,3*k);}
+function barsSource({box=false}={}) {
+  const c=createCanvas(400,300),x=c.getContext('2d');
+  if(box){x.fillStyle='#000000';x.fillRect(60,40,280,220);}else{x.fillStyle='#000000';x.fillRect(0,0,400,300);}
+  bars(x,140,110,5,'#ffffff');
+  return c.toBuffer('image/png');
+}
+function backWithBars({twice=false}={}) {
+  const c=createCanvas(1200,650),x=c.getContext('2d');
+  x.fillStyle='#ffffff';x.fillRect(0,0,1200,650);tee(x,0);tee(x,600);
+  // The front carries a chest-side logo, the back the bars under the collar.
+  x.fillStyle='#f2f2f2';x.fillRect(340,215,44,10);x.fillRect(340,229,44,10);x.fillRect(340,215,8,24);
+  bars(x,888,80);if(twice)bars(x,888,300);
+  return c.toBuffer('image/png');
+}
+const measureBars=(image,options={})=>autoMeasure({image:{buffer:image,mime:'image/png'},design:{buffer:barsSource(options),mime:'image/png'},flat:FLAT,product:'tisort',position:options.position||'ense'});
+
+test('G47b a thin multi-part mark is located as one group by its own layout and measured', async()=> {
+  const r=await measureBars(backWithBars());
+  assert.deepEqual(r.reasons,[],r.reason);
+  const s=r.measure_source,box=s.candidateBoxPx;
+  assert.equal(s.selectedProductIndex,1);assert.equal(s.method,'otomatik');
+  assert.ok(Math.abs(box.x-888)<=2&&Math.abs(box.w-24)<=2&&Math.abs(box.h-17)<=2,JSON.stringify(box));
+  assert.ok(s.matchConfidence>=.78);
+});
+
+test('G47b a second equal group leaves the placement open; a source on a filled box still matches', async()=> {
+  const twice=await measureBars(backWithBars({twice:true}));
+  assert.equal(twice.width_mm,null);
+  assert.match(twice.reason,/birden fazla aday|güveni/);
+  // A converted proof drew the bars on a black box inside a transparent page.
+  const boxed=await measureBars(backWithBars(),{box:true});
+  assert.deepEqual(boxed.reasons,[],boxed.reason);
+  assert.ok(Math.abs(boxed.measure_source.candidateBoxPx.w-24)<=2);
+});
+
+test('G47b arms hanging to the hem: the rib below the cuffs is the torso hem', async()=> {
+  // Invented hoodie front: straight arms reach the hem band, the rib is narrower.
+  const c=createCanvas(600,700),x=c.getContext('2d');
+  x.fillStyle='#ffffff';x.fillRect(0,0,600,700);x.fillStyle='#1b1b1f';
+  x.beginPath();x.ellipse(300,90,75,70,0,0,Math.PI*2);x.fill();
+  x.beginPath();for(const [i,[a,b]] of [[150,140],[450,140],[520,200],[540,600],[470,600],[450,620],[450,660],[150,660],[150,620],[130,600],[60,600],[80,200]].entries())i?x.lineTo(a,b):x.moveTo(a,b);x.closePath();x.fill();
+  const {silhouettes}=require('../agent/siparis/autoMeasure');
+  const [p]=await require('../agent/siparis/autoMeasure').rasterPages({buffer:c.toBuffer('image/png'),mime:'image/png'});
+  const refs=silhouettes(p,'sweat');
+  assert.equal(refs.length,1);
+  assert.ok(Math.abs(refs[0].hemWidthPx-300)<=4,String(refs[0].hemWidthPx));
 });

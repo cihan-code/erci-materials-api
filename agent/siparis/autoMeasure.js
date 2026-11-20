@@ -315,8 +315,20 @@ function silhouette(p, segmented=null) {
   }
   const occupied=rows.filter(r=>r.width),hemY=occupied.at(-1)?.y;
   if(hemY==null)return null;
-  const band=rows.filter(r=>r.y>=hemY-box.h*.12 && r.y<=hemY-box.h*.075 && r.width>box.w*.2);
+  let band=rows.filter(r=>r.y>=hemY-box.h*.12 && r.y<=hemY-box.h*.075 && r.width>box.w*.2);
   let hemWidthPx=band.length?median(band.map(r=>r.width)):null;
+  // Arms hanging straight down put both cuffs into the hem band (G47b: a
+  // hoodie photographed flat, band = 95% of the silhouette). Below the cuffs
+  // the hem rib is the torso alone: a run of rows of one stable width.
+  if(hemWidthPx&&hemWidthPx>=box.w*.9) {
+    const low=rows.filter(r=>r.y>hemY-box.h*.075&&r.width>0&&r.width<hemWidthPx*.8);
+    let best=[],run=[];
+    for(const r of low) {
+      if(run.length&&(r.y!==run.at(-1).y+1||Math.abs(r.width-run[0].width)>run[0].width*.03))run=[];
+      run.push(r);if(run.length>best.length)best=run.slice();
+    }
+    if(best.length>=Math.max(4,box.h*.03)){band=best;hemWidthPx=median(best.map(r=>r.width));}
+  }
   const bodyColor=dominant(p,Array.from(mask.keys()).filter(i=>mask[i]));
   if(distance(bodyColor,background)>(segmented?.lowContrast?35:18)) {
     // Closing may bridge a cuff-to-body gap. The original foreground evidence
@@ -610,6 +622,107 @@ function colorDesign(p,ref,tallBack=false,ratios=[]) {
   candidates.sort((a,b)=>b.score-a.score);
   if(!candidates.length)return {box:null,confidence:0,ambiguous:false,content:{box:null},method:'otomatik_renk'};
   return {...candidates[0],ambiguous:!!candidates[1]&&candidates[1].score>candidates[0].score*.4,others:candidates.slice(1)};
+}
+
+// G47b: thin or multi-part designs (≡ bars, wavy lines, line art) defeat the
+// sliding template. Group the garment's ink at a few join radii, keep groups
+// whose box has the design's width/height ratio, and compare each group with
+// the design's own layout: a coarse occupancy grid plus row and column
+// profiles, each as normalized correlation. Ink is read against the garment
+// colour with a local threshold (half the group's peak contrast), so a
+// blurred mockup print keeps its bars apart. The silhouette's anti-aliased
+// edge is excluded. A second distinct group within 10% leaves it ambiguous.
+const GROUP_RADII=[.01,.02,.04,.08];
+function profileOf(mask,w,box,n,rows) {
+  const out=new Float64Array(n),[a0,len,b0,span]=rows?[box.y,box.h,box.x,box.w]:[box.x,box.w,box.y,box.h];
+  for(let k=0;k<n;k++) {
+    const from=Math.floor(a0+k*len/n),to=Math.max(from+1,Math.floor(a0+(k+1)*len/n));let ink=0;
+    for(let a=from;a<to;a++)for(let b=b0;b<b0+span;b++)ink+=mask[rows?a*w+b:b*w+a]?1:0;
+    out[k]=ink/((to-from)*span);
+  }
+  return out;
+}
+function gridOf(mask,w,box,n) {
+  const out=new Float64Array(n*n);
+  for(let gy=0;gy<n;gy++)for(let gx=0;gx<n;gx++) {
+    const x0=Math.floor(box.x+gx*box.w/n),x1=Math.max(x0+1,Math.floor(box.x+(gx+1)*box.w/n)),y0=Math.floor(box.y+gy*box.h/n),y1=Math.max(y0+1,Math.floor(box.y+(gy+1)*box.h/n));
+    let ink=0;for(let y=y0;y<y1;y++)for(let x=x0;x<x1;x++)ink+=mask[y*w+x]?1:0;
+    out[gy*n+gx]=ink/((x1-x0)*(y1-y0));
+  }
+  return out;
+}
+function correlation(a,b) {
+  // Short profiles are smoothed alike: a blurred bar is wider than its source.
+  if(a.length<=32){const k=Math.max(1,Math.round(a.length/12)),soft=v=>Float64Array.from(v,(_,i)=>{let t=0,n=0;for(let j=i-k;j<=i+k;j++)if(j>=0&&j<v.length){t+=v[j];n++;}return t/n;});a=soft(a);b=soft(b);}
+  const n=a.length,ma=a.reduce((s,v)=>s+v,0)/n,mb=b.reduce((s,v)=>s+v,0)/n;let c=0,va=0,vb=0;
+  for(let i=0;i<n;i++){c+=(a[i]-ma)*(b[i]-mb);va+=(a[i]-ma)**2;vb+=(b[i]-mb)**2;}
+  return va>1e-9&&vb>1e-9?c/Math.sqrt(va*vb):0;
+}
+function layoutScore(mask,w,box,design,content) {
+  const g=Math.max(4,Math.min(12,Math.floor(Math.min(box.w,box.h)/3))),r=Math.max(8,Math.min(32,box.h)),c=Math.max(8,Math.min(32,box.w));
+  const pairs=[[gridOf(mask,w,box,g),gridOf(content.mask,design.width,content.box,g)],
+    [profileOf(mask,w,box,r,true),profileOf(content.mask,design.width,content.box,r,true)],
+    [profileOf(mask,w,box,c,false),profileOf(content.mask,design.width,content.box,c,false)]];
+  // A flat design profile (straight bars seen across) carries no layout; its
+  // correlation would be noise. Only informative comparisons are averaged.
+  const informative=pairs.filter(([,d])=>{const m=d.reduce((s,v)=>s+v,0)/d.length;return m>0&&Math.sqrt(d.reduce((s,v)=>s+(v-m)**2,0)/d.length)/m>.05;});
+  return informative.length?informative.reduce((s,[a,d])=>s+correlation(a,d),0)/informative.length:0;
+}
+// A converted proof can carry a filled rectangle that the source shows as
+// transparent (G47b: svg-to-pdfkit drew OTOKON's SVG on a black box). Its
+// uniform border marks it; the content inside it is the artwork. Used only as
+// a second hypothesis by groupDesign: a real rectangular badge keeps its box.
+function innerMatte(p,content) {
+  if(!content.box)return null;
+  if(content.box.w<p.width*.3||content.box.h<p.height*.3)return null;
+  // Two pixels inside: the rectangle's own edge is anti-aliased.
+  const x=content.box.x+2,y=content.box.y+2,bw=content.box.w-4,bh=content.box.h-4,w=p.width,d=p.data;
+  const ring=[];for(let i=x;i<x+bw;i++)ring.push(y*w+i,(y+bh-1)*w+i);for(let j=y;j<y+bh;j++)ring.push(j*w+x,j*w+x+bw-1);
+  const c=[d[ring[0]*4],d[ring[0]*4+1],d[ring[0]*4+2]];
+  if(ring.some(i=>d[i*4+3]<128||distance([d[i*4],d[i*4+1],d[i*4+2]],c)>12))return null;
+  const mask=new Uint8Array(w*p.height);
+  for(let j=y;j<y+bh;j++)for(let i=x;i<x+bw;i++){const k=j*w+i;mask[k]=d[k*4+3]>32&&distance([d[k*4],d[k*4+1],d[k*4+2]],c)>20?1:0;}
+  const box=bounds(mask,w,p.height);
+  return box?{mask,box}:null;
+}
+function groupDesign(p,ref,design,content) {
+  const inner=innerMatte(design,content);
+  if(inner) {
+    const a=groupDesignWith(p,ref,design,content),b=groupDesignWith(p,ref,design,inner);
+    return b.confidence>a.confidence?b:a;
+  }
+  return groupDesignWith(p,ref,design,content);
+}
+function groupDesignWith(p,ref,design,content) {
+  const none={box:null,confidence:0,ambiguous:false,content,method:'otomatik',group:true};
+  if(!content.box)return none;
+  const w=p.width,h=p.height,ratio=content.box.w/content.box.h,garment=dominant(p,Array.from(ref.mask.keys()).filter(i=>ref.mask[i]));
+  const e=Math.max(3,Math.round(ref.hemWidthPx*.015)),contrast=new Float32Array(w*h),ink=new Uint8Array(w*h);
+  const {x:bx,y:by,w:bw,h:bh}=ref.box;
+  for(let y=Math.max(e,by);y<Math.min(h-e,by+bh);y++)for(let x=Math.max(e,bx);x<Math.min(w-e,bx+bw);x++) {
+    const i=y*w+x;
+    if(!ref.mask[i]||!ref.mask[i-e]||!ref.mask[i+e]||!ref.mask[i-e*w]||!ref.mask[i+e*w])continue;
+    contrast[i]=distance([p.data[i*4],p.data[i*4+1],p.data[i*4+2]],garment);ink[i]=contrast[i]>40?1:0;
+  }
+  const found=[];
+  for(const radius of GROUP_RADII) {
+    const r=Math.max(1,Math.round(ref.hemWidthPx*radius)),joined=dilate(ink,w,h,r,r);
+    for(const c of components(joined,w,h,8)) {
+      const own=c.pixels.filter(i=>ink[i]);if(own.length<6)continue;
+      const values=own.map(i=>contrast[i]).sort((a,b)=>a-b),t=Math.max(40,values[Math.floor(values.length*.95)]*.5);
+      const local=new Uint8Array(w*h);let x0=w,y0=h,x1=-1,y1=-1;
+      for(const i of own)if(contrast[i]>t){local[i]=1;const x=i%w,y=(i-x)/w;x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);}
+      if(x1<0)continue;
+      const box={x:x0,y:y0,w:x1-x0+1,h:y1-y0+1};
+      if(box.w<4||box.h<3||box.w>ref.hemWidthPx*1.1||!ratioMatches(box.w/box.h,[ratio]))continue;
+      if(found.some(f=>f.box.x===box.x&&f.box.y===box.y&&f.box.w===box.w&&f.box.h===box.h))continue;
+      found.push({box,score:layoutScore(local,w,box,design,content)});
+    }
+  }
+  found.sort((a,b)=>b.score-a.score);
+  const best=found[0];if(!best)return none;
+  const rival=found.find(f=>overlapFraction(f.box,best.box)<.5&&overlapFraction(best.box,f.box)<.5);
+  return {...none,box:best.box,confidence:Math.max(0,best.score),ambiguous:!!rival&&rival.score>=best.score*.9,rival:rival?Math.round(rival.score*1000)/1000:null};
 }
 
 function chestLine(p,ref) {
@@ -1128,6 +1241,8 @@ async function autoMeasure({image,design,flat,product,position,color}) {
         if(designs.length)for(let j=0;j<designs.length;j++) {
           const match=matchDesign(pages[i],designs[j],designContents[j],ref,false);
           if(match.box)candidates.push({p:pages[i],ref,match,page:i+1,designPage:j+1,index:k});
+          const group=groupDesign(pages[i],ref,designs[j],designContents[j]);
+          if(group.box)candidates.push({p:pages[i],ref,match:group,page:i+1,designPage:j+1,index:k});
         }
         // Also retain the color hypothesis: refinement may reject the template.
         // Unknown sheet products need the supplied design. An independently
@@ -1150,11 +1265,11 @@ async function autoMeasure({image,design,flat,product,position,color}) {
     candidates.sort((a,b)=>(!!b.designPage-!!a.designPage)||b.match.confidence-a.match.confidence);
     source.pageCandidates=candidates.slice(0,5).map(c=>({page:c.page,productIndex:c.index,designPage:c.designPage,confidence:Math.round(c.match.confidence*1000)/1000}));
     timings.scan=performance.now()-started-timings.raster;
-    let finalists=[...candidates.filter(c=>c.designPage).slice(0,3),...candidates.filter(c=>!c.designPage).slice(0,3)];
+    let finalists=[...candidates.filter(c=>c.designPage&&!c.match.group).slice(0,3),...candidates.filter(c=>c.match.group).slice(0,3),...candidates.filter(c=>!c.designPage).slice(0,3)];
     // Every product on a sheet needs a refined template hypothesis; otherwise
     // a fourth repeated print could be discarded before the ambiguity check.
     const represented=new Set(finalists.filter(c=>c.designPage).map(c=>`${c.page}:${c.index}`));
-    for(const c of candidates.filter(c=>c.designPage&&allViews.filter(v=>v.page===c.page).length>1)) {
+    for(const c of candidates.filter(c=>c.designPage&&!c.match.group&&allViews.filter(v=>v.page===c.page).length>1)) {
       const key=`${c.page}:${c.index}`;
       if(!represented.has(key)){finalists.push(c);represented.add(key);}
     }
@@ -1182,7 +1297,7 @@ async function autoMeasure({image,design,flat,product,position,color}) {
         return {...candidate,p,ref,match:{...candidate.match,box:scaled(candidate.match.box)}};
       }).filter(c=>c.ref);
     }
-    const refined=finalists.map(candidate=>({...candidate,match:candidate.designPage?matchDesign(candidate.p,designs[candidate.designPage-1],designContents[candidate.designPage-1],candidate.ref,true,candidate.match):colorDesign(candidate.p,candidate.ref,tallBack,ratios)}));
+    const refined=finalists.map(candidate=>({...candidate,match:candidate.match.group?groupDesign(candidate.p,candidate.ref,designs[candidate.designPage-1],designContents[candidate.designPage-1]):candidate.designPage?matchDesign(candidate.p,designs[candidate.designPage-1],designContents[candidate.designPage-1],candidate.ref,true,candidate.match):colorDesign(candidate.p,candidate.ref,tallBack,ratios)}));
     timings.refine=performance.now()-started-timings.raster-timings.scan;
     refined.sort((a,b)=>((!!b.designPage&&b.match.confidence>=.78?1:0)-(!!a.designPage&&a.match.confidence>=.78?1:0))||b.match.confidence-a.match.confidence);
     const chosen=refined[0];
@@ -1198,7 +1313,10 @@ async function autoMeasure({image,design,flat,product,position,color}) {
       const competing=refined.find(c=>c.page!==page||c.index!==chosen.index);
       const placementAmbiguous=match.ambiguous || !!competing&&Math.abs(match.confidence-competing.match.confidence)<.045;
       const templateSelectsProduct=designPage&&match.confidence>=MIN_MATCH_CONFIDENCE&&!placementAmbiguous;
-      if(unknownViews.some(v=>v.page===page && (v.splitMethod || !templateSelectsProduct)))reasons.push(unknownViewReason());
+      // Conflicting view cues are never overridden by a design match: the
+      // design may sit on the garment the other cues call the back (G47b).
+      const viewConflict=unknownViews.some(v=>v.page===page&&v.viewEvidence.viewConflict);
+      if(unknownViews.some(v=>v.page===page && (v.splitMethod || !templateSelectsProduct || v.viewEvidence.viewConflict)))reasons.push(unknownViewReason());
       source.productSelection=templateSelectsProduct?'desen':'gorunum';
       // A tee has no collar rising well above the shoulders (mockups: 8-12% of
       // the body height; a half-zip stand collar 16-17%, hoods more). Its L
@@ -1250,7 +1368,7 @@ async function autoMeasure({image,design,flat,product,position,color}) {
       source.scale=source.mmPerPx?source.mmPerPx/10:null;
       if(source.aspectRatioError>.01)source.aspectRatioNote=`Desen en-boy oranı farkı %${percent(source.aspectRatioError)}.`;
       if(match.confidence<MIN_MATCH_CONFIDENCE)reasons.push(`Desen eşleştirme güveni %${percent(match.confidence)}; %${percent(MIN_MATCH_CONFIDENCE)} sınırının altında.`);
-      else if(!placementAmbiguous && colorAspectVerified) {
+      else if(!placementAmbiguous && colorAspectVerified && !viewConflict) {
         source.designBoxPx=match.box;
         if(source.mmPerPx) {
           width=Math.round(match.box.w*source.mmPerPx);height=Math.round(match.box.h*source.mmPerPx);
@@ -1490,10 +1608,17 @@ function pairViews(p,refs,cues,matches,labels=[],linkedFront=null) {
       return;
     }
   }
-  if(matches.every(m=>!m.ambiguous)) {
-    const offset=refs.map((ref,i)=>matches[i].box?Math.abs(matches[i].box.x+matches[i].box.w/2-ref.bodyCenterX)/ref.hemWidthPx:null);
-    const side=offset.findIndex(o=>o!=null&&o>=.15);
-    if(side>=0&&(offset[1-side]==null||offset[1-side]<.08))votes.push({front:side,cue:'yan göğüs baskısı'});
+  {
+    // A lone chest-side logo is a front's. The other garment must not carry
+    // one too; none, a centred print or a composition of several prints (a
+    // back, G47b TAYF) is fine.
+    const lone=refs.map((ref,i)=>{
+      const all=[matches[i],...(matches[i].others||[])].filter(m=>m.box);
+      return !matches[i].ambiguous&&all.length===1&&Math.abs(all[0].box.x+all[0].box.w/2-ref.bodyCenterX)/ref.hemWidthPx>=.15;
+    });
+    const side=lone.indexOf(true);
+    const centred=k=>!matches[k].box||matches[k].ambiguous||Math.abs(matches[k].box.x+matches[k].box.w/2-refs[k].bodyCenterX)/refs[k].hemWidthPx<.08;
+    if(side>=0&&!lone[1-side]&&centred(1-side))votes.push({front:side,cue:'yan göğüs baskısı'});
   }
   const marks=refs.map(ref=>neckMark(p,ref));
   if(marks[0]!==marks[1])votes.push({front:marks.indexOf(false),cue:'ense etiketi/baskısı'});
