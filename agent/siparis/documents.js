@@ -435,7 +435,7 @@ function imageViewHint(db,v,image,appId) {
     const s=provenance(app);
     if(!ids.has(s.gorselFileId) || !['otomatik','otomatik_renk'].includes(s.method))continue;
     // A pair settled by a handed-on answer is no evidence of its own.
-    if((s.views||[]).some(g=>g?.viewEvidence?.viewSource==='baska_baski'))continue;
+    if((s.views||[]).some(g=>['baska_baski','varsayilan','goz'].includes(g?.viewEvidence?.viewSource)))continue;
     const side=frontSide(s.views,s.selectedPage ?? 1);
     if(side)sides.add(side);
   }
@@ -779,8 +779,9 @@ function autoInputs(db,v,line,app) {
   const library=flats.list(db),{candidates,flat}=flats.selection(db,line,view==='teyit'?image.gorunum:view,library);
   const flatNote=!flat && candidates.length>1 ? 'Bu ürün için birden çok kalıp var; kalıbı seçin' : !candidates.length || flat ? flats.missingLNote(db,line,flat,library) : null;
   // The line colour only adds an information note to the measurement.
-  const viewHint=SLEEVES.includes(app.position) ? null : imageViewHint(db,v,image,app.id);
-  return {image,design,flat,product:line.product_key,position:app.position,...(line.color_name?{color:line.color_name}:{}),...(viewHint?{viewHint}:{}),...(flatNote?{flatNote}:{}),...(design && linked==null?{linkDesign:true}:{})};
+  const sleeve=SLEEVES.includes(app.position);
+  const viewHint=sleeve ? null : imageViewHint(db,v,image,app.id);
+  return {image,design,flat,product:line.product_key,position:app.position,...(line.color_name?{color:line.color_name}:{}),...(viewHint?{viewHint}:{}),...(sleeve?{}:{viewDefault:true}),...(flatNote?{flatNote}:{}),...(design && linked==null?{linkDesign:true}:{})};
 }
 function autoFingerprint({desenDosyaId,...app},input) {return JSON.stringify({app,input});}
 // autoMeasure states these two when no single L pattern was passed; a known ambiguity replaces them.

@@ -1341,7 +1341,7 @@ async function autoMeasureLeg({image,design,flat,product,position}) {
   return {width_mm:width,height_mm:height,measure_source:source,needs_confirmation:reasons.length>0,reasons,reason:reasons.join(' ')};
 }
 
-async function autoMeasure({image,design,flat,product,position,color,viewHint=null}) {
+async function autoMeasure({image,design,flat,product,position,color,viewHint=null,viewDefault=false}) {
   if(['kol','sol_kol','sag_kol'].includes(position))return autoMeasureSleeve({image,design,flat,product,position});
   if(LEGS.includes(position))return autoMeasureLeg({image,design,flat,product,position});
   const scalePair=scalePairFor(flat,product),pairLabel=scalePair==='boy_gogus'?'boy/göğüs':'boy/etek',horizontalLabel=scalePair==='boy_gogus'?'göğüs':'etek';
@@ -1389,6 +1389,7 @@ async function autoMeasure({image,design,flat,product,position,color,viewHint=nu
         pairViews(pages[i],refs,cues,matches,[],carrier<0?null:viewForPosition(position)==='on'?carrier:1-carrier);
         if(carrier>=0)cues.forEach((c,k)=>{c.designCarrier=k===carrier;});
         if(i===0)applyViewHint(refs,cues,viewHint);
+        if(viewDefault)applyViewHint(refs,cues,defaultViewHint(refs));
       }
       for(let k=0;k<refs.length;k++) {
         const ref=refs[k],cue=cues[k],scale=scaleFor(ref,measurements,scalePair,pages[i],calK);
@@ -1796,6 +1797,14 @@ function pairViews(p,refs,cues,matches,labels=[],linkedFront=null) {
 // settles an undecided pair (a contradiction stays open).
 // hint={conflict} carries a disagreement between prints: both views stay open.
 const VIEW_SIDES=['sol','sag','ust','alt'];
+// G61: with no evidence and no answer, two garments side by side are read as front on
+// the left (stacked: front on top). Evidence that decided a view, an answer or the eye wins;
+// conflicting cues fall back to the same layout and keep the conflict as a note.
+function defaultViewHint(refs) {
+  if(refs.length!==2)return null;
+  const c=r=>({x:r.box.x+r.box.w/2,y:r.box.y+r.box.h/2}),[a,b]=refs.map(c);
+  return {front:Math.abs(a.x-b.x)>=Math.abs(a.y-b.y)?'sol':'ust',source:'varsayilan'};
+}
 function applyViewHint(refs,cues,hint) {
   if(!hint||refs.length!==2)return;
   if(hint.conflict) {for(const c of cues){c.view='teyit';c.viewConflict=hint.conflict;c.viewSource='baska_baski';}return;}
@@ -1805,6 +1814,12 @@ function applyViewHint(refs,cues,hint) {
   // Garments that do not sit apart along the named axis cannot be told apart by it.
   if(Math.abs(a-b)<Math.min(...refs.map(size))/2)return;
   const first=a<b?0:1,front=['sol','ust'].includes(hint.front)?first:1-first,label=`${front+1}. ürün ön`;
+  if(hint.source==='varsayilan') {
+    if(cues.some(c=>c.view==='on'))return;
+    cues[front].view='on';cues[1-front].view='arka';
+    for(const c of cues){if(c.viewConflict){c.viewConflictNote=c.viewConflict;delete c.viewConflict;}c.viewSource='varsayilan';c.pairVotes=[...(c.pairVotes||[]),`varsayılan dizilim: ${label}`];}
+    return;
+  }
   if(hint.source!=='baska_baski') {
     cues[front].view='on';cues[1-front].view='arka';
     for(const c of cues){delete c.viewConflict;c.viewSource=hint.source;c.pairVotes=[...(c.pairVotes||[]),`${hint.source==='kullanici'?'kullanıcı teyidi':'ölçümün görünümü'}: ${label}`];}
@@ -2152,4 +2167,4 @@ async function extractArtwork({image,position,product:productKey,color,viewHint=
     return {buffer:canvas.toBuffer('image/png'),placement:{page,view,rasterWidth:w,rasterHeight:h,designBoxPx:{...box,x:x+box.x,y:y+box.y}},warnings,notes};
   } finally {canvas.width=canvas.height=0;}
 }
-module.exports={paleGroundReason,applyViewHint,autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette,silhouettes,extractArtwork};
+module.exports={defaultViewHint,paleGroundReason,applyViewHint,autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette,silhouettes,extractArtwork};
