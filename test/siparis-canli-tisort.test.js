@@ -307,11 +307,11 @@ test('G47c a sweat whose chest line cannot be traced is not sized from its heigh
 
 // G47d: a word running along a sleeve but well off the sleeve's own axis
 // (beyond the former ±12° search) is grouped and read in its own frame.
-function tiltedSleeve({degrees=25,blur=false}={}) {
+function tiltedSleeve({degrees=25,blur=0,twice=false}={}) {
   const c=createCanvas(600,650),x=c.getContext('2d');
   x.fillStyle='#ffffff';x.fillRect(0,0,600,650);x.fillStyle=CLOTH;
   x.beginPath();[[250,80],[350,80],[340,579],[260,579]].forEach(([u,v],i)=>i?x.lineTo(u,v):x.moveTo(u,v));x.closePath();x.fill();
-  x.save();x.translate(300,330);x.rotate((90-degrees)*Math.PI/180);if(blur)x.filter='blur(1.5px)';lettering(x,-TEXT_W/2,-TEXT_H/2);x.restore();
+  for(const y of twice?[230,450]:[330]){x.save();x.translate(300,y);x.rotate((90-degrees)*Math.PI/180);if(blur)x.filter=`blur(${blur}px)`;lettering(x,-TEXT_W/2,-TEXT_H/2);x.restore();}
   return c.toBuffer('image/png');
 }
 const sleeveFlat={id:'kol',ad:'Uydurma kol',refBeden:'L',olculerL:{kol_boyu:100}};
@@ -327,8 +327,21 @@ test('G47d a word tilted 25° off the sleeve axis is located in its own frame an
   assert.ok(Math.abs(r.width_mm-236)<=8,String(r.width_mm));
 });
 
-test('G47d blur that thickens the letters beyond the ±10% aspect rule keeps the size for confirmation', async()=> {
-  const r=await measureSleeveWord(tiltedSleeve({blur:true}));
-  assert.equal(r.needs_confirmation,true);
-  assert.match(r.reason,/±%10/);
+test('G55 blur measured from the print itself is removed from the stroke thickness; the blurred word is measured', async()=> {
+  // Patron, 21.11.2026: blur-aware aspect for small sleeve prints (G47d path).
+  const r=await measureSleeveWord(tiltedSleeve({blur:1.5}));
+  assert.deepEqual(r.reasons,[],r.reason);
+  const b=r.measure_source.bulaniklik;
+  assert.equal(b.reliable,true);assert.ok(b.spread>0&&b.edges>=12,JSON.stringify(b));
+  assert.ok(Math.abs(r.width_mm-236)<=10,String(r.width_mm));
+  assert.ok(r.measure_source.aspectRatioError<=.10);
+});
+
+test('G55 blur too wide for the strokes or a second equal word still asks for confirmation', async()=> {
+  const heavy=await measureSleeveWord(tiltedSleeve({blur:4}));
+  assert.equal(heavy.needs_confirmation,true);
+  assert.equal(heavy.width_mm===null||/bulanıklığı|±%10|güveni/.test(heavy.reason),true,heavy.reason);
+  const twice=await measureSleeveWord(tiltedSleeve({twice:true}));
+  assert.equal(twice.width_mm,null);
+  assert.match(twice.reason,/belirsiz/);
 });
