@@ -1410,6 +1410,7 @@ async function autoMeasure({image,design,flat,product,position,color,viewHint=nu
       }
     }
     source.views=allViews;
+    if(designRatios.length)source.designContentRatio=designRatios[0].ratio;
     // The line colour does not pick a garment here; a colour no garment shows
     // is worth knowing (the fabric may be wrong) but does not block the size.
     const lineColor=named(color,COLOR_WORDS);
@@ -1499,6 +1500,7 @@ async function autoMeasure({image,design,flat,product,position,color,viewHint=nu
       source.confidence=Math.round(Math.max(0,source.matchConfidence-source.textureConfidencePenalty)*1000)/1000;
       source.candidateBoxPx=match.box;
       source.designAspectRatio=match.content.box?match.content.box.w/match.content.box.h:null;
+      if(designPage&&designRatios.some(d=>d.page===designPage))source.designContentRatio=designRatios.find(d=>d.page===designPage).ratio;
       source.aspectRatioError=match.box&&source.designAspectRatio?Math.abs(match.box.w/match.box.h/source.designAspectRatio-1):null;
       let colorAspectVerified=true;
       if(!designPage && design && match.box) {

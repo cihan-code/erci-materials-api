@@ -103,7 +103,7 @@ test('G39 automatic measurement runs after uploads and applications, images firs
   assert.ok(f.db.prepare("SELECT count(*) n FROM audit_log WHERE action='uygulama_otomatik_olc' AND ref=?").get(String(backApp.id)).n>=1);
 });
 
-test('G40 bağlı hazır PDF ve SVG vektörleri renk adayının oranını sınar',{timeout:45000},async t=>{
+test('G40/G61 bağlı PDF ve SVG desenin oranı uymayan renk adayında en desen oranıyla tutarlı kenardan alınır',{timeout:45000},async t=>{
   const f=await fixture(t),o=await f.order({lines:[{product_key:'sweat',quantity:1}]}),v=o.version.id,line=o.version.lines[0].id;
   addFlat(f,{product:'sweat',view:'arka'});
   f.db.prepare('UPDATE document_flats SET olculerL=?').run(JSON.stringify({omuzdan_boy:71,etek:52,gogus:61,tum_omuz:61.5}));
@@ -119,8 +119,12 @@ test('G40 bağlı hazır PDF ve SVG vektörleri renk adayının oranını sınar
     const source=JSON.parse(app.measure_source);
     assert.equal(source.desenFileId,file.id);
     assert.ok(Math.abs(source.designAspectRatio-31/45)<.04,JSON.stringify(source));
-    assert.equal(app.width_mm,null);assert.equal(app.height_mm,null);assert.equal(source.designBoxPx,null);
-    assert.match(openConfirmation(f,app.id)[0].message,/en-boy oranı .* uyuşmuyor/);
+    // G61: the mismatch is no longer a confirmation; the size is written as approximate.
+    assert.equal(source.designBoxPx,null);assert.equal(openConfirmation(f,app.id).length,0);
+    assert.equal(source.olcuDurumu,'yaklasik');assert.equal(app.width_mm%5,0);
+    assert.equal(app.height_mm,Math.round(app.width_mm/source.designContentRatio));
+    assert.ok(source.notlar.some(n=>/en-boy oranı .* uyuşmuyor/.test(n)),JSON.stringify(source.notlar));
+    assert.ok(source.notlar.some(n=>/Kutu oranı .* desen oranından/.test(n)),JSON.stringify(source.notlar));
   }
 });
 
@@ -148,10 +152,11 @@ test('G39b two L patterns without a unique base name require explicit selection'
   ok(await f.upload(v,{kind:'urun_gorsel',lineId:line,gorunum:'on',buffer:m.image}),201);
   const design=ok(await f.upload(v,{lineId:line,buffer:m.design}),201);
   const app=ok(await f.post(`/satirlar/${line}/uygulamalar`,{kind:'baski',position:'gogus',desenDosyaId:design.id}),201);
-  assert.equal(app.width_mm,null);
-  const [c]=openConfirmation(f,app.id);
-  assert.match(c.message,/^Bu ürün için birden çok kalıp var; kalıbı seçin/);
-  assert.doesNotMatch(c.message,/L kalıp referansı bulunamadı/);
+  // G61: no scale -> the standard width (≈); the reason still names the pattern choice.
+  const source=JSON.parse(app.measure_source);
+  assert.deepEqual([app.width_mm,source.olcuDurumu,openConfirmation(f,app.id).length],[280,'standart',0]);
+  assert.match(source.notlar[0],/^Bu ürün için birden çok kalıp var; kalıbı seçin/);
+  assert.ok(source.notlar.every(n=>!/L kalıp referansı bulunamadı/.test(n)));
 });
 
 test('G39 a measurement that cannot run at all leaves its reason on the confirmation',{timeout:60000},async t=>{

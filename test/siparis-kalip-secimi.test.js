@@ -26,13 +26,16 @@ test('G39b regular product name selects the unique L default and exposes candida
   f.flat('hood','SWEAT','kapusonlu');f.flat('hood-over','OVERSIZE SWEAT','kapusonlu');
   assert.equal((await f.order({lines:[{product_key:'kapusonlu',quantity:1}]})).version.lines[0].kalipId,'hood');
 });
-test('G39b ambiguous defaults keep dimensions empty and ask for a pattern',async t=>{
+test('G39b/G61 ambiguous defaults write the standard width (≈) and still ask for a pattern',async t=>{
   const f=await fixture(t);f.flat('a','SWEAT');f.flat('b','SWEAT');
   const o=await f.order({lines:[{product_key:'sweat',quantity:1,applications:[{kind:'baski',position:'gogus'}]}]});
   const line=o.version.lines[0];assert.equal(line.kalipId,null);
   const up=await f.upload(o.version.id,{kind:'urun_gorsel',lineId:line.id,gorunum:'on',buffer:mockup().image});assert.equal(up.status,201);
-  const app=(await f.read(o.version.id)).lines[0].applications[0];assert.equal(app.width_mm,null);assert.equal(app.needs_confirmation,1);
-  assert.match(f.db.prepare("SELECT message FROM confirmations WHERE ref_id=? AND kind='olcu' AND status='acik'").get(app.id).message,/Bu ürün için birden çok kalıp var; kalıbı seçin/);
+  // No unique pattern, no scale: the size is the position's standard, never a guessed scale.
+  const app=(await f.read(o.version.id)).lines[0].applications[0],source=JSON.parse(app.measure_source);
+  assert.deepEqual([app.width_mm,app.needs_confirmation,source.olcuDurumu],[280,0,'standart']);
+  assert.match(source.notlar[0],/Bu ürün için birden çok kalıp var; kalıbı seçin/);
+  assert.equal(f.db.prepare("SELECT count(*) n FROM confirmations WHERE ref_id=? AND kind='olcu' AND status='acik'").get(app.id).n,0);
 });
 test('G39b selecting a candidate persists, audits, remeasures only that line and survives revision',async t=>{
   const f=await fixture(t);f.flat('regular','SWEAT');f.flat('over','OVERSIZE SWEAT');f.flat('foreign','TİŞÖRT','tisort');

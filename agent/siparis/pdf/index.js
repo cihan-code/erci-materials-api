@@ -95,7 +95,9 @@ function appsFor(order, lines, type) {
 
 // Every form uses this formatter and the stored millimetres, never image geometry.
 function cm(mm) { return String(mm / 10).replace('.', ','); }
-function dimensions(app) { return app.pending ? PENDING_LABEL : `${cm(app.width_mm)} × ${cm(app.height_mm)} cm${app.scaleNote ? ' ≈' : ''}`; }
+// G61: a standard (unmeasured) size says so next to the numbers; ≈ marks every non-automatic size.
+const standardMark = app => app.measureState === 'standart' ? ' (standart)' : '';
+function dimensions(app) { return app.pending ? PENDING_LABEL : `${cm(app.width_mm)} × ${cm(app.height_mm)} cm${app.scaleNote ? ' ≈' : ''}${standardMark(app)}`; }
 
 // Measurements taken with the geometric mean of two scales carry "≈"; the note is printed once as a footnote.
 function scaleFootnote(doc, apps, x, y, width) {
@@ -408,7 +410,7 @@ const hexColor = value => /^#[0-9a-f]{6}$/i.test(value ?? '') ? value : null;
 function cardColor(line, app) { return hexColor(line?.colorHex) ?? hexColor(app.previewBackground) ?? '#eeeeee'; }
 const isDark = hex => [1, 3, 5].reduce((sum, i, k) => sum + parseInt(hex.slice(i, i + 2), 16) * [0.299, 0.587, 0.114][k], 0) < 140;
 function sizeLine(app) {
-  return app.pending ? PENDING_LABEL : `En: ${cm(app.width_mm)} cm   Boy: ${cm(app.height_mm)} cm${app.scaleNote ? ' ≈' : ''}`;
+  return app.pending ? PENDING_LABEL : `En: ${cm(app.width_mm)} cm   Boy: ${cm(app.height_mm)} cm${app.scaleNote ? ' ≈' : ''}${standardMark(app)}`;
 }
 // One line that shrinks (down to 6 pt) instead of wrapping or leaving its box.
 function lineText(doc, value, x, y, width, size, bold, color = '#111111') {

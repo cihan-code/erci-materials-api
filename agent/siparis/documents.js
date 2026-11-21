@@ -12,6 +12,8 @@ const { reasonTexts } = require('./vectorReasons');
 const childProcess = require('node:child_process');
 const { buildWorkshopMessage, createWorkshopHandler } = require('./workshop');
 const { registerHandler } = require('./outbox');
+const { decide, formNote } = require('./olcuKarar');
+const positionStandards = require('./konumStandartlari');
 const RECIPE_PRODUCTS = require('../operations/recipes.json').products;
 // Forms print the recipe label ("Tişört"), not the product key ("tisort"); an unknown key prints as stored.
 const productLabel = key => RECIPE_PRODUCTS[key]?.label || key;
@@ -647,7 +649,7 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPendi
         applications.push({type:app.kind,position:app.position,width_mm:app.width_mm,height_mm:app.height_mm,lineIds:[lineId],
           preview:preview(design)||extractedByApp.get(app.id),previewVector:previewVector(app,design),placement:formPlacement(app,source,image,design),
           ...(source.method==='elle' && typeof source.kaynak==='string' && source.kaynak ? {measureNote:source.kaynak} : {}),
-          ...(source.scaleMode==='geo_ortalama'&&source.scaleNote?{scaleNote:String(source.scaleNote)}:{})});
+          ...measureNotes(source)});
       }
       const sizes=JSON.parse(l.sizes_json);
       if (!omitQuantities && Object.keys(sizes).length && Object.values(sizes).reduce((a,b)=>a+b,0)!==l.quantity) fail(`Satır ${l.id}: PDF için adetlere eşit beden dağılımı gerekli`,409);
@@ -659,6 +661,11 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPendi
     }),
     applications,
   };
+}
+// "≈" on the forms: a mockup scale note (G45) and, from G61, an approximate or standard size.
+function measureNotes(source) {
+  const notes=[...(source.scaleMode==='geo_ortalama'&&source.scaleNote?[String(source.scaleNote)]:[]),...(formNote(source)?[formNote(source)]:[])];
+  return notes.length ? {scaleNote:notes.join(' · '),...(source.olcuDurumu?{measureState:source.olcuDurumu}:{})} : {};
 }
 // The worker calibrates the scale on the pattern's own flat drawing (G45b).
 // One result per drawing file and L values is kept for this process; a
@@ -866,7 +873,8 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
         result={width_mm:null,height_mm:null,needs_confirmation:true,reasons:[`Otomatik ölçü tamamlanamadı: ${e.message}`],
           measure_source:{method:'otomatik',flatId:input.flat?.id??null,flatAd:input.flat?.ad??null,refBeden:input.flat?.refBeden??null,refCm:input.flat?.refLengthCm??null,chestPx:null,designBoxPx:null,scale:null,confidence:0,gorselFileId:input.image.id,desenFileId:(input.design?.id??null)}};
       }
-      result=explain(result,input);
+      result=decide(explain(result,input),{position:input.position,product:input.product,standards:positionStandards.load(dataDir),
+        designRatio:input.design ? result.measure_source?.designContentRatio ?? null : null});
       signal.throwIfAborted();
       tx(db,()=> {
         const current=draft(db,versionId);unlocked(db,versionId);
