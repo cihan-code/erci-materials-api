@@ -3,6 +3,7 @@
 // No database or filesystem access here: this module runs in the render worker.
 let canvasLib; // Native canvas is loaded only in the child, never by HTTP routing.
 const { imageSize, measureSleeve } = require('./measure');
+const bodyPoints = require('./olcuNoktalari');
 // Measurement uses a bounded raster; original uploads and their dimensions stay intact.
 const MAX_EDGE = 2000;
 const MIN_SYMMETRY = .85, MIN_MATCH_CONFIDENCE = .78;
@@ -828,7 +829,7 @@ const mockupNote=(difference,label)=>`Mockup oranı kalıptan farklı (%${percen
 // ratio is split evenly between the axes (sqrt), so a mockup drawn like the
 // pattern gets one scale and the 15/35% bands apply to what remains.
 function flatCalibration(p,flat,kind) {
-  const L=flat?.olculerL||{},positive=n=>Number.isFinite(n)&&n>0;
+  const L=bodyPoints.points(flat,{requireL:false}).cm,positive=n=>Number.isFinite(n)&&n>0;
   if(kind==='bacak') {
     if(!positive(L.yan_boy)||!positive(L.basen))return null;
     const ref=legSilhouette(p);
@@ -1156,7 +1157,7 @@ async function autoMeasureSleeve({image,design,flat,product,position}) {
   const scalePair=scalePairFor(flat,product),pairLabel=scalePair==='boy_gogus'?'boy/göğüs':'boy/etek';
   const started=performance.now(),reasons=[],source={scalePair,method:'otomatik',sleeveMethod:'kol_ekseni_desen_orani',scaleFrom:null,measuredAxis:null,flatId:flat?.id??null,flatAd:flat?.ad??null,refBeden:flat?.refBeden??null,refCm:flat?.refLengthCm??null,olculerL:flat?.olculerL??null,gorselFileId:image?.id??null,desenFileId:design?.id??null,selectedView:image?.gorunum||'on',mmPerPx:null,designBoxPx:null,confidence:0};
   let width=null,height=null;
-  const measurements=flat?.refBeden==='L'?flat.olculerL||{}:{};
+  const measurements=bodyPoints.points(flat).cm;
   if(flat?.refBeden!=='L')reasons.push('Ürünün L kalıp referansı bulunamadı: kol için L beden ölçüsü gerekli.');
   const cal=await calibrationFor(flat,scalePair),k=calibrationFactor(cal);
   source.kalibrasyon=cal;
@@ -1277,7 +1278,7 @@ async function autoMeasureLeg({image,design,flat,product,position}) {
   const started=performance.now(),reasons=[],source={scalePair:'yan_boy_basen',method:'otomatik',flatId:flat?.id??null,flatAd:flat?.ad??null,refBeden:flat?.refBeden??null,olculerL:flat?.olculerL??null,gorselFileId:image?.id??null,desenFileId:design?.id??null,selectedView:'on',designBoxPx:null,mmPerPx:null,scale:null,confidence:0};
   let width=null,height=null;
   const positive=n=>Number.isFinite(n)&&n>0;
-  const measurements=flat?.refBeden==='L'&&flat?.olculerL&&typeof flat.olculerL==='object'?flat.olculerL:{};
+  const measurements=bodyPoints.points(flat).cm;
   if(flat?.refBeden!=='L')reasons.push('Ürünün L kalıp referansı bulunamadı: bacak için L beden ölçüsü gerekli.');
   else if(!positive(measurements.yan_boy)||!positive(measurements.basen))reasons.push('Bacak ölçeği için kalıbın L yan_boy ve basen ölçüleri gerekli; ikisi birlikte bulunamadı.');
   const cal=await calibrationFor(flat,'bacak'),k=calibrationFactor(cal);
@@ -1382,7 +1383,7 @@ async function autoMeasure({image,design,flat,product,position,color,viewHint=nu
   if(viewHint)source.viewHint=viewHint;
   let width=null,height=null;
   const positive=n=>Number.isFinite(n)&&n>0;
-  const measurements=flat?.refBeden==='L' && flat?.olculerL && typeof flat.olculerL==='object' ? flat.olculerL : {};
+  const measurements=bodyPoints.points(flat).cm;
   if(flat?.refBeden!=='L')reasons.push('Ürünün L kalıp referansı bulunamadı: kayıt L beden değil veya belirtilmemiş (geçerli referans sayısı 0).');
   if(!positive(measurements.omuzdan_boy)&&!positive(measurements[scalePair==='boy_gogus'?'gogus':'etek']))reasons.push(`Ürün için geçerli L beden kalıp ölçüleri bulunamadı (boy ve ${horizontalLabel} ölçüsü sayısı 0).`);
   if(viewForPosition(position)==='teyit')reasons.push('Ürün görünümü uygulama konumuyla eşleştirilemedi (geçerli görünüm sayısı 0).');
