@@ -8,7 +8,7 @@ const { authFor, login } = require('./auth');
 const orders = require('./orders');
 const { approveVersion } = require('./approval');
 const stock = require('./stock');
-const { kartelaView } = require('./kartela');
+const { kartelaView, fabricTypeList } = require('./kartela');
 const outbox = require('./outbox');
 module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, recipes } = {}) {
   const db = suppliedDb || openDb(path.join(dataDir, 'siparis.sqlite'));
@@ -21,15 +21,16 @@ module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, r
   require('./routes-panel')(router, db); // read-only Ajan Paneli summary; own auth (service key or user token)
   router.use(requireUser());
   router.use(require('./routes-belge')({db,dataDir}));
-  router.get('/siparisler', (req,res) => res.json(db.prepare('SELECT * FROM orders ORDER BY id DESC').all()));
+  router.get('/siparisler', (req,res) => res.json(db.prepare('SELECT * FROM orders WHERE deleted_at IS NULL ORDER BY id DESC').all()));
   router.post('/siparisler', wrap((req,res) => res.status(201).json(orders.createOrder(db,req.body,req.user))));
   router.get('/siparisler/:id', wrap((req,res) => {
-    const order = db.prepare('SELECT * FROM orders WHERE id=?').get(req.params.id);
+    const order = db.prepare('SELECT * FROM orders WHERE id=? AND deleted_at IS NULL').get(req.params.id);
     if (!order) fail('Sipariş bulunamadı',404);
     res.json({...order,versions:db.prepare('SELECT id FROM order_versions WHERE order_id=? ORDER BY version_no').all(order.id).map(v => orders.snapshot(db,v.id))});
   }));
   router.patch('/siparisler/:id', wrap((req,res) => res.json(orders.updateOrder(db,Number(req.params.id),req.body,req.user))));
   router.delete('/siparisler/:id', wrap((req,res) => res.json(orders.cancelOrder(db,Number(req.params.id),req.user))));
+  router.post('/siparisler/:id/sil', wrap((req,res) => res.json(orders.deleteOrder(db,Number(req.params.id),req.body,req.user))));
   router.get('/surumler/:id', wrap((req,res) => res.json(orders.snapshot(db,Number(req.params.id)))));
   router.post('/surumler/:id/satirlar', wrap((req,res) => res.status(201).json(orders.addLine(db,Number(req.params.id),req.body,req.user))));
   router.post('/satirlar/:id/uygulamalar', wrap((req,res) => res.status(201).json(orders.addApplication(db,Number(req.params.id),req.body,req.user))));
@@ -61,6 +62,7 @@ module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, r
   router.post('/surumler/:id/onay', requireUser('onay'), wrap((req,res) => res.json(approveVersion(db,{versionId:Number(req.params.id),fileId:req.body.fileId,userId:req.user.id,recipes}))));
   router.post('/surumler/:id/revizyon', wrap((req,res) => res.status(201).json(orders.reviseVersion(db,Number(req.params.id),req.body,req.user))));
   router.get('/stok', (req,res) => res.json(stock.stockView(db)));
+  router.get('/kumas-turleri', (req,res) => res.json(fabricTypeList(db)));
   router.get('/kartela', (req,res) => res.json(kartelaView()));
   router.post('/stok/kalemler', wrap((req,res) => {
     try { const item = stock.createStockItem(db,req.body,req.user.id); res.status(item.mevcut ? 200 : 201).json(item); }

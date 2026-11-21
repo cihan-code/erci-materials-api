@@ -149,4 +149,30 @@ function applyKartela(db, { dry = false, kartela = KARTELA } = {}) {
   return { rows, changed: count('degisir'), unchanged: count('uygun'), unmatched: count('eslesmedi') };
 }
 
-module.exports = { cardNo, loadKartela, kartelaView, fabricName, itemKartela, withKartela, resolveKartelaItem, kartelaPlan, applyKartela };
+// G59: fabric types for the order line's "Kumaş türü" list, one row per type (never per colour). A type carries its card
+// colours (with the stock item that already exists for each, or none) plus stock-only colours the card does not list.
+function fabricTypeList(db, k = KARTELA) {
+  const items = db.prepare('SELECT * FROM stock_items ORDER BY id').all();
+  const types = new Map();
+  const add = (tur, ad, card) => { if (!types.has(tur)) types.set(tur, { tur, ad, kartela: card ? { id: card.id, ad: card.ad } : null, renkler: [] }); return types.get(tur); };
+  const byKey = new Map(items.map(i => [i.fabric_key, i]));
+  for (const card of k.cards) for (const f of card.kumaslar) {
+    const row = add(f.tur, f.ad, card), used = new Set();
+    for (const r of card.renkler) {
+      const item = byKey.get(`${f.tur}|${r.renkKey}`);
+      if (item) used.add(item.id);
+      row.renkler.push({ no: r.no, renk: r.renk, hex: r.hex, kartelada: true, stokKalemId: item?.id ?? null,
+        ...(r.dokulu ? { dokulu: true } : {}), ...(r.teyit ? { teyit: r.teyit } : {}) });
+    }
+    row.used = used;
+  }
+  for (const item of items) {
+    const parts = keyParts(item.fabric_key), legacy = String(item.fabric_key).startsWith('legacy:');
+    const row = legacy || !parts ? add(item.fabric_key, item.name, null) : add(parts.type, fabricName(parts.type, k), cardFor(parts.type, k));
+    if (row.used?.has(item.id)) continue;
+    row.renkler.push({ no: cardNo(item.color_no), renk: item.color_name ?? '', hex: item.color_hex ?? null, kartelada: false, stokKalemId: item.id });
+  }
+  return [...types.values()].map(({ used, ...row }) => row).sort((a, b) => a.ad.localeCompare(b.ad, 'tr'));
+}
+
+module.exports = { fabricTypeList, cardNo, loadKartela, kartelaView, fabricName, itemKartela, withKartela, resolveKartelaItem, kartelaPlan, applyKartela };

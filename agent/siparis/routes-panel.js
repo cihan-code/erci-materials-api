@@ -14,7 +14,7 @@ function panelData(db) {
     surum: 1,
     uretildi: new Date().toISOString(),
     onay_bekleyen: rows(`SELECT o.order_no AS siparis_no,v.version_no AS surum,o.customer_name AS musteri,v.created_at AS gonderildi
-      FROM order_versions v JOIN orders o ON o.id=v.order_id WHERE v.status='onay_bekliyor' ORDER BY v.id`),
+      FROM order_versions v JOIN orders o ON o.id=v.order_id WHERE v.status='onay_bekliyor' AND o.deleted_at IS NULL ORDER BY v.id`),
     teyitler: {
       toplam: confirmations.reduce((s, r) => s + r.n, 0),
       turlere_gore: Object.fromEntries(confirmations.map(r => [r.kind, r.n])),

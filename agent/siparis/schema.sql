@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE TABLE IF NOT EXISTS orders (
  id INTEGER PRIMARY KEY, order_no TEXT NOT NULL UNIQUE, job_no TEXT, customer_name TEXT,
- created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+ created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+ deleted_at TEXT, deleted_by INTEGER REFERENCES users(id)
 );
 CREATE TABLE IF NOT EXISTS order_versions (
  id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id), version_no INTEGER NOT NULL,
@@ -23,7 +24,7 @@ CREATE TABLE IF NOT EXISTS stock_items (
 );
 CREATE TABLE IF NOT EXISTS order_lines (
  id INTEGER PRIMARY KEY, version_id INTEGER NOT NULL REFERENCES order_versions(id), line_key TEXT NOT NULL,
- product_key TEXT NOT NULL, recipe_version TEXT, fabric_item_id INTEGER REFERENCES stock_items(id), color_name TEXT, kalip_id TEXT,
+ product_key TEXT NOT NULL, recipe_version TEXT, fabric_item_id INTEGER REFERENCES stock_items(id), color_name TEXT, kalip_id TEXT, fabric_type TEXT,
  quantity INTEGER NOT NULL CHECK(typeof(quantity)='integer' AND quantity>=0), sizes_json TEXT NOT NULL DEFAULT '{}',
  lining INTEGER NOT NULL DEFAULT 0 CHECK(lining IN (0,1)), material_items_json TEXT NOT NULL DEFAULT '{}', note TEXT,
  numune INTEGER NOT NULL DEFAULT 0 CHECK(numune IN (0,1)),

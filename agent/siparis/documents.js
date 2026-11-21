@@ -581,7 +581,7 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPendi
       // The fabric colour of the stock item (same colour name) is the application cards' ground.
       const colorHex=garmentColor(db,l.id);
       const flat=require('./flats').selection(db,l).flat;
-      return {id:lineId,product:productLabel(l.product_key),...(flat?.bedenTablosu?{bedenTablosu:flat.bedenTablosu}:{}),...(colorHex?{colorHex}:{}),color:l.color_name ? require('./pdf').stockColorLabel(l.color_name,item) : 'Renk belirtilmedi',fabric:item ? item.name : 'Kumaş belirtilmedi',sizes,quantity:l.quantity,images,...(l.numune?{numune:true}:{}),...(l.note?{note:l.note}:{})};
+      return {id:lineId,product:productLabel(l.product_key),...(flat?.bedenTablosu?{bedenTablosu:flat.bedenTablosu}:{}),...(colorHex?{colorHex}:{}),color:l.color_name ? require('./pdf').stockColorLabel(l.color_name,item) : 'Renk belirtilmedi',fabric:item ? item.name : l.fabric_type ? require('./kartela').fabricName(l.fabric_type) : 'Kumaş belirtilmedi',sizes,quantity:l.quantity,images,...(l.numune?{numune:true}:{}),...(l.note?{note:l.note}:{})};
     }),
     applications,
   };

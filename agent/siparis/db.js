@@ -9,7 +9,9 @@ const REBUILDS = {
   order_lines: sql => /quantity>0\)/.test(sql) && !sql.includes('numune'),
   files: sql => /UNIQUE\s*\(\s*version_id\s*,\s*kind\s*\)/i.test(sql),
 };
-const ADDED_COLUMNS = { order_lines: { kalip_id: 'TEXT', note: 'TEXT' }, stock_items: { color_hex: 'TEXT' }, stock_movements: { allocation_id: 'INTEGER REFERENCES allocations(id)' },
+const ADDED_COLUMNS = { order_lines: { kalip_id: 'TEXT', note: 'TEXT', fabric_type: 'TEXT' },
+  // G59: soft delete of an order and the fabric type of a line (colour is its own field).
+  orders: { deleted_at: 'TEXT', deleted_by: 'INTEGER REFERENCES users(id)' }, stock_items: { color_hex: 'TEXT' }, stock_movements: { allocation_id: 'INTEGER REFERENCES allocations(id)' },
   invoice_lines: { source: 'TEXT', invoice_no: 'TEXT', invoice_date: 'TEXT', supplier_vkn: 'TEXT', unit_price: 'REAL', content_hash: 'TEXT',
     match_reasons_json: 'TEXT', created_at: 'TEXT', updated_at: 'TEXT', delivery_request_json: 'TEXT' } };
 const columns = (db, table) => db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);

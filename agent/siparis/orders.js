@@ -3,10 +3,13 @@ const crypto = require('crypto');
 const { tx, audit, fail, integer } = require('./db');
 const { assertUser } = require('./auth');
 const flats = require('./flats');
+const { fabricKey, typeKey } = require('./matching');
 const uid = user => user && typeof user === 'object' ? user.id : user;
 function version(db, id) {
   const v = db.prepare('SELECT * FROM order_versions WHERE id=?').get(id);
   if (!v) fail('Sürüm bulunamadı', 404);
+  // A soft-deleted order is gone for every screen and endpoint that reaches it through a version.
+  if (db.prepare('SELECT deleted_at FROM orders WHERE id=?').get(v.order_id)?.deleted_at) fail('Sürüm bulunamadı', 404);
   return v;
 }
 function editable(db, id) {
@@ -25,7 +28,7 @@ function snapshot(db, versionId) {
     ? 'SELECT a.*,(SELECT s.file_id FROM document_application_sources s WHERE s.application_id=a.id) AS desenDosyaId FROM applications a WHERE a.line_id=? ORDER BY a.id'
     : 'SELECT * FROM applications WHERE line_id=? ORDER BY id';
   return { ...v, lines: db.prepare('SELECT * FROM order_lines WHERE version_id=? ORDER BY id').all(versionId).map(l => ({
-    ...l, ...flats.lineSelection(db,l), applications: db.prepare(appsSql).all(l.id).map(a => ({ ...a, desenDosyaId: a.desenDosyaId ?? null }))
+    ...l, stokKalemiYok: !!l.fabric_type && l.fabric_item_id == null, ...flats.lineSelection(db,l), applications: db.prepare(appsSql).all(l.id).map(a => ({ ...a, desenDosyaId: a.desenDosyaId ?? null }))
   })), files: db.prepare(filesSql).all(versionId) };
 }
 function insertApplication(db, lineId, app) {
@@ -44,6 +47,24 @@ function jsonObject(value, label) {
   if (typeof obj === 'string') { try { obj = JSON.parse(obj); } catch { fail(`${label}: geçersiz JSON`); } }
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) fail(`${label}: nesne gerekli`);
   return obj;
+}
+// G59: the line names a fabric type and a colour separately. The stock item is found by type + colour (the same key invoices
+// use); with no such item the line stays by name ("stokta kalem yok") and no stock item is opened. Lines saved with only
+// fabric_item_id (the old combined choice) keep that item and have no type.
+function resolveFabric(db, line) {
+  const raw = typeof line.fabric_type === 'string' ? line.fabric_type.trim() : '';
+  if (!raw) return { type: null, itemId: line.fabric_item_id ?? null };
+  if (raw.length > 100) fail('Kumaş türü en çok 100 karakter olabilir');
+  if (raw.startsWith('legacy:')) {
+    const item = db.prepare('SELECT id FROM stock_items WHERE fabric_key=?').get(raw);
+    if (!item) fail('Kumaş türü bulunamadı');
+    return { type: raw, itemId: item.id };
+  }
+  const type = typeKey(raw);
+  if (!type) fail('Geçersiz kumaş türü');
+  const key = typeof line.color_name === 'string' && line.color_name.trim() ? fabricKey(type, line.color_name) : null;
+  const item = key ? db.prepare('SELECT id FROM stock_items WHERE fabric_key=?').get(key) : null;
+  return { type, itemId: item?.id ?? null };
 }
 function insertLine(db, versionId, line, lineKey, sourceApplications = []) {
   // A sample line (numune) may have no quantity yet; every other line needs at least one piece.
@@ -64,9 +85,11 @@ function insertLine(db, versionId, line, lineKey, sourceApplications = []) {
   if (note && note.length > 500) fail('Kumaş/kalıp açıklaması en çok 500 karakter olabilir');
   const kalipId = line.kalipId ?? line.kalip_id ?? null;
   if (kalipId!=null && !flats.selection(db,line).candidates.some(f=>f.id===kalipId)) fail('Kalıp bu ürünün adaylarından biri olmalı');
+  const fabric = resolveFabric(db, line);
   const id = Number(db.prepare(`INSERT INTO order_lines(version_id,line_key,product_key,fabric_item_id,color_name,quantity,sizes_json,lining,material_items_json,numune)
-    VALUES(?,?,?,?,?,?,?,?,?,?)`).run(versionId, lineKey || crypto.randomUUID(), line.product_key, line.fabric_item_id ?? null,
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run(versionId, lineKey || crypto.randomUUID(), line.product_key, fabric.itemId,
     line.color_name ?? null, line.quantity, JSON.stringify(sizes), [true,1,'var'].includes(line.lining) ? 1 : 0, JSON.stringify(materials), numune ? 1 : 0).lastInsertRowid);
+  if (fabric.type) db.prepare('UPDATE order_lines SET fabric_type=? WHERE id=?').run(fabric.type,id);
   if (kalipId!=null) db.prepare('UPDATE order_lines SET kalip_id=? WHERE id=?').run(kalipId,id);
   if (note) db.prepare('UPDATE order_lines SET note=? WHERE id=?').run(note,id);
   for (const a of line.applications || []) {
@@ -90,6 +113,7 @@ function createOrder(db, input, user) {
   return tx(db, () => {
     assertUser(db, userId);
     if (typeof input.order_no !== 'string' || !input.order_no.trim()) fail('Sipariş numarası gerekli');
+    if (db.prepare('SELECT 1 FROM orders WHERE order_no=? AND deleted_at IS NOT NULL').get(input.order_no.trim())) fail('Bu sipariş numarası silinmiş bir siparişte kayıtlı; farklı bir numara verin', 409);
     const orderId = Number(db.prepare('INSERT INTO orders(order_no,job_no,customer_name) VALUES(?,?,?)').run(input.order_no.trim(), input.job_no ?? null, input.customer_name ?? null).lastInsertRowid);
     const versionId = Number(db.prepare('INSERT INTO order_versions(order_id,version_no,created_by) VALUES(?,1,?)').run(orderId, userId).lastInsertRowid);
     for (const line of input.lines || []) insertLine(db, versionId, line);
@@ -189,7 +213,7 @@ function updateOrder(db, orderId, changes, user) {
   return tx(db, () => {
     assertUser(db, uid(user));
     const order = db.prepare('SELECT * FROM orders WHERE id=?').get(orderId);
-    if (!order) fail('Sipariş bulunamadı', 404);
+    if (!order || order.deleted_at) fail('Sipariş bulunamadı', 404);
     if (db.prepare("SELECT id FROM order_versions WHERE order_id=? AND status<>'taslak'").get(orderId)) fail('Onaya gönderilmiş sipariş için revizyon gerekli', 409);
     db.prepare('UPDATE orders SET job_no=?,customer_name=? WHERE id=?').run(changes.job_no ?? order.job_no, changes.customer_name ?? order.customer_name, orderId);
     audit(db, uid(user), 'siparis_duzenle', orderId); return db.prepare('SELECT * FROM orders WHERE id=?').get(orderId);
@@ -198,10 +222,42 @@ function updateOrder(db, orderId, changes, user) {
 function cancelOrder(db, orderId, user) {
   return tx(db, () => {
     assertUser(db, uid(user));
-    if (!db.prepare('SELECT id FROM orders WHERE id=?').get(orderId)) fail('Sipariş bulunamadı', 404);
+    if (!db.prepare('SELECT id FROM orders WHERE id=? AND deleted_at IS NULL').get(orderId)) fail('Sipariş bulunamadı', 404);
     if (db.prepare('SELECT a.id FROM approvals a JOIN order_versions v ON v.id=a.version_id WHERE v.order_id=?').get(orderId)) fail('Onaylı sipariş iptali için stok iade politikası gerekli', 409);
     db.prepare("UPDATE order_versions SET status='iptal' WHERE order_id=? AND status<>'eski'").run(orderId);
     audit(db, uid(user), 'siparis_iptal', orderId); return { ok: true };
   });
 }
-module.exports = { createOrder, addLine, addApplication, addFile, submitForApproval, reviseVersion, updateOrder, cancelOrder, snapshot, version, retireWorkshopJobs };
+// G59: soft delete from the order list. The row, its versions and files stay; deleted_at/deleted_by hide it everywhere.
+// There is no stock-release path for a whole order (cancelOrder refuses approved orders too), so an order that holds a
+// reservation, a stock movement or a workshop/cost hand-off is refused with the reason instead of touching the ledger.
+function deleteOrder(db, orderId, input, user) {
+  return tx(db, () => {
+    const userId = uid(user); assertUser(db, userId);
+    const order = db.prepare('SELECT * FROM orders WHERE id=? AND deleted_at IS NULL').get(orderId);
+    if (!order) fail('Sipariş bulunamadı', 404);
+    if (input?.onay !== true) fail('Silmek için onay gerekli', 400);
+    const lines = db.prepare('SELECT l.id FROM order_lines l JOIN order_versions v ON v.id=l.version_id WHERE v.order_id=?').all(orderId).map(l => l.id);
+    const versions = db.prepare('SELECT id FROM order_versions WHERE order_id=?').all(orderId).map(v => v.id);
+    const marks = list => list.map(() => '?').join(',');
+    if (lines.length && (db.prepare(`SELECT 1 FROM stock_movements WHERE type='cikis' AND order_line_id IN (${marks(lines)})`).get(...lines) ||
+        db.prepare(`SELECT 1 FROM allocations WHERE consumed_milli>0 AND order_line_id IN (${marks(lines)})`).get(...lines)))
+      fail('Bu siparişte stok çıkışı var; silinemez. Önce stok çıkışı geri alınmalı (yöneticiye danışın).', 409);
+    if (db.prepare('SELECT 1 FROM approvals a JOIN order_versions v ON v.id=a.version_id WHERE v.order_id=?').get(orderId) ||
+        (lines.length && db.prepare(`SELECT 1 FROM allocations WHERE (reserved_milli>0 OR shortage_milli>0) AND order_line_id IN (${marks(lines)})`).get(...lines)))
+      fail('Bu sipariş onaylandı ve stokta ayırması var; stok iade işlemi olmadan silinemez (yöneticiye danışın).', 409);
+    if (versions.length && db.prepare(`SELECT 1 FROM outbox WHERE status IN ('tamam','isleniyor') AND version_id IN (${marks(versions)})`).get(...versions))
+      fail('Bu sipariş atölyeye ya da maliyete gönderilmiş; silinemez.', 409);
+    // Open checks of the order's lines and applications would keep counting in the team's "Teyitler" list.
+    const open = db.prepare(`SELECT c.id FROM confirmations c WHERE c.status='acik' AND (
+        (c.ref_table='order_lines' AND c.ref_id IN (${marks(lines.length ? lines : [0])})) OR
+        (c.ref_table='applications' AND c.ref_id IN (SELECT a.id FROM applications a WHERE a.line_id IN (${marks(lines.length ? lines : [0])}))) OR
+        (c.ref_table='order_versions' AND c.ref_id IN (${marks(versions.length ? versions : [0])})))`)
+      .all(...(lines.length ? lines : [0]), ...(lines.length ? lines : [0]), ...(versions.length ? versions : [0])).map(c => c.id);
+    for (const id of open) db.prepare("UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE id=?").run(userId, id);
+    db.prepare('UPDATE orders SET deleted_at=?,deleted_by=? WHERE id=?').run(new Date().toISOString(), userId, orderId);
+    audit(db, userId, 'siparis_sil', orderId, { orderNo: order.order_no, versions, kapatilanTeyitler: open });
+    return { ok: true, id: orderId, order_no: order.order_no };
+  });
+}
+module.exports = { createOrder, deleteOrder, addLine, addApplication, addFile, submitForApproval, reviseVersion, updateOrder, cancelOrder, snapshot, version, retireWorkshopJobs };
