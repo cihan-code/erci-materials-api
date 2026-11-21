@@ -325,6 +325,32 @@ function validPlacement(placement) {
     box.w > 0 && box.h > 0 && box.x + box.w <= rasterWidth && box.y + box.h <= rasterHeight;
 }
 
+// G53: one picture holding the front and the back garment shows, in each slot, only
+// the garment that view pairing named for it. The whole picture is still what was
+// measured; placements move with the cut. A failed cut keeps the whole picture.
+async function cutGarment(image, crop, page) {
+  if (!crop || !image || crop.page !== page) return image;
+  try {
+    const canvasLib = require('@napi-rs/canvas');
+    const img = await canvasLib.loadImage(image.buffer);
+    const sx = img.width / crop.rasterWidth, sy = img.height / crop.rasterHeight;
+    const w = Math.max(1, Math.round(crop.w * sx)), h = Math.max(1, Math.round(crop.h * sy));
+    const canvas = canvasLib.createCanvas(w, h);
+    canvas.getContext('2d').drawImage(img, crop.x * sx, crop.y * sy, crop.w * sx, crop.h * sy, 0, 0, w, h);
+    const placements = [];
+    for (const app of image.placements) {
+      // A placement measured on another raster size of the same picture is scaled first.
+      const { box, rasterWidth, rasterHeight } = app.placement, kx = crop.rasterWidth / rasterWidth, ky = crop.rasterHeight / rasterHeight;
+      const moved = { ...app.placement, rasterWidth: Math.round(crop.w), rasterHeight: Math.round(crop.h),
+        box: { x: box.x * kx - crop.x, y: box.y * ky - crop.y, w: box.w * kx, h: box.h * ky } };
+      if (validPlacement(moved)) { app.placement = moved; placements.push(app); }
+    }
+    return { buffer: canvas.toBuffer('image/png'), placements };
+  } catch {
+    return image;
+  }
+}
+
 async function resolveProductImages(order) {
   for (const line of order.lines) {
     const images = { ...line.images };
@@ -336,7 +362,7 @@ async function resolveProductImages(order) {
         placement && width_mm > 0 && height_mm > 0 && lineIds?.length === 1 && lineIds[0] === line.id &&
         source.fileId != null && placement.fileId === source.fileId && placement.view === view && source.view === view && validPlacement(placement));
       if (source.mime !== 'application/pdf') {
-        images[key] = { buffer: source.buffer, placements: placements.filter(app => app.placement.page === 1) };
+        images[key] = await cutGarment({ buffer: source.buffer, placements: placements.filter(app => app.placement.page === 1) }, source.crop, 1);
         continue;
       }
       const pages = new Set(placements.map(app => app.placement.page));
@@ -345,7 +371,7 @@ async function resolveProductImages(order) {
         const { rasterPages } = require('../autoMeasure');
         const { PNG } = require('pngjs');
         const [raster] = await rasterPages(source, 1000, [selected ?? 1]);
-        images[key] = raster ? { buffer: PNG.sync.write(raster), placements: selected ? placements : [] } : undefined;
+        images[key] = raster ? await cutGarment({ buffer: PNG.sync.write(raster), placements: selected ? placements : [] }, source.crop, selected ?? 1) : undefined;
       } catch {
         // An unavailable optional preview leaves the listed dimensions readable.
         images[key] = undefined;

@@ -395,6 +395,30 @@ function artworkFor(db,v,line,app) {
   const key=JSON.stringify([ARTWORK_EXTRACTION_REVISION,line.product_key,line.color_name??null,app.position,app.kind,image?.id,image?.sha256,image?.gorunum,gap]);
   return {image,key,gap};
 }
+// G53: the garment of `view` in a product picture that holds two (autoMeasure pairViews),
+// as recorded by the applications measured on it. All of them must name one garment
+// for the view; disagreement, an undecided ('teyit') or missing pairing gives null
+// and the form keeps the whole picture, so nothing uncertain is hidden.
+function garmentCrop(apps,fileId,view) {
+  let found=null;
+  for (const app of apps) {
+    const s=provenance(app);
+    if (s.gorselFileId!==fileId || !Array.isArray(s.views)) continue;
+    const {rasterWidth:W,rasterHeight:H}=s, page=s.selectedPage ?? 1;
+    if (![W,H].every(n=>Number.isSafeInteger(n) && n>0)) return null;
+    const garments=s.views.filter(g=>g?.page===page && g.productBoxPx && [g.productBoxPx.x,g.productBoxPx.y,g.productBoxPx.w,g.productBoxPx.h].every(Number.isFinite));
+    if (garments.length<2) continue;
+    const named=garments.filter(g=>g.view===view);
+    if (named.length!==1) return null;
+    const b=named[0].productBoxPx, pad=Math.round(Math.max(b.w,b.h)*.04);
+    const x=Math.max(0,b.x-pad), y=Math.max(0,b.y-pad);
+    const crop={page,x,y,w:Math.min(W,b.x+b.w+pad)-x,h:Math.min(H,b.y+b.h+pad)-y,rasterWidth:W,rasterHeight:H};
+    const same=a=>['x','w'].every(k=>Math.abs(a[k]/a.rasterWidth-crop[k]/W)<=.02) && ['y','h'].every(k=>Math.abs(a[k]/a.rasterHeight-crop[k]/H)<=.02);
+    if (found && (found.page!==page || !same(found))) return null;
+    found ??= crop;
+  }
+  return found;
+}
 function formPlacement(app,source,image,design) {
   const locatedMeasurement=['otomatik','otomatik_renk'].includes(source.method) || (source.method==='elle' && source.elleTeyit===true);
   if (!image || !locatedMeasurement ||
@@ -515,10 +539,20 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPendi
     lines:v.lines.map(l=> {
       const images={},lineId=String(l.id);
       // Match automatic measurement's use of the latest immutable upload for each view.
+      const files={};
       for (const [key,view] of [['front','on'],['back','arka']]) {
         const file=v.files.findLast(f=>f.kind==='urun_gorsel' && f.line_id===l.id && f.gorunum===view);
         const mime={'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.pdf':'application/pdf'}[path.extname(file?.path||'').toLowerCase()];
-        if (mime) images[key]={fileId:file.id,view,mime,buffer:readFile(dataDir,file)};
+        if (mime) { files[key]={file,mime}; images[key]={fileId:file.id,view,mime,buffer:readFile(dataDir,file)}; }
+      }
+      // A picture with both garments fills each slot with its own garment; a single upload fills both.
+      for (const [key,view,other] of [['front','on','back'],['back','arka','front']]) {
+        const own=images[key] && garmentCrop(l.applications,images[key].fileId,view);
+        if (own) images[key].crop=own;
+        else if (!images[key] && files[other]) {
+          const crop=garmentCrop(l.applications,files[other].file.id,view);
+          if (crop) images[key]={fileId:files[other].file.id,view,mime:files[other].mime,buffer:images[other].buffer,crop};
+        }
       }
       for (const app of l.applications) {
         if (pending.has(app.id)) {

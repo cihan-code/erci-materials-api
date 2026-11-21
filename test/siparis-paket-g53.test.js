@@ -216,3 +216,74 @@ test('G53-5 dimension labels never overlap and stay on the page in all three for
     }
   }
 });
+
+// Product pictures drawn on a page: [width, height] of every image except small ones (logos stay out by size).
+async function pictures(buffer, page = 1) {
+  const lib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const doc = await lib.getDocument({ data: Uint8Array.from(buffer), isEvalSupported: false, verbosity: 0 }).promise;
+  try {
+    const ops = await (await doc.getPage(page)).getOperatorList(), out = [];
+    let transform = null;
+    for (let i = 0; i < ops.fnArray.length; i++) {
+      if (ops.fnArray[i] === lib.OPS.transform) transform = Array.from(ops.argsArray[i]);
+      if (ops.fnArray[i] === lib.OPS.paintImageXObject && transform) out.push({ x: transform[4], w: Math.abs(transform[0]), h: Math.abs(transform[3]) });
+    }
+    return out;
+  } finally { await doc.destroy(); }
+}
+// Invented mockup: two dark garments side by side on white, 1478 x 794 like a two-view upload.
+function twoGarments() {
+  const canvas = require('@napi-rs/canvas').createCanvas(1478, 794), ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, 1478, 794);
+  ctx.fillStyle = '#202020'; ctx.fillRect(12, 60, 681, 659); ctx.fillRect(784, 61, 676, 657);
+  return canvas.toBuffer('image/png');
+}
+function measuredOn(f, appId, fileId, view, box, { pairing = ['on', 'arka'] } = {}) {
+  const views = [{ page: 1, index: 0, view: pairing[0], productBoxPx: { x: 12, y: 60, w: 681, h: 659 } },
+    { page: 1, index: 1, view: pairing[1], productBoxPx: { x: 784, y: 61, w: 676, h: 657 } }];
+  const index = views.findIndex(v => v.view === view);
+  f.db.prepare('UPDATE applications SET measure_source=?,needs_confirmation=0 WHERE id=?').run(JSON.stringify({ method: 'otomatik',
+    gorselFileId: fileId, selectedView: view, selectedPage: 1, rasterWidth: 1478, rasterHeight: 794, designBoxPx: box, desenFileId: null,
+    productBoxPx: views[Math.max(0, index)].productBoxPx, matchConfidence: 0.9, selectedProductIndex: Math.max(0, index), views }), appId);
+  f.db.prepare("UPDATE confirmations SET status='cozuldu' WHERE kind='olcu' AND ref_table='applications' AND ref_id=?").run(appId);
+}
+async function twoViewOrder(f, { both = true, pairing } = {}) {
+  const o = await f.order(), id = o.version.id, lineId = o.version.lines[0].id, picture = twoGarments();
+  const front = ok(await f.upload(id, { kind: 'urun_gorsel', lineId, gorunum: 'on', name: 'on.png', buffer: picture }), 201);
+  const back = both ? ok(await f.upload(id, { kind: 'urun_gorsel', lineId, gorunum: 'arka', name: 'arka.png', buffer: picture }), 201) : null;
+  const chest = ok(await f.post(`/satirlar/${lineId}/uygulamalar`, { kind: 'baski', position: 'sol_gogus', width_mm: 113, height_mm: 46 }), 201);
+  const neck = back && ok(await f.post(`/satirlar/${lineId}/uygulamalar`, { kind: 'baski', position: 'sirt', width_mm: 487, height_mm: 379 }), 201);
+  // Background measurement of the invented picture finishes first; then the recorded pairing is set.
+  await documents.settled();
+  measuredOn(f, chest.id, front.id, 'on', { x: 416, y: 220, w: 91, h: 37 }, { pairing });
+  if (back) measuredOn(f, neck.id, back.id, 'arka', { x: 922, y: 172, w: 393, h: 306 }, { pairing });
+  const preview = ok(await f.post(`/surumler/${id}/onizleme`));
+  return Object.fromEntries(preview.formlar.map(x => [x.kind, Buffer.from(x.pdf, 'base64')]));
+}
+
+test('G53-6 one picture uploaded as front and back prints one garment per slot; measurements follow the cut', async t => {
+  const f = await fixture(t), forms = await twoViewOrder(f);
+  for (const kind of ['uretim_formu', 'onay_formu', 'baski_formu']) {
+    const drawn = await pictures(forms[kind]);
+    assert.equal(drawn.filter(p => Math.abs(p.w / p.h - 1478 / 794) < 0.05).length, 0, `${kind}: bütün görsel basılmamalı`);
+    // One garment per slot (the approval form also carries its logo).
+    assert.equal(drawn.filter(p => Math.abs(p.w / p.h - 1) < 0.1).length, 2, `${kind}: ${JSON.stringify(drawn)}`);
+  }
+  // Both measurements are still drawn, each with two labels, inside the page.
+  const labels = (await labelRects(forms.uretim_formu))[0].rects;
+  assert.equal(labels.length, 4);
+});
+
+test('G53-6 a single upload holding both garments fills ÖN and ARKA from the same picture', async t => {
+  const f = await fixture(t), forms = await twoViewOrder(f, { both: false });
+  const shown = (await pictures(forms.uretim_formu)).filter(p => p.w > 60);
+  assert.equal(shown.length, 2);
+  for (const p of shown) assert.ok(Math.abs(p.w / p.h - 1) < 0.1, `${p.w}x${p.h}`);
+});
+
+test('G53-6 an undecided front/back pairing keeps the whole picture visible', async t => {
+  const f = await fixture(t), forms = await twoViewOrder(f, { pairing: ['teyit', 'teyit'] });
+  const shown = (await pictures(forms.uretim_formu)).filter(p => p.w > 60);
+  assert.ok(shown.length >= 1);
+  for (const p of shown) assert.ok(Math.abs(p.w / p.h - 1478 / 794) < 0.05, `${p.w}x${p.h}`);
+});
