@@ -8,8 +8,12 @@ const REBUILDS = {
   // G45c: sample lines may carry zero pieces; the old CHECK(quantity>0) forces a table rebuild.
   order_lines: sql => /quantity>0\)/.test(sql) && !sql.includes('numune'),
   files: sql => /UNIQUE\s*\(\s*version_id\s*,\s*kind\s*\)/i.test(sql),
+  // G63: the approval chain is its own queue kind.
+  outbox: sql => !sql.includes("'onay_zinciri'"),
 };
-const ADDED_COLUMNS = { order_lines: { kalip_id: 'TEXT', note: 'TEXT', fabric_type: 'TEXT' },
+const ADDED_COLUMNS = { order_lines: { kalip_id: 'TEXT', note: 'TEXT', fabric_type: 'TEXT',
+    // G63: optional unit sale price of the line, excluding VAT, in whole kuruş.
+    unit_price_kurus: "INTEGER CHECK(unit_price_kurus IS NULL OR (typeof(unit_price_kurus)='integer' AND unit_price_kurus>0))" },
   // G59: soft delete of an order and the fabric type of a line (colour is its own field).
   orders: { deleted_at: 'TEXT', deleted_by: 'INTEGER REFERENCES users(id)', deleted_order_no: 'TEXT' }, stock_items: { color_hex: 'TEXT' }, stock_movements: { allocation_id: 'INTEGER REFERENCES allocations(id)' },
   invoice_lines: { source: 'TEXT', invoice_no: 'TEXT', invoice_date: 'TEXT', supplier_vkn: 'TEXT', unit_price: 'REAL', content_hash: 'TEXT',

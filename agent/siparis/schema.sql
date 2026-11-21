@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS order_lines (
  quantity INTEGER NOT NULL CHECK(typeof(quantity)='integer' AND quantity>=0), sizes_json TEXT NOT NULL DEFAULT '{}',
  lining INTEGER NOT NULL DEFAULT 0 CHECK(lining IN (0,1)), material_items_json TEXT NOT NULL DEFAULT '{}', note TEXT,
  numune INTEGER NOT NULL DEFAULT 0 CHECK(numune IN (0,1)),
+ unit_price_kurus INTEGER CHECK(unit_price_kurus IS NULL OR (typeof(unit_price_kurus)='integer' AND unit_price_kurus>0)),
  UNIQUE(version_id,line_key), CHECK(quantity>0 OR numune=1)
 );
 CREATE TABLE IF NOT EXISTS applications (
@@ -74,7 +75,7 @@ CREATE TABLE IF NOT EXISTS confirmations (
  status TEXT NOT NULL DEFAULT 'acik' CHECK(status IN ('acik','cozuldu')), resolved_by INTEGER REFERENCES users(id)
 );
 CREATE TABLE IF NOT EXISTS outbox (
- id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('atolye_dosya','maliyet_aktarim')), idempotency_key TEXT NOT NULL UNIQUE,
+ id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('atolye_dosya','maliyet_aktarim','onay_zinciri')), idempotency_key TEXT NOT NULL UNIQUE,
  version_id INTEGER NOT NULL REFERENCES order_versions(id), payload_json TEXT NOT NULL,
  status TEXT NOT NULL DEFAULT 'bekliyor' CHECK(status IN ('bekliyor','isleniyor','tamam','basarisiz','iptal','manuel_bekliyor','fiyat_bekliyor')),
  attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, provider_ref TEXT, claim_token TEXT,
