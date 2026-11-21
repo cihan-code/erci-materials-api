@@ -789,7 +789,16 @@ function explain(result,input) {
   let reasons=Array.isArray(result.reasons) ? result.reasons : result.reason ? [result.reason] : [];
   if(input.flatNote)reasons=[input.flatNote,...reasons.filter(r=>!NO_FLAT_REASONS.some(prefix=>String(r).startsWith(prefix)))];
   if(SLEEVES.includes(input.position) && reasons.length && result.width_mm==null)reasons=[`Kol konumu ${input.image.gorunum==='kol'?'ayrı kol':input.image.gorunum==='arka'?'arka':'ön'} görselde ölçülemedi: ${reasons.join(' ')}`];
-  return {...result,reasons,reason:reasons.join(' '),needs_confirmation:result.needs_confirmation || reasons.length>0};
+  const oneri=measureSuggestion(result);
+  // G58: the located candidate goes to the confirmation as a proposal; the size stays empty.
+  if(oneri)reasons=[...reasons,`Sistem önerisi (bulunan aday kutudan): ${String(oneri.width_mm/10).replace('.',',')} × ${String(oneri.height_mm/10).replace('.',',')} cm; yukarıdaki gerekçeye bakıp doğruysa elle onaylayın.`];
+  return {...result,...(oneri?{measure_source:{...result.measure_source,oneri}}:{}),reasons,reason:reasons.join(' '),needs_confirmation:result.needs_confirmation || reasons.length>0};
+}
+// A candidate box with a physical scale that the measurement would not vouch for (G58).
+function measureSuggestion(result) {
+  const s=result?.measure_source,b=s?.candidateBoxPx,k=s?.mmPerPx;
+  if(result.width_mm!=null || !b || !(k>0) || ![b.w,b.h].every(n=>Number.isFinite(n) && n>0))return null;
+  return {width_mm:Math.round(b.w*k),height_mm:Math.round(b.h*k)};
 }
 // Replace a stale or generic open measurement confirmation with the concrete reason; nothing is measured.
 function noteReason(db,user,appId,reason) {
@@ -1299,7 +1308,7 @@ function registerWorkshop(boundDb,dataDir) {
     return {providerRef:result.providerRef};
   });
 }
-module.exports={answerView,garmentCrop,frontSide,imageViewHint,flatCalibrationInput,FLAT_CALIBRATIONS,editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,previewForms,pendingApplications,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+module.exports={explain,measureSuggestion,answerView,garmentCrop,frontSide,imageViewHint,flatCalibrationInput,FLAT_CALIBRATIONS,editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,previewForms,pendingApplications,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
 function vectorModule() {
   // Native tracer/canvas binaries come from npm; a platform without them must say so, not fail anonymously.
   try { return require('./vector'); }
