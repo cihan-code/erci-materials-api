@@ -130,6 +130,16 @@ function dominant(p, indices) {
   for(let key=0;key<4096;key++)if(n[key]&&(best<0||n[key]>n[best]||n[key]===n[best]&&first[key]<first[best]))best=key;
   return best<0 ? [255,255,255] : [sum[best*3]/n[best],sum[best*3+1]/n[best],sum[best*3+2]/n[best]];
 }
+// G58: no garment on a pale ground usually means a white or pale garment the mask cannot
+// separate from it (no edge is traced from shadows). Say so instead of a bare count.
+function paleGroundReason(p) {
+  const {width:w,height:h}=p,edges=[];
+  for(let x=0;x<w;x++){edges.push(x,(h-1)*w+x);}for(let y=0;y<h;y++)edges.push(y*w,y*w+w-1);
+  const bg=dominant(p,edges);
+  if(Math.min(...bg)<225)return [];
+  const hex='#'+bg.map(v=>Math.round(v).toString(16).padStart(2,'0')).join('');
+  return [`Ürün zeminden ayrılamadı: görselin zemini açık renkli (${hex}); beyaz veya açık renkli ürünün kenarı güvenilir bulunamadı. Ürünü renkli zeminde gösteren bir görsel yükleyin ya da ölçüyü elle girin.`];
+}
 function productMask(p) {
   const {width:w,height:h,data}=p,edges=[];
   for(let x=0;x<w;x++){edges.push(x,(h-1)*w+x);}for(let y=0;y<h;y++)edges.push(y*w,y*w+w-1);
@@ -1450,6 +1460,7 @@ async function autoMeasure({image,design,flat,product,position,color,viewHint=nu
     const chosen=refined[0];
     if(!chosen) {
       if(unknownViews.length)reasons.push(unknownViewReason());
+      if(!allViews.length&&pages.length)reasons.push(...paleGroundReason(pages[0]));
       reasons.push(`Ürün maskesi veya görselde desen bulunamadı (${allViews.length} ürün, 0 uygun desen adayı).`);
     }
     else {
@@ -2141,4 +2152,4 @@ async function extractArtwork({image,position,product:productKey,color,viewHint=
     return {buffer:canvas.toBuffer('image/png'),placement:{page,view,rasterWidth:w,rasterHeight:h,designBoxPx:{...box,x:x+box.x,y:y+box.y}},warnings,notes};
   } finally {canvas.width=canvas.height=0;}
 }
-module.exports={applyViewHint,autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette,silhouettes,extractArtwork};
+module.exports={paleGroundReason,applyViewHint,autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette,silhouettes,extractArtwork};
