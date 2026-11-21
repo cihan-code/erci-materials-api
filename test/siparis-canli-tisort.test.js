@@ -304,3 +304,31 @@ test('G47c a sweat whose chest line cannot be traced is not sized from its heigh
   assert.match(r.reason,/boy ve göğüs ölçekleri birlikte doğrulanamadı/);
   assert.notEqual(r.measure_source.scaleMode,'yalniz_boy');
 });
+
+// G47d: a word running along a sleeve but well off the sleeve's own axis
+// (beyond the former ±12° search) is grouped and read in its own frame.
+function tiltedSleeve({degrees=25,blur=false}={}) {
+  const c=createCanvas(600,650),x=c.getContext('2d');
+  x.fillStyle='#ffffff';x.fillRect(0,0,600,650);x.fillStyle=CLOTH;
+  x.beginPath();[[250,80],[350,80],[340,579],[260,579]].forEach(([u,v],i)=>i?x.lineTo(u,v):x.moveTo(u,v));x.closePath();x.fill();
+  x.save();x.translate(300,330);x.rotate((90-degrees)*Math.PI/180);if(blur)x.filter='blur(1.5px)';lettering(x,-TEXT_W/2,-TEXT_H/2);x.restore();
+  return c.toBuffer('image/png');
+}
+const sleeveFlat={id:'kol',ad:'Uydurma kol',refBeden:'L',olculerL:{kol_boyu:100}};
+const measureSleeveWord=image=>autoMeasure({image:{buffer:image,mime:'image/png',gorunum:'kol'},design:{buffer:source(),mime:'image/png'},flat:sleeveFlat,product:'tisort',position:'kol'});
+
+test('G47d a word tilted 25° off the sleeve axis is located in its own frame and measured along the sleeve', async()=> {
+  const r=await measureSleeveWord(tiltedSleeve());
+  assert.deepEqual(r.reasons,[],r.reason);
+  const s=r.measure_source;
+  assert.ok(s.matchConfidence===undefined||s.pageCandidates[0].confidence>=.78,JSON.stringify(s.pageCandidates));
+  assert.equal(s.measuredAxis,'en');assert.match(s.enEkseni,/kol boyunca/);
+  // 118 px along a 500 px sleeve of 100 cm: 236 mm.
+  assert.ok(Math.abs(r.width_mm-236)<=8,String(r.width_mm));
+});
+
+test('G47d blur that thickens the letters beyond the ±10% aspect rule keeps the size for confirmation', async()=> {
+  const r=await measureSleeveWord(tiltedSleeve({blur:true}));
+  assert.equal(r.needs_confirmation,true);
+  assert.match(r.reason,/±%10/);
+});

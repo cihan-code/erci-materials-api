@@ -915,7 +915,71 @@ function sleevePrints(p,sleeve) {
       if(!found.some(f=>f.pixels.length===pixels.length&&f.box.x===box.x&&f.box.y===box.y&&f.box.w===box.w&&f.box.h===box.h))found.push({mask,pixels,box,...extent});
     }
   }
+  // G47d: a blurred, letter-spaced or sheared sleeve print falls apart on the
+  // contrast-90 mask. As in groupDesign, fainter ink away from the silhouette
+  // edge is grouped at wider radii and kept above half its own peak contrast.
+  const garment=dominant(p,Array.from(mask.keys()).filter(i=>mask[i])),contrast=new Float32Array(w*h),faint=new Uint8Array(w*h);
+  const e=Math.max(3,Math.round(sleeve.lengthPx*.02));
+  for(let y=e;y<h-e;y++)for(let x=e;x<w-e;x++) {
+    const i=y*w+x;
+    if(!mask[i]||!mask[i-e]||!mask[i+e]||!mask[i-e*w]||!mask[i+e*w])continue;
+    contrast[i]=distance([p.data[i*4],p.data[i*4+1],p.data[i*4+2]],garment);faint[i]=contrast[i]>40?1:0;
+  }
+  for(const radius of [.02,.05,.1].map(k=>Math.max(1,Math.round(sleeve.lengthPx*k))))
+    for(const c of components(dilate(faint,w,h,radius,radius),w,h,8)) {
+      const own=Array.from(c.pixels).filter(i=>faint[i]);if(own.length<8)continue;
+      const values=own.map(i=>contrast[i]).sort((a,b)=>a-b),t=Math.max(40,values[Math.floor(values.length*.95)]*.5);
+      const pixels=own.filter(i=>contrast[i]>t),extent=sleeve.project(pixels);
+      if(pixels.length<8||extent.alongPx<4||extent.acrossPx<4||extent.alongPx>sleeve.lengthPx*.65)continue;
+      const local=new Uint8Array(w*h);for(const i of pixels)local[i]=1;
+      const box=bounds(local,w,h);
+      if(!found.some(f=>f.grouped&&f.box.x===box.x&&f.box.y===box.y&&f.box.w===box.w&&f.box.h===box.h))found.push({mask:local,pixels,box,...extent,grouped:true,contrast});
+    }
   return found;
+}
+// G47d: a grouped sleeve print read in its own frame. Two axes are tried: the
+// principal axis of its ink (a word) and the stroke direction from the
+// contrast structure tensor (sheared bars). The frame is sampled back from
+// the image, so turning leaves no holes. Below 16 px across, blur shapes the
+// cross profile; only the profile along the long side is compared then. The
+// ratio test uses the 3-97% extents, the measured length the full extent.
+function alignedSleeveMatch(p,sleeve,candidate,design,content) {
+  if(!content.box)return null;
+  const w=p.width,h=p.height,pixels=candidate.pixels,con=candidate.contrast,designRatio=content.box.w/content.box.h;
+  let mx=0,my=0;for(const i of pixels){mx+=i%w;my+=Math.floor(i/w);}mx/=pixels.length;my/=pixels.length;
+  let sxx=0,sxy=0,syy=0;for(const i of pixels){const dx=i%w-mx,dy=Math.floor(i/w)-my;sxx+=dx*dx;sxy+=dx*dy;syy+=dy*dy;}
+  const b=candidate.box;let jxx=0,jxy=0,jyy=0;
+  for(let y=Math.max(1,b.y);y<Math.min(h-1,b.y+b.h);y++)for(let x=Math.max(1,b.x);x<Math.min(w-1,b.x+b.w);x++){const i=y*w+x,gx=(con[i+1]-con[i-1])/2,gy=(con[i+w]-con[i-w])/2;jxx+=gx*gx;jxy+=gx*gy;jyy+=gy*gy;}
+  let best=null;
+  for(const theta of [.5*Math.atan2(2*sxy,sxx-syy),.5*Math.atan2(2*jxy,jxx-jyy)+Math.PI/2]) {
+    const u={x:Math.cos(theta),y:Math.sin(theta)},v={x:-u.y,y:u.x};
+    const along=[],across=[];for(const i of pixels){const dx=i%w-mx,dy=Math.floor(i/w)-my;along.push(dx*u.x+dy*u.y);across.push(dx*v.x+dy*v.y);}
+    along.sort((a,c)=>a-c);across.sort((a,c)=>a-c);
+    const a0=along[0],c0=across[0],W=Math.round(along.at(-1)-a0)+1,H=Math.round(across.at(-1)-c0)+1;
+    const q=(list,f)=>list[Math.floor(list.length*f)],W94=q(along,.97)-q(along,.03),H94=q(across,.97)-q(across,.03);
+    if(!(W94>0&&H94>0))continue;
+    const frame=new Uint8Array(W*H);
+    for(let y=0;y<H;y++)for(let x=0;x<W;x++){const ix=Math.round(mx+(a0+x)*u.x+(c0+y)*v.x),iy=Math.round(my+(a0+x)*u.y+(c0+y)*v.y);if(ix>=0&&iy>=0&&ix<w&&iy<h)frame[y*W+x]=candidate.mask[iy*w+ix];}
+    for(const turn of [0,1,2,3]) {
+      const tw=turn%2?H:W,th=turn%2?W:H,ratio=turn%2?H94/W94:W94/H94;
+      if(!ratioMatches(ratio,[designRatio]))continue;
+      const m=new Uint8Array(tw*th);
+      for(let y=0;y<H;y++)for(let x=0;x<W;x++)if(frame[y*W+x]){const [xx,yy]=turn===0?[x,y]:turn===1?[y,W-1-x]:turn===2?[W-1-x,H-1-y]:[H-1-y,x];m[yy*tw+xx]=1;}
+      const box={x:0,y:0,w:tw,h:th},rows=th>tw,n=Math.max(8,Math.min(32,rows?th:tw));
+      const confidence=Math.max(0,Math.min(tw,th)>=16?layoutScore(m,tw,box,design,content):correlation(profileOf(m,tw,box,n,rows),profileOf(content.mask,design.width,content.box,n,rows)));
+      // Within ±12° of the sleeve axis (or of its right-angle turns) the
+      // established G39c/G39d match decides; this path only covers prints the
+      // classic search cannot reach (EXE: 15° outside it).
+      const offset=Math.abs((theta-Math.atan2(sleeve.u.y,sleeve.u.x))*180/Math.PI)%90;
+      if(Math.min(offset,90-offset)<=12)continue;
+      if(!best||confidence>best.confidence)
+        best={confidence,rotation:turn,measuredAxis:turn%2?'boy':'en',designRatio,axis:u,axisOffsetDegrees:Math.round((theta-Math.atan2(sleeve.u.y,sleeve.u.x))*180/Math.PI),
+          // Length is the full extent; the across side follows the robust
+          // ratio, so a pixel of turning anti-aliasing does not read as shape.
+          projected:{...candidate,alongPx:W,acrossPx:W*H94/W94},aligned:true};
+    }
+  }
+  return best;
 }
 // Split ink into color groups; a single-color mark returns no extra layer.
 function inkLayers(p,ink) {
@@ -943,6 +1007,9 @@ function sleeveMatch(p,sleeve,candidate,design,content) {
   // The artwork may tilt slightly relative to the entire shoulder/cuff axis.
   // Search only a small angle, always measuring the independently observed ink.
   const pixels=candidate.pixels;
+  // Grouped (G47d) candidates go only through the aligned path below; the
+  // established ±12° match keeps its own candidates and decisions.
+  if(candidate.grouped)return alignedSleeveMatch(p,sleeve,candidate,design,content);
   for(const degrees of [-12,-8,-4,0,4,8,12]) {
     const angle=degrees*Math.PI/180,cos=Math.cos(angle),sin=Math.sin(angle);
     const u={x:sleeve.u.x*cos-sleeve.u.y*sin,y:sleeve.u.x*sin+sleeve.u.y*cos},v={x:u.y,y:-u.x};
