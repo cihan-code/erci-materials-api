@@ -145,6 +145,39 @@ function logo(doc, brand, x, y, w, h) {
   image(doc, brand.logo || defaultLogo, x, y, w, h);
 }
 
+// A PDF/SVG design is shown from its vector: the page is rasterised, drawn on the
+// removed proof ground (white ink stays visible on the white form) and cut to its ink.
+async function vectorPreviews(order) {
+  for (const app of order.applications) {
+    const vector = app.previewVector;
+    delete app.previewVector;
+    if (app.preview || app.pending || !vector || !Buffer.isBuffer(vector.buffer)) continue;
+    try {
+      const canvasLib = require('@napi-rs/canvas');
+      const { rasterPages } = require('../autoMeasure');
+      const [raster] = await rasterPages({ buffer: vector.buffer, mime: 'application/pdf' }, 1000, [1], { transparent: true });
+      const ground = /^#[0-9a-f]{6}$/i.test(vector.background ?? '') ? [1, 3, 5].map(i => parseInt(vector.background.slice(i, i + 2), 16)) : null;
+      let x0 = raster.width, y0 = raster.height, x1 = -1, y1 = -1;
+      for (let y = 0; y < raster.height; y++) for (let x = 0; x < raster.width; x++) {
+        const i = (y * raster.width + x) * 4, d = raster.data;
+        if (d[i + 3] <= 8 || (ground && Math.max(Math.abs(d[i] - ground[0]), Math.abs(d[i + 1] - ground[1]), Math.abs(d[i + 2] - ground[2])) <= 20)) continue;
+        x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+      }
+      if (x1 < 0) continue;
+      const pad = Math.round(Math.max(x1 - x0, y1 - y0) * 0.03) + 2;
+      x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad); x1 = Math.min(raster.width - 1, x1 + pad); y1 = Math.min(raster.height - 1, y1 + pad);
+      const full = canvasLib.createCanvas(raster.width, raster.height);
+      full.getContext('2d').putImageData(raster, 0, 0);
+      const canvas = canvasLib.createCanvas(x1 - x0 + 1, y1 - y0 + 1), ctx = canvas.getContext('2d');
+      if (ground) { ctx.fillStyle = vector.background; ctx.fillRect(0, 0, canvas.width, canvas.height); }
+      ctx.drawImage(full, x0, y0, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
+      app.preview = canvas.toBuffer('image/png');
+    } catch {
+      // An unreadable vector falls back to the product-image crop below.
+    }
+  }
+}
+
 // Without a separate or extracted design, the print form shows the measured box cut from the product image.
 async function cropPreviews(order) {
   for (const app of order.applications) {
@@ -170,6 +203,7 @@ async function cropPreviews(order) {
 
 async function build(order, options, draw) {
   await resolveProductImages(order);
+  await vectorPreviews(order);
   await cropPreviews(order);
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ autoFirstPage: false, margin: 0, bufferPages: true,

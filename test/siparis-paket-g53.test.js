@@ -79,3 +79,41 @@ test('G53-1 whole-millimetre rounding of a small print keeps the artwork ratio; 
   assert.ok(changed.report.aspectRatioError > 0.01);
   assert.ok(changed.report.reasons.includes('oran_bozuldu'));
 });
+
+// HTTP flow helpers on the shared synthetic fixture (invented users, orders and artwork).
+const fs = require('node:fs');
+const { setup } = require('./fixtures/siparis/belge-fixture');
+const documents = require('../agent/siparis/documents');
+async function fixture(t) {
+  const f = await setup();
+  t.after(async () => { await documents.settled(); await f.close(); fs.rmSync(f.dir, { recursive: true, force: true }); });
+  return f;
+}
+function ok(result, status = 200) { assert.equal(result.status, status, JSON.stringify(result.data)); return result.data; }
+async function pdfText(buffer) {
+  const lib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const doc = await lib.getDocument({ data: Uint8Array.from(buffer), isEvalSupported: false, verbosity: 0 }).promise;
+  try {
+    const pages = [];
+    for (let i = 1; i <= doc.numPages; i++) pages.push((await (await doc.getPage(i)).getTextContent()).items.map(x => x.str).join(' '));
+    return pages;
+  } finally { await doc.destroy(); }
+}
+async function formOf(f, files, kind) { return ok(await f.request(`/dosyalar/${files.find(x => x.kind === kind).id}`, { token: f.token })); }
+
+test('G53-2 a vector PDF design gets a preview on the print form from its vector, not a product crop', async t => {
+  const f = await fixture(t), o = await f.order(), id = o.version.id, lineId = o.version.lines[0].id;
+  for (const kind of ['desen_kaynak_vektor', 'desen_kaynak']) {
+    const source = ok(await f.upload(id, { kind, name: `${kind}.pdf`, mime: 'application/pdf', buffer: await proof() }), 201);
+    ok(await f.measure(lineId, { desenDosyaId: source.id, designBoxPx: { w: 125, h: 5 } }), 201);
+  }
+  const files = ok(await f.post(`/surumler/${id}/hazirla`));
+  const text = (await pdfText(await formOf(f, files, 'baski_formu'))).join('\n');
+  assert.doesNotMatch(text, /Desen önizlemesi sağlanmadı/);
+  assert.doesNotMatch(text, /Ürün görselinden kırpıldı/);
+  // The draft preview (no vectors traced) uses the same vector previews.
+  await documents.settled();
+  const preview = ok(await f.post(`/surumler/${id}/onizleme`));
+  const draft = (await pdfText(Buffer.from(preview.formlar.find(x => x.kind === 'baski_formu').pdf, 'base64'))).join('\n');
+  assert.doesNotMatch(draft, /Desen önizlemesi sağlanmadı/);
+});

@@ -496,11 +496,15 @@ function assertExtractedMeasurement(app,image,placement) {
 }
 
 // allowPending prints unmeasured applications as "Ölçü teyit bekliyor"; omitQuantities leaves every quantity field empty.
-function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPending=false,omitQuantities=false}={}) {
+// vectorByApp: application id -> {buffer, background} of its vector PDF, the preview of a PDF/SVG design.
+function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPending=false,omitQuantities=false,vectorByApp=new Map()}={}) {
   if (!allowPending) assertMeasurements(db,v);
   const pending=allowPending ? pendingApplications(db,v) : new Map();
   const order=db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id);
   const preview = file => file && /\.(png|jpe?g)$/i.test(file.path) ? readFile(dataDir,file) : undefined;
+  // The pdf module rasterises it; without a prepared vector the design PDF itself is used.
+  const previewVector = (app,file) => !file || /\.(png|jpe?g)$/i.test(file.path) ? undefined
+    : vectorByApp.get(app.id) ?? (/\.pdf$/i.test(file.path) ? {buffer:readFile(dataDir,file),background:null} : undefined);
   const applications=[];
   return {
     orderNo:order.order_no,name:order.customer_name || 'Müşteri belirtilmedi',version:v.version_no,
@@ -522,7 +526,7 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPendi
         const source=provenance(app);
         const image=Object.values(images).find(image=>image.fileId===source.gorselFileId);
         applications.push({type:app.kind,position:app.position,width_mm:app.width_mm,height_mm:app.height_mm,lineIds:[lineId],
-          preview:preview(design)||extractedByApp.get(app.id),placement:formPlacement(app,source,image,design),
+          preview:preview(design)||extractedByApp.get(app.id),previewVector:previewVector(app,design),placement:formPlacement(app,source,image,design),
           ...(source.scaleMode==='geo_ortalama'&&source.scaleNote?{scaleNote:String(source.scaleNote)}:{})});
       }
       const sizes=JSON.parse(l.sizes_json);
@@ -610,6 +614,7 @@ function createRenderQueue({timeoutMs=PREPARE_TIMEOUT_MS,lockMs=PREPARE_LOCK_MS}
   };
 }
 const renderQueue=createRenderQueue();
+const groundOf=report=>report?.ground?.pages?.[0]?.color ?? null;
 function provenance(app) {
   try {return JSON.parse(app.measure_source)||{};} catch {return {};}
 }
@@ -866,7 +871,7 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
   try {
     const {v}=start;
     const generated=await renderQueue(async signal=> {
-      const sourceByApp=new Map(), extractedByApp=new Map(), generated=[];
+      const sourceByApp=new Map(), extractedByApp=new Map(), vectorByApp=new Map(), generated=[];
       const applications=v.lines.flatMap(line=>line.applications.map(app=>({line,app})));
       for (const source of v.files.filter(f=>SOURCE_KINDS.includes(f.kind)))
         if (!applications.length) fail(`Desen ${source.id}: ölçülü uygulama bağlantısı gerekli`,409);
@@ -900,8 +905,9 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
         const report=prev && !raster && !original.manualVector ? {...result.report,quality:prev.report.quality==='teyit' || result.report.aspectRatioError>0.01 ? 'teyit' : 'iyi',
           reasons:[...new Set([...(prev.report.reasons||[]),...(result.report.aspectRatioError>0.01 ? ['oran_bozuldu'] : [])])]} : result.report;
         generated.push({kind:'desen_vektor',buffer:result.pdf,meta:{applicationId:a.id,...(!input.source?{lineId:line.id}:{})},report});
+        if (input.source) vectorByApp.set(a.id,{buffer:result.pdf,background:groundOf(report)});
       }
-      const model=formOrder(db,dataDir,v,sourceByApp,extractedByApp,{allowPending:true});
+      const model=formOrder(db,dataDir,v,sourceByApp,extractedByApp,{allowPending:true,vectorByApp});
       generated.push(...await generateInChild({type:'forms',model},signal));
       return generated;
     });
@@ -944,17 +950,22 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
 async function previewForms(db,dataDir,versionId,user,{omitQuantities=false}={}) {
   assertUser(db,user.id);
   const v=orders.snapshot(db,integer(versionId,'versionId',1));
-  const sourceByApp=new Map(),extractedByApp=new Map(),pending=pendingApplications(db,v);
+  const sourceByApp=new Map(),extractedByApp=new Map(),vectorByApp=new Map(),pending=pendingApplications(db,v);
   for (const line of v.lines) for (const app of line.applications) {
     if (pending.has(app.id)) continue;
     const input=artworkFor(db,v,line,app);
-    if (input.source) sourceByApp.set(app.id,input.source);
+    if (input.source) {
+      sourceByApp.set(app.id,input.source);
+      // Not traced here: a ready vector preview of a PDF/SVG design is shown as is.
+      const prev=!/\.(png|jpe?g)$/i.test(input.source.path) && readyPreview(db,dataDir,v,input.source);
+      if (prev) vectorByApp.set(app.id,{buffer:prev.buffer,background:groundOf(prev.report)});
+    }
     else if (!input.gap) {
       const row=extractedRecord(db,app.id,input,true);
       if (row?.artwork) extractedByApp.set(app.id,row.artwork);
     }
   }
-  const model=formOrder(db,dataDir,v,sourceByApp,extractedByApp,{allowPending:true,omitQuantities});
+  const model=formOrder(db,dataDir,v,sourceByApp,extractedByApp,{allowPending:true,omitQuantities,vectorByApp});
   const forms=await renderQueue(signal=>generateInChild({type:'forms',model},signal));
   const missing=[];
   for (const line of v.lines) for (const app of line.applications) if (pending.has(app.id))
