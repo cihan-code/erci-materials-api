@@ -28,13 +28,13 @@ async function withTracer(name, run) {
 
 const flatReasons = reasons => reasons.filter(x => /çentik|Kenar sapması|Düz renk/.test(x));
 
-test('G49 a flat two-colour X is traced with potrace: clean intersection, sharp corners, no notches', async () => {
+test('G49 a flat two-colour X is traced on the flat path (imagetracerjs): clean intersection, sharp corners, no notches', async () => {
   const result = await vectorize({ buffer: xLogo(), mime: 'image/png', targetMm: { w: 120, h: 80 } });
   const quality = result.report.rasterQuality, flat = quality.flatQuality;
-  assert.equal(result.report.vectorizer, 'potrace');
-  assert.equal(quality.vectorizer, 'potrace');
+  assert.equal(result.report.vectorizer, 'imagetracer');
+  assert.equal(quality.vectorizer, 'imagetracer');
   assert.equal(quality.flatClass, 'duz');
-  assert.ok(quality.potrace.upscale >= 3 && quality.potrace.upscale <= 4, JSON.stringify(quality.potrace));
+  assert.ok(quality.flatTrace.upscale >= 3 && quality.flatTrace.upscale <= 4, JSON.stringify(quality.flatTrace));
   assert.ok(flat.iou >= 0.98, JSON.stringify(flat));
   assert.ok(flat.edgeDeviationPx <= 1, JSON.stringify(flat));
   assert.equal(flat.notchCount, 0, JSON.stringify(flat.notches));
@@ -54,11 +54,11 @@ test('G49 the previous vtracer output of the same X fails the notch check and ne
   assert.equal(result.report.quality, 'teyit');
 });
 
-test('G49 a black X on a transparent ground and a black X on paper both take the potrace path', async () => {
+test('G49 a black X on a transparent ground and a black X on paper both take the flat path', async () => {
   for (const ground of [null, 'white']) {
     const result = await vectorize({ buffer: xLogo({ ground, ink: 'black' }), mime: 'image/png' });
     const flat = result.report.rasterQuality.flatQuality;
-    assert.equal(result.report.vectorizer, 'potrace', String(ground));
+    assert.equal(result.report.vectorizer, 'imagetracer', String(ground));
     assert.ok(flat.edgeDeviationPx <= 1 && flat.notchCount === 0, JSON.stringify(flat));
     // Natural-size previews postpone the verdict until the print size is known.
     assert.equal(result.report.quality, 'beklemede');
@@ -81,13 +81,32 @@ test('G49 gradients and many-colour artwork stay on vtracer and record why', asy
   }
 });
 
-test('G49 a cached potrace preview keeps its tracer and flat checks when resized for print', async () => {
+test('G49 a cached flat preview keeps its tracer and flat checks when resized for print', async () => {
   const buffer = xLogo();
   const preview = await vectorize({ buffer, mime: 'image/png' });
   const result = await vectorize({ buffer: preview.pdf, mime: 'application/pdf', manualVector: true, targetMm: { w: 120, h: 80 },
     qualitySource: { buffer, mime: 'image/png', metrics: preview.report.rasterQuality } });
   const quality = result.report.rasterQuality;
-  assert.equal(quality.vectorizer, 'potrace');
+  assert.equal(quality.vectorizer, 'imagetracer');
   assert.ok(quality.flatQuality.iou >= 0.98 && quality.flatQuality.notchCount === 0, JSON.stringify(quality.flatQuality));
   assert.equal(result.report.quality, 'iyi', result.report.reasons.join(' '));
+});
+
+test('G49b a large flat logo keeps its resolution; large non-flat artwork stays at the 800 px bound', async () => {
+  const flat = await vectorize({ buffer: xLogo({ width: 1600, height: 1000, bar: 160 }), mime: 'image/png', targetMm: { w: 160, h: 100 } });
+  assert.equal(flat.report.vectorizer, 'imagetracer');
+  assert.ok(flat.report.designBox.w > 1500, JSON.stringify(flat.report.designBox));
+  assert.ok(!flat.report.reasons.some(x => x.includes('küçültüldü')), flat.report.reasons.join(' '));
+  assert.equal(flat.report.quality, 'iyi', flat.report.reasons.join(' '));
+  // The cached-preview resize judges the vector against the same larger raster.
+  const buffer = xLogo({ width: 1600, height: 1000, bar: 160 }), preview = await vectorize({ buffer, mime: 'image/png' });
+  const resized = await vectorize({ buffer: preview.pdf, mime: 'application/pdf', manualVector: true, targetMm: { w: 160, h: 100 },
+    qualitySource: { buffer, mime: 'image/png', metrics: preview.report.rasterQuality } });
+  assert.equal(resized.report.quality, 'iyi', resized.report.reasons.join(' '));
+  const gradient = createCanvas(1600, 1000), g = gradient.getContext('2d'), fill = g.createLinearGradient(0, 0, 1600, 0);
+  fill.addColorStop(0, '#102080'); fill.addColorStop(1, '#f0c020');
+  g.fillStyle = fill; g.fillRect(0, 0, 1600, 1000);
+  const other = await vectorize({ buffer: gradient.toBuffer('image/png'), mime: 'image/png' });
+  assert.equal(other.report.vectorizer, 'vtracer');
+  assert.ok(other.report.designBox.w <= 800, JSON.stringify(other.report.designBox));
 });

@@ -1,6 +1,7 @@
 'use strict';
 
-// Flat artwork (logos, lettering, emblems with one or two inks) is traced with potrace:
+// Flat artwork (logos, lettering, emblems with one or two inks) is traced with imagetracerjs
+// (Unlicense, pure JS) on its own path scan and spline fit:
 // every colour becomes a soft coverage mask, antialias pixels are split between the two
 // colours they blend, the mask is upsampled and smoothed, then thresholded and traced.
 // Straight edges stay straight, corners stay sharp, curves become Béziers. Multi-colour
@@ -10,6 +11,7 @@
 const BLEND_RESIDUAL = 48;
 // Share of pixels that may be neither a palette colour nor an edge blend next to one.
 const MAX_NOISE_RATIO = 0.01;
+const FLAT_VECTORIZER = 'imagetracer';
 // CIE76 Delta E in D65 Lab: alpha and antialias boundary mixtures are not inks.
 function lab(rgb) {
   const [r,g,b] = rgb.map(v => {v/=255;return v>.04045 ? ((v+.055)/1.055)**2.4 : v/12.92;});
@@ -19,28 +21,27 @@ function lab(rgb) {
   return [116*y-16,500*(x-y),200*(y-z)];
 }
 const delta = (a,b) => Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2]);
-let potraceLib;
-// Lazy: the package loads Jimp, which the vtracer path never needs.
-function potrace() {
-  return potraceLib ||= { Potrace: require('potrace').Potrace, Bitmap: require('potrace/lib/types/Bitmap') };
-}
 
-// Best explanation of v as one colour or a blend of two: [i, j, t, residual].
+// Best explanation of v as one colour or a blend of two: [i, j, t, residual]. Grey ramps
+// lie on several blend lines at once (black-white, grey-white); the shortest one wins,
+// since antialiasing mixes neighbouring colours, not the extremes.
 function blend(r, g, b, colors) {
-  let bi = 0, bj = 0, bt = 0, best = Infinity;
+  let bi = 0, best = Infinity;
   for (let i = 0; i < colors.length; i++) {
     const c = colors[i], d = Math.hypot(r-c[0], g-c[1], b-c[2]);
-    if (d < best) { best = d; bi = bj = i; bt = 0; }
+    if (d < best) { best = d; bi = i; }
   }
+  let pi = -1, pj = -1, pt = 0, pd = Infinity, pl = Infinity;
   for (let i = 0; i < colors.length; i++) for (let j = i+1; j < colors.length; j++) {
     const a = colors[i], c = colors[j], ex = c[0]-a[0], ey = c[1]-a[1], ez = c[2]-a[2], l = ex*ex+ey*ey+ez*ez;
     if (l < 1) continue;
     const t = Math.min(1, Math.max(0, ((r-a[0])*ex+(g-a[1])*ey+(b-a[2])*ez)/l));
+    if (t <= 0 || t >= 1) continue;
     const d = Math.hypot(r-a[0]-t*ex, g-a[1]-t*ey, b-a[2]-t*ez);
-    // A pure colour wins ties; a blend must explain the pixel clearly better.
-    if (d < best - 0.5) { best = d; bi = i; bj = j; bt = t; }
+    if (d < pd-2 || (d <= pd+2 && l < pl)) { pi = i; pj = j; pt = t; pd = d; pl = l; }
   }
-  return [bi, bj, bt, best];
+  // A pure colour wins ties; a blend must explain the pixel clearly better.
+  return pi >= 0 && pd < best-0.5 ? [pi, pj, pt, pd] : [bi, bi, 0, best];
 }
 
 // Soft membership (0..255) of every pixel in each colour, plus the transparent ground.
@@ -168,17 +169,17 @@ function binomial(taps) {
   return row.map(v => v/sum);
 }
 
-// Bilinear upsample by k with pixel-centre alignment; blur() then smooths ~0.5 source px
-// so codec noise and short raster steps do not become wobbles in the traced edge.
+// Bilinear upsample by k (may be fractional) with pixel-centre alignment; blur() then
+// smooths ~0.5 source px so codec noise and short raster steps do not become wobbles.
 function upsample(soft, width, height, k) {
-  const W = width*k, H = height*k, out = new Uint8Array(W*H);
+  const W = Math.round(width*k), H = Math.round(height*k), out = new Uint8Array(W*H), kx = W/width, ky = H/height;
   const x0 = new Int32Array(W), x1 = new Int32Array(W), fx = new Float32Array(W);
   for (let X = 0; X < W; X++) {
-    const s = Math.min(width-1, Math.max(0, (X+0.5)/k-0.5)), f = Math.floor(s);
+    const s = Math.min(width-1, Math.max(0, (X+0.5)/kx-0.5)), f = Math.floor(s);
     x0[X] = f; x1[X] = Math.min(width-1, f+1); fx[X] = s-f;
   }
   for (let Y = 0; Y < H; Y++) {
-    const s = Math.min(height-1, Math.max(0, (Y+0.5)/k-0.5)), y0 = Math.floor(s), y1 = Math.min(height-1, y0+1), fy = s-y0;
+    const s = Math.min(height-1, Math.max(0, (Y+0.5)/ky-0.5)), y0 = Math.floor(s), y1 = Math.min(height-1, y0+1), fy = s-y0;
     const r0 = y0*width, r1 = y1*width, o = Y*W;
     for (let X = 0; X < W; X++) {
       const a = soft[r0+x0[X]], b = soft[r0+x1[X]], c = soft[r1+x0[X]], d = soft[r1+x1[X]], u = fx[X];
@@ -189,7 +190,7 @@ function upsample(soft, width, height, k) {
 }
 
 function blur(data, W, H, k) {
-  const kernel = binomial(4*k-1), r = kernel.length >> 1, tmp = new Uint8Array(data.length);
+  const kernel = binomial(2*Math.round(2*k)-1), r = kernel.length >> 1, tmp = new Uint8Array(data.length);
   for (let y = 0; y < H; y++) {
     const o = y*W;
     for (let x = 0; x < W; x++) {
@@ -223,11 +224,14 @@ function otsu(data) {
   return Math.min(153, Math.max(102, threshold));
 }
 
-// Artwork cut by the crop continues past the page edge (replicated border), so potrace
+// Artwork cut by the crop continues past the page edge (replicated border), so the tracer
 // never rounds the corner where a shape meets the edge; the root <svg> clips the overhang.
 const PAD = 2;
+// Line and spline error (grid px) for imagetracerjs; 1 keeps the fit within one mask pixel.
+// rightangleenhance stays off: it turns the steps of low-resolution sources into stairs.
+const TRACE_OPTIONS = { ltres: 1, qtres: 1, rightangleenhance: false, roundcoords: 2, scale: 1, linefilter: false };
 function traceLayer(soft, width, height, k, rgb) {
-  const { Potrace, Bitmap } = potrace();
+  const tracer = require('imagetracerjs');
   const pw = width+2*PAD, ph = height+2*PAD, padded = new Uint8Array(pw*ph);
   for (let y = 0; y < ph; y++) {
     const row = Math.min(height-1, Math.max(0, y-PAD))*width;
@@ -236,22 +240,32 @@ function traceLayer(soft, width, height, k, rgb) {
   const { data, W, H } = upsample(padded, pw, ph, k);
   blur(data, W, H, k);
   const threshold = otsu(data);
-  for (let i = 0; i < data.length; i++) data[i] = data[i] >= threshold ? 0 : 255;
-  const bitmap = new Bitmap(1, 1);
-  Object.assign(bitmap, { width: W, height: H, size: W*H, arrayBuffer: data.buffer, data });
-  const tracer = new Potrace({ turdSize: 4*k*k, alphaMax: 1, optCurve: true, optTolerance: 0.2,
-    threshold: 128, blackOnWhite: true });
-  // potrace only reads luminance; feeding it directly avoids a Jimp RGBA copy of the mask.
-  tracer._luminanceData = bitmap;
-  tracer._imageLoaded = true;
-  const tag = tracer.getPathTag(hex(rgb), { x: 1/k, y: 1/k });
-  return { tag: tracer._pathlist.length ? tag : '', threshold, paths: tracer._pathlist.length };
+  // Edge-node layer (imagetracerjs layeringstep for one colour) in typed rows: the stock
+  // nested arrays of numbers would not fit the vector worker's 64 MB heap at 6 MP.
+  const ink = (x, y) => x >= 0 && y >= 0 && x < W && y < H && data[y*W+x] >= threshold;
+  const layer = [];
+  for (let j = 0; j < H+2; j++) {
+    const row = layer[j] = new Uint8Array(W+2);
+    if (!j) continue;
+    for (let i = 1; i < W+2; i++) row[i] = (ink(i-2, j-2) ? 1 : 0)+(ink(i-1, j-2) ? 2 : 0)+(ink(i-2, j-1) ? 8 : 0)+(ink(i-1, j-1) ? 4 : 0);
+  }
+  const options = tracer.checkoptions({ ...TRACE_OPTIONS, pathomit: Math.round(4*k) });
+  const paths = tracer.batchtracepaths(tracer.internodes(tracer.pathscan(layer, options.pathomit), options), options.ltres, options.qtres);
+  layer.length = 0;
+  const tracedata = { layers: [paths], palette: [{ r: rgb[0], g: rgb[1], b: rgb[2], a: 255 }], width: W, height: H };
+  const d = [];
+  for (let i = 0; i < paths.length; i++) if (!paths[i].isholepath)
+    d.push(/\bd="([^"]*)"/.exec(tracer.svgpathstring(tracedata, 0, i, options))[1]);
+  // Holes are reversed subpaths of their parent, so even-odd and non-zero agree.
+  const tag = d.length ? `<path d="${d.join(' ')}" transform="scale(${pw/W} ${ph/H})" stroke="none" fill="${hex(rgb)}" fill-rule="evenodd"/>` : '';
+  return { tag, threshold, paths: d.length };
 }
 
 /** Stacked layers: largest colour at the bottom; each layer covers every colour above it. */
 function traceFlat(flat, { maxPixels = 6e6 } = {}) {
   const { width, height, transparent, colors, soft } = flat;
-  const k = Math.max(1, Math.min(4, Math.floor(Math.sqrt(maxPixels/(width*height)))));
+  // Up to 4x; large flat sources get a fractional factor that keeps the mask within maxPixels.
+  const k = Math.max(1, Math.min(4, Math.sqrt(maxPixels/((width+2*PAD)*(height+2*PAD)))));
   const area = soft.map(s => s.reduce((a, v) => a+v, 0));
   const order = colors.map((_, i) => i).filter(i => area[i] > 0).sort((a, b) => area[b]-area[a]);
   const acc = new Uint8Array(width*height), tags = [], thresholds = [];
@@ -270,7 +284,7 @@ function traceFlat(flat, { maxPixels = 6e6 } = {}) {
   }
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">\n`
     + `${base}<g transform="translate(${-PAD} ${-PAD})">\n${tags.reverse().join('\n')}\n</g>\n</svg>`;
-  return { svg, upscale: k, thresholds: thresholds.reverse(), colors: order.map(i => hex(colors[i])) };
+  return { svg, vectorizer: FLAT_VECTORIZER, upscale: Number(k.toFixed(2)), thresholds: thresholds.reverse(), colors: order.map(i => hex(colors[i])) };
 }
 
 // Exact squared Euclidean distance transform (Felzenszwalb); zero where seed is set.
@@ -348,14 +362,15 @@ async function flatQuality(flat, render, { maxPixels = 5e6 } = {}) {
   // Pixel centres sit half a grid step from the edge they straddle.
   const depthOf = i => (Math.sqrt(distance[i])+0.5)/m;
   let edgeDeviation = 0;
-  const tolerated = new Float64Array(labels);
+  const notchDepth = NOTCH_DEPTH+0.5/m, tolerated = new Float64Array(labels);
   for (let i = 0; i < N; i++) if (mismatch[i]) {
     const d = depthOf(i);
     if (d > edgeDeviation) edgeDeviation = d;
     // An antialiased raster fixes its edges to about half a pixel; closer disagreement is agreement.
     if (d <= IOU_TOLERANCE) { tolerated[source[i]]++; tolerated[output[i]]++; }
-    // Deep cores: the part of a defect farther than NOTCH_DEPTH from the source edge.
-    mismatch[i] = d > NOTCH_DEPTH ? 1 : 0;
+    // Deep cores: the part of a defect farther than NOTCH_DEPTH from the source edge, plus
+    // half a grid step for the label rounding of source and render on the measurement grid.
+    mismatch[i] = d > notchDepth ? 1 : 0;
   }
   // A compact deep core is a notch or bump; a long one is an offset edge, judged by edgeDeviation.
   const seen = new Uint8Array(N), stack = [], notches = [];
@@ -384,7 +399,8 @@ async function flatQuality(flat, render, { maxPixels = 5e6 } = {}) {
     iou: (inter[c]+tolerated[c])/union[c], strictIou: inter[c]/union[c] });
   const minOf = key => iouByColor.length ? Math.min(...iouByColor.map(x => x[key])) : 0;
   return { iou: minOf('iou'), strictIou: minOf('strictIou'), iouTolerancePx: IOU_TOLERANCE, iouByColor,
-    edgeDeviationPx: edgeDeviation, notchCount, notches, measurementScale: m, notchDepthPx: NOTCH_DEPTH, notchExtentPx: NOTCH_EXTENT };
+    edgeDeviationPx: edgeDeviation, notchCount, notches, measurementScale: m, notchDepthPx: Number(notchDepth.toFixed(2)), notchExtentPx: NOTCH_EXTENT };
 }
 
-module.exports = { flatPalette, traceFlat, flatQuality, lab, delta };
+const FLAT_VECTORIZERS = new Set([FLAT_VECTORIZER]);
+module.exports = { flatPalette, traceFlat, flatQuality, lab, delta, FLAT_VECTORIZERS };

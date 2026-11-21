@@ -10,7 +10,7 @@ const tracer = require('@neplex/vectorizer');
 const canvasLib = require('@napi-rs/canvas');
 const { PNG } = require('pngjs');
 const { imageSize, pixelBounds } = require('./measure');
-const { flatPalette, traceFlat, flatQuality, lab, delta } = require('./flatTrace');
+const { flatPalette, traceFlat, flatQuality, lab, delta, FLAT_VECTORIZERS } = require('./flatTrace');
 const PT_PER_MM = 72 / 25.4;
 let pdfjsPromise;
 
@@ -92,9 +92,10 @@ function alphaBounds({width,height,pixels}) {
 // Bound native tracing allocations. Keep physical source dimensions and require review
 // whenever resampling could hide artwork details; original uploads remain untouched.
 const RASTER_EDGE=800;
-async function boundedRaster(buffer) {
+// maxPixels: flat logos bypass the 800 px edge and keep up to this many source pixels.
+async function boundedRaster(buffer, maxPixels) {
   const size=imageSize(buffer,buffer[0]===137?'image/png':'image/jpeg');
-  const scale=Math.min(1,RASTER_EDGE/Math.max(size.width,size.height));
+  const scale=Math.min(1,maxPixels ? Math.sqrt(maxPixels/(size.width*size.height)) : RASTER_EDGE/Math.max(size.width,size.height));
   if(scale===1)return {buffer,resampled:false};
   const image=await canvasLib.loadImage(buffer);
   const canvas=canvasLib.createCanvas(Math.max(1,Math.round(size.width*scale)),Math.max(1,Math.round(size.height*scale)));
@@ -142,24 +143,32 @@ async function rasterInput(buffer, source, assessRaster = false) {
     : {width:image.width*0.75,height:image.height*0.75};
   return {buffer,image,dimensions};
 }
+// Quick flat-artwork probe on the 800 px raster before a larger decode is attempted.
+async function flatRaster({buffer, source}) {
+  const {image}=await rasterInput(buffer,source??null,true), limits=qualityLimits();
+  const palette=perceptualPalette(image.pixels,image.width,image.height,image.transparent);
+  return !!flatPalette(image,palette,{maxInks:limits.flatMaxColors,deltaE:limits.colorDeltaE}).flat;
+}
 // SIPARIS_VECTOR_TRACER=vtracer forces the previous tracer (comparisons, rollback).
 const tracerChoice = () => (process.env.SIPARIS_VECTOR_TRACER || '').trim().toLowerCase() === 'vtracer' ? 'vtracer' : 'auto';
-async function trace(buffer, source, target, assessRaster = false) {
+// flatOnly: the caller retries at the 800 px bound when the artwork is not traced flat.
+async function trace(buffer, source, target, assessRaster = false, {flatOnly = false} = {}) {
   const decoded=await rasterInput(buffer,source,assessRaster);
   const {image,dimensions}=decoded;buffer=decoded.buffer;
   let tracing={vectorizer:'vtracer'};
   if (assessRaster) {
     const colors=perceptualPalette(image.pixels,image.width,image.height,image.transparent);
-    // One or two flat inks (logo, lettering, emblem): potrace on smoothed per-colour masks.
+    // One or two flat inks (logo, lettering, emblem): imagetracerjs on smoothed per-colour masks.
     const limits=qualityLimits(), classified=flatPalette(image,colors,{maxInks:limits.flatMaxColors,deltaE:limits.colorDeltaE});
     if (classified.flat && tracerChoice()!=='vtracer') {
       try {
-        const flat=traceFlat(classified.flat,{maxPixels:limits.potraceMaxPixels});
+        const flat=traceFlat(classified.flat,{maxPixels:limits.flatTraceMaxPixels});
         global.gc?.();
         return { pdf: await svgPdf(flat.svg, dimensions, target), image, svg: flat.svg, dimensions: target || dimensions,
-          tracing: {vectorizer:'potrace',upscale:flat.upscale,thresholds:flat.thresholds,layers:flat.colors} };
+          tracing: {vectorizer:flat.vectorizer,upscale:flat.upscale,thresholds:flat.thresholds,layers:flat.colors} };
       } catch (error) { tracing.fallback=error.message; }
     }
+    if (flatOnly) return null;
     if (colors.colorCount>0 && colors.colorCount<=qualityLimits().maxColors) {
       const normalized=PNG.sync.read(buffer), remap=new Map();
       colors.clusters.forEach((cluster,index)=> {
@@ -270,7 +279,8 @@ function qualityLimits(applicationType) {
     maxPaths: value('MAX_PATHS', 500), maxNodes: value('MAX_NODES', 10000),
     // Flat artwork (one or two inks): re-rasterized vector against the source colour edges.
     flatMaxColors: value('FLAT_MAX_COLORS', 2, 6), minFlatIou: value('MIN_FLAT_IOU', 0.98, 1),
-    maxEdgeDeviationPx: value('MAX_EDGE_DEVIATION_PX', 1, 100), potraceMaxPixels: value('POTRACE_MAX_PIXELS', 6e6, 4e7) };
+    maxEdgeDeviationPx: value('MAX_EDGE_DEVIATION_PX', 1, 100), flatTraceMaxPixels: value('FLAT_TRACE_MAX_PIXELS', 6e6, 4e7),
+    flatRasterPixels: value('FLAT_RASTER_PIXELS', 2e6, 6e6) };
 }
 
 // Exact squared Euclidean distance transform with physical, anisotropic pixel spacing.
@@ -465,6 +475,18 @@ function opening(mask,width,height) {
   return out;
 }
 
+function flatMeasureImage(image, maxPixels = 1.2e6) {
+  const scale=Math.sqrt(maxPixels/(image.width*image.height));
+  if (scale>=1) return image;
+  const width=Math.max(1,Math.round(image.width*scale)), height=Math.max(1,Math.round(image.height*scale));
+  const full=canvasLib.createCanvas(image.width,image.height), small=canvasLib.createCanvas(width,height);
+  try {
+    full.getContext('2d').putImageData(new canvasLib.ImageData(Uint8ClampedArray.from(image.pixels),image.width,image.height),0,0);
+    const ctx=small.getContext('2d');ctx.drawImage(full,0,0,width,height);
+    return {...image,width,height,pixels:ctx.getImageData(0,0,width,height).data};
+  } finally {full.width=full.height=small.width=small.height=0;}
+}
+
 // PDF page stretched to width x height pixels (same fit as the IoU render below).
 async function renderPixels(pdf, width, height, transparent) {
   const canvas = canvasLib.createCanvas(width, height), ctx = canvas.getContext('2d');
@@ -479,7 +501,8 @@ async function renderPixels(pdf, width, height, transparent) {
 
 async function rasterQuality(image, pdf, svg, dimensions, applicationType, target, priorMetrics, tracing) {
   const limits = qualityLimits(applicationType), originalWidth = image.width, originalHeight = image.height;
-  const scale = Math.min(1, Math.sqrt(1_000_000/(originalWidth*originalHeight)),
+  // Same pixel budget as the 800 px bound, so a larger flat raster costs no more skeleton work.
+  const scale = Math.min(1, Math.sqrt(RASTER_EDGE*RASTER_EDGE/(originalWidth*originalHeight)),
     target ? dimensions.width/PT_PER_MM*300/25.4/originalWidth : 1,
     target ? dimensions.height/PT_PER_MM*300/25.4/originalHeight : 1);
   const width = Math.max(1, Math.round(originalWidth*scale)), height = Math.max(1, Math.round(originalHeight*scale));
@@ -491,7 +514,7 @@ async function rasterQuality(image, pdf, svg, dimensions, applicationType, targe
   const transparent = image.transparent;
   const palette = perceptualPalette(data,width,height,transparent,limits), colorIds=palette.ids;
   let alphaEdgePixels = 0, semi = 0;
-  // Coverage classification is bounded to the analysis grid (at most 1 MP).
+  // Coverage classification is bounded to the analysis grid (at most 0.64 MP).
   for (let y=0;y<height;y++) for (let x=0;x<width;x++) {
     const i=(y*width+x)*4, alpha=data[i+3];
     if (alpha<=8 || alpha>=247) continue;
@@ -573,12 +596,14 @@ async function rasterQuality(image, pdf, svg, dimensions, applicationType, targe
     }
   }
   // Flat artwork: per-colour IoU, edge deviation and notches in source pixels, whichever tracer ran.
-  const flatSource = flatPalette(image, perceptualPalette(image.pixels,originalWidth,originalHeight,transparent,limits),
+  // A large flat source is measured at <=1.2 MP so the 2x comparison grid stays within memory.
+  const measured = flatMeasureImage(image);
+  const flatSource = flatPalette(measured, perceptualPalette(measured.pixels,measured.width,measured.height,transparent,limits),
     {maxInks:limits.flatMaxColors,deltaE:limits.colorDeltaE});
   const flat = flatSource.flat ? await flatQuality(flatSource.flat,(w,h)=>renderPixels(pdf,w,h,transparent)) : null;
   global.gc?.();
   const metrics = { vectorizer:priorMetrics?.vectorizer ?? tracing?.vectorizer ?? null,
-    ...(tracing?.vectorizer==='potrace' ? {potrace:{upscale:tracing.upscale,thresholds:tracing.thresholds,layers:tracing.layers}} : {}),
+    ...(FLAT_VECTORIZERS.has(tracing?.vectorizer) ? {flatTrace:{upscale:tracing.upscale,thresholds:tracing.thresholds,layers:tracing.layers}} : {}),
     ...(tracing?.fallback ? {vectorizerFallback:tracing.fallback} : {}),
     flatQuality:flat, flatClass:flatSource.flat ? 'duz' : flatSource.reason, flatStats:flatSource.stats ?? null,
     gurultuSayisi, colorCount:palette.colorCount, minLineMm, minGapMm, minShapeMm2, pathCount, nodeCount:priorMetrics?.nodeCount ?? nodeCount,
@@ -678,10 +703,18 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
   if (!['baski','nakis'].includes(applicationType)) throw new TypeError('applicationType baski veya nakis olmalı');
   if (manualVector && mime!=='application/pdf') throw new Error('Hazır vektör PDF gerekli');
   if (['image/png', 'image/jpeg', 'image/jpg'].includes(mime)) {
-    const bounded=await boundedRaster(buffer);
+    let bounded=await boundedRaster(buffer), result;
     if(rasterSource)Object.assign(bounded,{resampled:true,source:{width:rasterSource.width*.75,height:rasterSource.height*.75}});
     global.gc?.(); // Drop the original native decode before tracing the bounded raster.
-    const result = await trace(bounded.buffer, bounded.source??null, target, true);
+    // Flat logos are traced from up to FLAT_RASTER_PIXELS of the original (6 MP mask budget);
+    // other artwork keeps the 800 px bound for the native colour tracer.
+    if (bounded.resampled && !rasterSource && tracerChoice()!=='vtracer' && await flatRaster(bounded)) {
+      const large=await boundedRaster(buffer,qualityLimits().flatRasterPixels);
+      global.gc?.();
+      result=await trace(large.buffer, large.source??null, target, true, {flatOnly:true});
+      if (result) bounded=large;
+    }
+    result ??= await trace(bounded.buffer, bounded.source??null, target, true);
     if(bounded.resampled)reasons.push('Büyük raster bellek sınırı için küçültüldü; ince detayları özgün dosyayla teyit edin.');
     pdf = result.pdf; kind = 'raster';
     designBox={w:result.image.width,h:result.image.height};
@@ -740,7 +773,9 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
   if (qualitySource) {
     if (!manualVector || !target || !Buffer.isBuffer(qualitySource.buffer)
       || !['image/png','image/jpeg','image/jpg'].includes(qualitySource.mime)) throw new TypeError('Geçerli kalite kaynağı gerekli');
-    const bounded=await boundedRaster(qualitySource.buffer);
+    // A flat preview was traced from the larger raster; judge it against the same pixels.
+    const flatPreview=FLAT_VECTORIZERS.has(qualitySource.metrics?.vectorizer) && !qualitySource.rasterSource;
+    const bounded=await boundedRaster(qualitySource.buffer,flatPreview ? qualityLimits().flatRasterPixels : undefined);
     if(qualitySource.rasterSource)bounded.resampled=true;
     global.gc?.();
     const original=await rasterInput(bounded.buffer,bounded.source??null,true);
