@@ -287,3 +287,20 @@ test('G47b arms hanging to the hem: the rib below the cuffs is the torso hem', a
   assert.equal(refs.length,1);
   assert.ok(Math.abs(refs[0].hemWidthPx-300)<=4,String(refs[0].hemWidthPx));
 });
+
+// G47c (measured choice, 21.11.2026): height alone is not a scale. On the
+// atelier set it raised the mean deviation (13% → 25%); the A policy stays:
+// a sweat without a chest line is left for confirmation, not sized from height.
+test('G47c a sweat whose chest line cannot be traced is not sized from its height alone', async()=> {
+  const c=createCanvas(600,700),x=c.getContext('2d');
+  x.fillStyle='#ffffff';x.fillRect(0,0,600,700);x.fillStyle='#1b1b1f';
+  x.beginPath();x.ellipse(300,90,75,70,0,0,Math.PI*2);x.fill();
+  x.beginPath();for(const [i,[a,b]] of [[150,140],[450,140],[520,200],[540,600],[470,600],[450,620],[450,660],[150,660],[150,620],[130,600],[60,600],[80,200]].entries())i?x.lineTo(a,b):x.moveTo(a,b);x.closePath();x.fill();
+  x.fillStyle='#f2f2f2';for(let k=0;k<4;k++)x.fillRect(240+k*30,260,26,40);
+  const r=await autoMeasure({image:{buffer:c.toBuffer('image/png'),mime:'image/png'},design:null,flat:{id:'s',refBeden:'L',olculerL:{omuzdan_boy:71,gogus:61}},product:'sweat',position:'gogus'});
+  assert.equal(r.width_mm,null);
+  assert.equal(r.measure_source.mmPerPx,null);
+  assert.ok(r.measure_source.verticalMmPerPx>0);
+  assert.match(r.reason,/boy ve göğüs ölçekleri birlikte doğrulanamadı/);
+  assert.notEqual(r.measure_source.scaleMode,'yalniz_boy');
+});
