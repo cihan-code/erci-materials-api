@@ -11,6 +11,15 @@ const positive = n => Number.isFinite(n) && n > 0;
  * requireL=false reads the list whatever size the record states (flat drawing calibration).
  */
 function points(flat, { size = 'L', requireL = true } = {}) {
+  // G66 shape, resolved by the parent (flats.kalipOlculeri(db, kalipId, beden)) and handed in
+  // on the flat: {beden, olculerMm}. It takes precedence over the old L list.
+  const given = flat?.olcuNoktalari;
+  if (given && given.olculerMm && typeof given.olculerMm === 'object') {
+    if (given.beden !== size) return { beden: null, cm: {}, mm: {} };
+    const cm = {}, mm = {};
+    for (const [key, value] of Object.entries(given.olculerMm)) if (positive(value)) { mm[key] = value; cm[key] = value / 10; }
+    return { beden: size, cm, mm };
+  }
   const list = flat?.olculerL && typeof flat.olculerL === 'object' && !Array.isArray(flat.olculerL) ? flat.olculerL : null;
   if (!list || size !== 'L' || (requireL && flat.refBeden !== 'L')) return { beden: null, cm: {}, mm: {} };
   const cm = {}, mm = {};
