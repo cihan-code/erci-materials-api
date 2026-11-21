@@ -570,7 +570,9 @@ test('G29 compact blob without a 1 mm skeleton segment is checked by closed area
 });
 
 test('G39b large rasters keep natural physical dimensions and require original-detail review at output size',async()=>{
-  const canvas=createCanvas(1600,800),ctx=canvas.getContext('2d');ctx.fillStyle='#d02030';ctx.fillRect(0,0,1600,800);
+  // Non-flat artwork: flat one/two-colour logos keep up to 2 MP since G49b.
+  const canvas=createCanvas(1600,800),ctx=canvas.getContext('2d'),fill=ctx.createLinearGradient(0,0,1600,0);
+  fill.addColorStop(0,'#d02030');fill.addColorStop(1,'#2040d0');ctx.fillStyle=fill;ctx.fillRect(0,0,1600,800);
   const buffer=canvas.toBuffer('image/png');
   const natural=await vectorize({buffer,mime:'image/png'});
   assert.ok(Math.abs(natural.report.pages[0].widthMm-1600*25.4/96)<.5);
