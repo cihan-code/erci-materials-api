@@ -287,3 +287,27 @@ test('G53-6 an undecided front/back pairing keeps the whole picture visible', as
   assert.ok(shown.length >= 1);
   for (const p of shown) assert.ok(Math.abs(p.w / p.h - 1478 / 794) < 0.05, `${p.w}x${p.h}`);
 });
+
+test('G53-7 a manual size keeps an optional short source note: stored, audited, printed small beside the size', async t => {
+  const f = await fixture(t), o = await f.order(), id = o.version.id, lineId = o.version.lines[0].id;
+  const source = ok(await f.upload(id), 201);
+  const app = ok(await f.measure(lineId, { kind: 'baski', position: 'sag_kol', desenDosyaId: source.id }), 201);
+  const appId = (app.application || app).id;
+  const patch = body => f.request(`/uygulamalar/${appId}`, { method: 'PATCH', token: f.token, body });
+  // Not a measurement field on its own; bounded, single-line text.
+  assert.equal((await patch({ kaynak: 'atölye ölçüsü' })).status, 400);
+  assert.equal((await patch({ width_mm: 150, height_mm: 9, elleTeyit: true, kaynak: 'x'.repeat(61) })).status, 400);
+  assert.equal((await patch({ width_mm: 150, height_mm: 9, elleTeyit: true, kaynak: 12 })).status, 400);
+  ok(await patch({ width_mm: 150, height_mm: 9, elleTeyit: true, kaynak: '  atölye   ölçüsü ' }));
+  const row = f.db.prepare('SELECT measure_source FROM applications WHERE id=?').get(appId);
+  assert.equal(JSON.parse(row.measure_source).kaynak, 'atölye ölçüsü');
+  const logged = f.db.prepare("SELECT * FROM audit_log WHERE action='uygulama_elle_olcu' ORDER BY id DESC").get();
+  assert.match(JSON.stringify(logged), /atölye ölçüsü/);
+  const files = ok(await f.post(`/surumler/${id}/hazirla`));
+  const text = (await pdfText(await formOf(f, files, 'uretim_formu'))).join('\n');
+  assert.match(text, /Sağ kol · 15 × 0,9\s+cm\s+atölye ölçüsü/);
+  assert.match(text, /atölye ölçüsü/);
+  // A new manual size without a note drops the old note: it described the previous size.
+  ok(await patch({ width_mm: 140, height_mm: 9, elleTeyit: true }));
+  assert.equal(JSON.parse(f.db.prepare('SELECT measure_source FROM applications WHERE id=?').get(appId).measure_source).kaynak, undefined);
+});

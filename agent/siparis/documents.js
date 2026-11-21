@@ -281,16 +281,19 @@ async function editApplication(db,dataDir,applicationId,changes,user) {
     if (changes.position!=null && !POSITIONS.includes(changes.position)) fail('Geçersiz uygulama konumu');
     const changedDimensions=['width_mm','height_mm'].some(k=>Object.hasOwn(changes,k));
     for (const k of ['width_mm','height_mm']) if (Object.hasOwn(changes,k) && (!Number.isSafeInteger(changes[k]) || changes[k]<=0)) fail('Geçersiz ölçü');
+    if (Object.hasOwn(changes,'kaynak') && !Object.hasOwn(changes,'elleTeyit')) fail('Kaynak notu yalnız elle teyitle kaydedilir');
     if (Object.hasOwn(changes,'elleTeyit')) {
       // The person enters and vouches for this size in the manual editor, so its confirmation closes with the save.
       if (changes.elleTeyit!==true) fail('elleTeyit yalnız true olabilir');
       if (!['width_mm','height_mm'].every(k=>Object.hasOwn(changes,k))) fail('Elle teyit için en ve boy (mm) gerekli');
-      if (Object.keys(changes).some(k=>!['width_mm','height_mm','elleTeyit','lineId'].includes(k))) fail('Elle teyitle yalnız en ve boy kaydedilir');
-      const {reasons,...kept}=previous;
+      if (Object.keys(changes).some(k=>!['width_mm','height_mm','elleTeyit','lineId','kaynak'].includes(k))) fail('Elle teyitle yalnız en, boy ve kaynak notu kaydedilir');
+      const kaynak=measureNote(changes.kaynak);
+      // A previous note never carries over to a new size: it described the old one.
+      const {reasons,kaynak:oldNote,...kept}=previous;
       db.prepare('UPDATE applications SET width_mm=?,height_mm=?,measure_source=?,needs_confirmation=0 WHERE id=?')
-        .run(changes.width_mm,changes.height_mm,JSON.stringify({...kept,method:'elle',elleTeyit:true}),app.id);
+        .run(changes.width_mm,changes.height_mm,JSON.stringify({...kept,method:'elle',elleTeyit:true,...(kaynak?{kaynak}:{})}),app.id);
       db.prepare("UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='olcu' AND ref_table='applications' AND ref_id=? AND status='acik'").run(user.id,app.id);
-      audit(db,user.id,'uygulama_elle_olcu',app.id,{width_mm:changes.width_mm,height_mm:changes.height_mm,onceki:{width_mm:app.width_mm,height_mm:app.height_mm}});
+      audit(db,user.id,'uygulama_elle_olcu',app.id,{width_mm:changes.width_mm,height_mm:changes.height_mm,...(kaynak?{kaynak}:{}),onceki:{width_mm:app.width_mm,height_mm:app.height_mm,...(oldNote?{kaynak:oldNote}:{})}});
       return {application:db.prepare('SELECT * FROM applications WHERE id=?').get(app.id)};
     }
     if (changes.desenDosyaId!=null) {
@@ -564,6 +567,7 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPendi
         const image=Object.values(images).find(image=>image.fileId===source.gorselFileId);
         applications.push({type:app.kind,position:app.position,width_mm:app.width_mm,height_mm:app.height_mm,lineIds:[lineId],
           preview:preview(design)||extractedByApp.get(app.id),previewVector:previewVector(app,design),placement:formPlacement(app,source,image,design),
+          ...(source.method==='elle' && typeof source.kaynak==='string' && source.kaynak ? {measureNote:source.kaynak} : {}),
           ...(source.scaleMode==='geo_ortalama'&&source.scaleNote?{scaleNote:String(source.scaleNote)}:{})});
       }
       const sizes=JSON.parse(l.sizes_json);
@@ -652,6 +656,15 @@ function createRenderQueue({timeoutMs=PREPARE_TIMEOUT_MS,lockMs=PREPARE_LOCK_MS}
 }
 const renderQueue=createRenderQueue();
 const groundOf=report=>report?.ground?.pages?.[0]?.color ?? null;
+// Optional short source of a manual size ("atölye ölçüsü"): one line, at most 60 characters.
+function measureNote(value) {
+  if (value==null) return null;
+  if (typeof value!=='string') fail('Kaynak notu metin olmalı');
+  const note=value.replace(/\s+/g,' ').trim();
+  if (/[\u0000-\u001f\u007f]/.test(value.replace(/[\t\n\r]/g,''))) fail('Kaynak notu geçersiz karakter içeriyor');
+  if (note.length>60) fail('Kaynak notu en çok 60 karakter olabilir');
+  return note || null;
+}
 function provenance(app) {
   try {return JSON.parse(app.measure_source)||{};} catch {return {};}
 }

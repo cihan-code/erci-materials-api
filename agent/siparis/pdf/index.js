@@ -469,18 +469,22 @@ function applicationTableLayout(doc, apps) {
   const columns = legs ? { ...POSITIONS, ...LEG_POSITION } : POSITIONS;
   const x = 82, labelWidth = 188, cellWidth = legs ? 460 / 6 : 92, headHeight = 36;
   const positions = Object.keys(columns);
+  // Each entry is its size and, for a manual size, its source note in smaller grey type.
   const cells = ['baski', 'nakis'].map(type => positions.map(position =>
-    apps.filter(app => app.type === type && (POSITION_ALIASES[app.position] || app.position) === position).map(app =>
-      SIDED.includes(app.position) ? `${POSITION_LABELS[app.position]} · ${dimensions(app)}` : dimensions(app))));
+    apps.filter(app => app.type === type && (POSITION_ALIASES[app.position] || app.position) === position).map(app => ({
+      text: SIDED.includes(app.position) ? `${POSITION_LABELS[app.position]} · ${dimensions(app)}` : dimensions(app),
+      note: !app.pending && typeof app.measureNote === 'string' && app.measureNote.trim() ? app.measureNote.trim() : null }))));
+  const entryHeight = entry => doc.font('Regular').fontSize(9).heightOfString(entry.text, { width: cellWidth - 6, lineGap: 2 })
+    + (entry.note ? doc.font('Regular').fontSize(7).heightOfString(entry.note, { width: cellWidth - 6, lineGap: 2 }) : 0);
   const heights = cells.map(row => Math.max(36, ...row.map(list => list.length
-    ? 40 + doc.font('Regular').fontSize(9).heightOfString(list.join('\n'), { width: cellWidth - 6, lineGap: 2 }) : 0)));
+    ? 40 + list.reduce((sum, entry) => sum + entryHeight(entry), 0) : 0)));
   const height = headHeight + heights[0] + heights[1];
   if (height > 1120) throw new RangeError('Tek konumda sayfaya sığmayacak kadar çok uygulama var.');
-  return { x, labelWidth, cellWidth, headHeight, columns, positions, cells, heights, height };
+  return { x, labelWidth, cellWidth, headHeight, columns, positions, cells, heights, height, entryHeight };
 }
 
 function applicationTable(doc, apps, y) {
-  const { x, labelWidth, cellWidth, headHeight, columns, positions, cells, heights, height } = applicationTableLayout(doc, apps);
+  const { x, labelWidth, cellWidth, headHeight, columns, positions, cells, heights, height, entryHeight } = applicationTableLayout(doc, apps);
   if (y + height > 1230) { page(doc); y = 65; }
   const headers = ['Özellikler', ...Object.values(columns)];
   let cx = x;
@@ -499,7 +503,13 @@ function applicationTable(doc, apps, y) {
       box(doc, cellX, y, cellWidth, heights[r]);
       if (cells[r][c].length) {
         text(doc, '+', cellX, y + 3, cellWidth, 26, true, { align: 'center' });
-        text(doc, cells[r][c].join('\n'), cellX + 3, y + 34, cellWidth - 6, 9, false, { align: 'center', lineGap: 2 });
+        let entryY = y + 34;
+        for (const entry of cells[r][c]) {
+          text(doc, entry.text, cellX + 3, entryY, cellWidth - 6, 9, false, { align: 'center', lineGap: 2 });
+          if (entry.note) text(doc, entry.note, cellX + 3, entryY + doc.font('Regular').fontSize(9).heightOfString(entry.text, { width: cellWidth - 6, lineGap: 2 }),
+            cellWidth - 6, 7, false, { align: 'center', lineGap: 2, color: '#555555' });
+          entryY += entryHeight(entry);
+        }
       }
     }
     y += heights[r];
