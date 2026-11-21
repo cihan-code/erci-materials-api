@@ -17,7 +17,9 @@ const USAGE = [
   '  kartela-uygula [--kuru]         (kartelalı kalemlere renk no, hex ve standart ad yazar)',
   '  kalip-l-tamamla <L-listesi.json> [--kuru]  (kalıpların yalnız boş refBeden/olculerL alanlarını doldurur)',
   '  kalip-beden-tamamla <kaynakli-tablolar.json> [--kuru]  (yalnız boş bedenTablosu alanlarını doldurur)',
-  '  onay-zinciri --kuru <surumId>  (onayda açılacak İşler kaydını ve takip kartını JSON gösterir, yazmaz)'
+  '  onay-zinciri --kuru <surumId>  (onayda açılacak İşler kaydını ve takip kartını JSON gösterir, yazmaz)',
+  '  boyut-adlari                    (maliyet tablosundaki baskı/nakış boyut adlarını ve adet başı TL\'yi listeler, yazmaz)',
+  '  boyut-esleme-yukle <json>       (mm → boyut adı tablosunu baştan yükler; {} tabloyu boşaltır)'
 ].join('\n');
 const dataDir = () => process.env.DATA_DIR || path.join(__dirname, '../../data');
 async function readPassword() {
@@ -123,9 +125,47 @@ function chainDryRun(args) {
     return result;
   } finally { db.close(); }
 }
+// Read-only: the size names the panel's cost table prices, and the mapping table loaded so far.
+function sizeNameList(args) {
+  if (args.length) throw new Error(USAGE);
+  const sizes = require('./boyutEsleme');
+  const raw = require('../store').readPanelRaw();
+  if (!raw?.data) throw new Error('panel-data.json yok');
+  const names = sizes.sizeNames(raw.data.costTemplates);
+  console.log('tür\tboyut adı\tadet başı TL');
+  for (const r of names) console.log(`${r.tur}\t${r.boyut}\t${r.adetBasiTl}`);
+  if (!names.length) console.log('(maliyet tablosunda baskı/nakış boyutu yok)');
+  const file = path.join(dataDir(), 'siparis.sqlite');
+  let rules = [];
+  if (fs.existsSync(file)) {
+    const db = new (require('better-sqlite3'))(file, { readonly: true, fileMustExist: true });
+    try { rules = sizes.rules(db); } finally { db.close(); }
+  }
+  console.log(rules.length ? 'Yüklü eşleme:' : 'Eşleme tablosu boş: boyut adı ölçüden seçilmez.');
+  for (const r of rules) console.log(`${r.tur}\t${r.boyut}\ten uzun ≤ ${r.en_uzun_mm_max} mm${r.alan_cm2_max != null ? `\talan ≤ ${r.alan_cm2_max} cm²` : ''}`);
+  return { names, rules };
+}
+function loadSizeMap(args) {
+  if (args.length !== 1 || args[0].startsWith('--')) throw new Error(USAGE);
+  const sizes = require('./boyutEsleme');
+  const input = JSON.parse(fs.readFileSync(args[0], 'utf8'));
+  const db = openDb(path.join(dataDir(), 'siparis.sqlite'));
+  try {
+    const rules = sizes.load(db, input);
+    const priced = require('../store').readPanelRaw()?.data?.costTemplates;
+    console.log(`Yüklenen kural: ${rules.length}`);
+    for (const r of rules) {
+      const known = priced?.[r.tur]?.[r.boyut] != null;
+      console.log(`${r.tur}\t${r.boyut}\ten uzun ≤ ${r.en_uzun_mm_max} mm${r.alan_cm2_max != null ? ` ve alan ≤ ${r.alan_cm2_max} cm²` : ''}${known ? '' : '\tUYARI: bu ad maliyet tablosunda yok; bu kurala düşen uygulamanın boyutu boş kalır'}`);
+    }
+    return rules;
+  } finally { db.close(); }
+}
 async function main(argv = process.argv.slice(2)) {
   const [command, name, role, ...flags] = argv;
   if (command === 'onay-zinciri') return chainDryRun(argv.slice(1));
+  if (command === 'boyut-adlari') return sizeNameList(argv.slice(1));
+  if (command === 'boyut-esleme-yukle') return loadSizeMap(argv.slice(1));
   if (command === 'kalip-l-tamamla') return fillFlatsL(argv.slice(1));
   if (command === 'kalip-beden-tamamla') return fillFlatsL(argv.slice(1), 'fillMissingSizeCharts');
   const needsName = ['kullanici-ekle', 'sifre-degistir', 'kullanici-onaysiz', 'kullanici-onayli'];
