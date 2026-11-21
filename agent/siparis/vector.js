@@ -498,6 +498,16 @@ function flatMeasureImage(image, maxPixels = 1.2e6) {
 }
 
 // PDF page stretched to width x height pixels (same fit as the IoU render below).
+// All four corners of the traced page painted opaque in one pale colour: the white field
+// around a non-rectangular mark (inside its crop) was traced as a filled area. A mark that
+// fills its own corners in a colour (a box badge) is artwork and is not asked about.
+async function tracedGround(pdf) {
+  const n = 48, data = await renderPixels(pdf, n, n, true), at = (x, y) => Array.from(data.subarray((y*n+x)*4, (y*n+x)*4+4));
+  const corners = [at(1,1), at(n-2,1), at(1,n-2), at(n-2,n-2)];
+  if (corners.some(c => c[3] < 250 || Math.min(...c.slice(0,3)) < 235)) return null;
+  if (corners.some(c => c.slice(0,3).some((v,i) => Math.abs(v-corners[0][i]) > 12))) return null;
+  return hexColor(corners[0].slice(0,3));
+}
 async function renderPixels(pdf, width, height, transparent) {
   const canvas = canvasLib.createCanvas(width, height), ctx = canvas.getContext('2d');
   const doc = await openPdf(pdf);
@@ -864,7 +874,7 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
   if (!Buffer.isBuffer(buffer) || !buffer.length) throw new TypeError('buffer gerekli');
   const target = targetSize(targetMm);
   mime = String(mime || '').split(';')[0].toLowerCase();
-  let pdf, kind, inputPages, rasterQualityReport, designBox, rasterDetails = [], reasons = [], aspectRatioError = 0, grounds = [];
+  let pdf, kind, inputPages, rasterQualityReport, designBox, rasterDetails = [], reasons = [], aspectRatioError = 0, grounds = [], opaqueRaster = false;
   const vectorizers = new Set();
   if (!['baski','nakis'].includes(applicationType)) throw new TypeError('applicationType baski veya nakis olmalı');
   if (manualVector && mime!=='application/pdf') throw new Error('Hazır vektör PDF gerekli');
@@ -888,6 +898,7 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
     const source = { width: result.image.width * 0.75, height: result.image.height * 0.75 };
     if (target) aspectRatioError=Math.abs((target.width/target.height)/(source.width/source.height)-1);
     rasterQualityReport = await rasterQuality(result.image,pdf,result.svg,result.dimensions,applicationType,target,undefined,result.tracing);
+    opaqueRaster = !result.image.transparent;
     vectorizers.add(result.tracing.vectorizer);
     rasterDetails.push(rasterQualityReport.metrics.minLineMm);
     reasons.push(...rasterQualityReport.reasons);
@@ -960,11 +971,18 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
     if(bounded.resampled)reasons.push('Büyük raster bellek sınırı için küçültüldü; ince detayları özgün dosyayla teyit edin.');
     aspectRatioError=Math.abs((target.width/target.height)/(original.image.width/original.image.height)-1);
     rasterQualityReport=await rasterQuality(original.image,pdf,'',target,applicationType,target,qualitySource.metrics);
+    opaqueRaster=!original.image.transparent;
     rasterDetails.push(rasterQualityReport.metrics.minLineMm);reasons.push(...rasterQualityReport.reasons);
     if (![qualitySource.metrics?.pathCount,qualitySource.metrics?.nodeCount].every(n=>Number.isFinite(n) && n>=0)) {
       rasterQualityReport.metrics.pathCount=null;rasterQualityReport.metrics.nodeCount=null;
       reasons.push('Önizlemenin yol ve düğüm ölçümleri eksik; özgün kaynaktan yeniden hazırlama gerekir.');
     }
+  }
+  // G58: a traced opaque ground (a white field behind a PNG logo) would print as a box; ask, change nothing.
+  // White ink on a transparent PNG is artwork, not a field.
+  if (rasterQualityReport && opaqueRaster) {
+    const field = await tracedGround(pdf);
+    if (field) reasons.push(`Desende düz zemin var (${field}); baskıya dahil mi? Teyit edin.`);
   }
   const pages = await inspectPdf(pdf);
   const colors = new Set(pages.flatMap(x => [...x.colors]));

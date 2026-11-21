@@ -130,6 +130,16 @@ function dominant(p, indices) {
   for(let key=0;key<4096;key++)if(n[key]&&(best<0||n[key]>n[best]||n[key]===n[best]&&first[key]<first[best]))best=key;
   return best<0 ? [255,255,255] : [sum[best*3]/n[best],sum[best*3+1]/n[best],sum[best*3+2]/n[best]];
 }
+// G58: no garment on a pale ground usually means a white or pale garment the mask cannot
+// separate from it (no edge is traced from shadows). Say so instead of a bare count.
+function paleGroundReason(p) {
+  const {width:w,height:h}=p,edges=[];
+  for(let x=0;x<w;x++){edges.push(x,(h-1)*w+x);}for(let y=0;y<h;y++)edges.push(y*w,y*w+w-1);
+  const bg=dominant(p,edges);
+  if(Math.min(...bg)<225)return [];
+  const hex='#'+bg.map(v=>Math.round(v).toString(16).padStart(2,'0')).join('');
+  return [`Ürün zeminden ayrılamadı: görselin zemini açık renkli (${hex}); beyaz veya açık renkli ürünün kenarı güvenilir bulunamadı. Ürünü renkli zeminde gösteren bir görsel yükleyin ya da ölçüyü elle girin.`];
+}
 function productMask(p) {
   const {width:w,height:h,data}=p,edges=[];
   for(let x=0;x<w;x++){edges.push(x,(h-1)*w+x);}for(let y=0;y<h;y++)edges.push(y*w,y*w+w-1);
@@ -1331,11 +1341,12 @@ async function autoMeasureLeg({image,design,flat,product,position}) {
   return {width_mm:width,height_mm:height,measure_source:source,needs_confirmation:reasons.length>0,reasons,reason:reasons.join(' ')};
 }
 
-async function autoMeasure({image,design,flat,product,position,color}) {
+async function autoMeasure({image,design,flat,product,position,color,viewHint=null}) {
   if(['kol','sol_kol','sag_kol'].includes(position))return autoMeasureSleeve({image,design,flat,product,position});
   if(LEGS.includes(position))return autoMeasureLeg({image,design,flat,product,position});
   const scalePair=scalePairFor(flat,product),pairLabel=scalePair==='boy_gogus'?'boy/göğüs':'boy/etek',horizontalLabel=scalePair==='boy_gogus'?'göğüs':'etek';
   const started=performance.now(),timings={},reasons=[],source={scalePair,method:'otomatik',flatId:flat?.id??null,flatAd:flat?.ad??null,refBeden:flat?.refBeden??null,refCm:flat?.refLengthCm??null,olculerL:flat?.olculerL??null,chestPx:null,designBoxPx:null,scale:null,mmPerPx:null,confidence:0,gorselFileId:image?.id??null,desenFileId:design?.id??null};
+  if(viewHint)source.viewHint=viewHint;
   let width=null,height=null;
   const positive=n=>Number.isFinite(n)&&n>0;
   const measurements=flat?.refBeden==='L' && flat?.olculerL && typeof flat.olculerL==='object' ? flat.olculerL : {};
@@ -1377,10 +1388,11 @@ async function autoMeasure({image,design,flat,product,position,color}) {
         const carrier=upper.includes(position)&&ratios.length&&carrying.filter(Boolean).length===1&&matches.every((m,k)=>carrying[k]||!m.box)?carrying.indexOf(true):-1;
         pairViews(pages[i],refs,cues,matches,[],carrier<0?null:viewForPosition(position)==='on'?carrier:1-carrier);
         if(carrier>=0)cues.forEach((c,k)=>{c.designCarrier=k===carrier;});
+        if(i===0)applyViewHint(refs,cues,viewHint);
       }
       for(let k=0;k<refs.length;k++) {
         const ref=refs[k],cue=cues[k],scale=scaleFor(ref,measurements,scalePair,pages[i],calK);
-        allViews.push({page:i+1,index:k,view:cue.view,garmentColor:garmentColor(dominant(pages[i],Array.from(ref.mask.keys()).filter(j=>ref.mask[j]))),hooded:cue.hooded,viewEvidence:{lining:cue.lining,cords:cue.cords,...(cue.neckDepth!==undefined?{neckDepth:cue.neckDepth}:{}),...(cue.pairVotes?{pairVotes:cue.pairVotes}:{}),...(cue.viewConflict?{viewConflict:cue.viewConflict}:{}),...(cue.designCarrier!==undefined?{designCarrier:cue.designCarrier}:{})},maskMethod:ref.maskMethod,...(ref.splitMethod?{splitMethod:ref.splitMethod}:{}),productBoxPx:ref.box,shoulderY:ref.shoulderY,hemY:ref.hemY,hemWidthPx:ref.hemWidthPx,chestLinePx:ref.chestLine??null,bodyHeightPx:ref.bodyHeightPx,...scale});
+        allViews.push({page:i+1,index:k,view:cue.view,garmentColor:garmentColor(dominant(pages[i],Array.from(ref.mask.keys()).filter(j=>ref.mask[j]))),hooded:cue.hooded,viewEvidence:{lining:cue.lining,cords:cue.cords,...(cue.neckDepth!==undefined?{neckDepth:cue.neckDepth}:{}),...(cue.pairVotes?{pairVotes:cue.pairVotes}:{}),...(cue.viewConflict?{viewConflict:cue.viewConflict}:{}),...(cue.viewSource?{viewSource:cue.viewSource}:{}),...(cue.designCarrier!==undefined?{designCarrier:cue.designCarrier}:{})},maskMethod:ref.maskMethod,...(ref.splitMethod?{splitMethod:ref.splitMethod}:{}),productBoxPx:ref.box,shoulderY:ref.shoulderY,hemY:ref.hemY,hemWidthPx:ref.hemWidthPx,chestLinePx:ref.chestLine??null,bodyHeightPx:ref.bodyHeightPx,...scale});
         if(cue.view!=='teyit'&&cue.view!==viewForPosition(position))continue;
         if(refs.length>1&&cue.view==='teyit'&&!designs.length)continue;
         if(designs.length)for(let j=0;j<designs.length;j++) {
@@ -1448,6 +1460,7 @@ async function autoMeasure({image,design,flat,product,position,color}) {
     const chosen=refined[0];
     if(!chosen) {
       if(unknownViews.length)reasons.push(unknownViewReason());
+      if(!allViews.length&&pages.length)reasons.push(...paleGroundReason(pages[0]));
       reasons.push(`Ürün maskesi veya görselde desen bulunamadı (${allViews.length} ürün, 0 uygun desen adayı).`);
     }
     else {
@@ -1776,6 +1789,35 @@ function pairViews(p,refs,cues,matches,labels=[],linkedFront=null) {
   }
   cues[votes[0].front].view='on';cues[1-votes[0].front].view='arka';
 }
+// G58: one front/back answer per picture. hint={front:'sol'|'sag'|'ust'|'alt',source}
+// names the front garment by its place on the sheet: 'kullanici' (the user's
+// answer) and 'olcum' (the measurement this extraction must follow) win;
+// 'baska_baski' is what another print of the same picture found and only
+// settles an undecided pair (a contradiction stays open).
+// hint={conflict} carries a disagreement between prints: both views stay open.
+const VIEW_SIDES=['sol','sag','ust','alt'];
+function applyViewHint(refs,cues,hint) {
+  if(!hint||refs.length!==2)return;
+  if(hint.conflict) {for(const c of cues){c.view='teyit';c.viewConflict=hint.conflict;c.viewSource='baska_baski';}return;}
+  if(!VIEW_SIDES.includes(hint.front))return;
+  const across=['sol','sag'].includes(hint.front),centre=r=>across?r.box.x+r.box.w/2:r.box.y+r.box.h/2,size=r=>across?r.box.w:r.box.h;
+  const [a,b]=refs.map(centre);
+  // Garments that do not sit apart along the named axis cannot be told apart by it.
+  if(Math.abs(a-b)<Math.min(...refs.map(size))/2)return;
+  const first=a<b?0:1,front=['sol','ust'].includes(hint.front)?first:1-first,label=`${front+1}. ürün ön`;
+  if(hint.source!=='baska_baski') {
+    cues[front].view='on';cues[1-front].view='arka';
+    for(const c of cues){delete c.viewConflict;c.viewSource=hint.source;c.pairVotes=[...(c.pairVotes||[]),`${hint.source==='kullanici'?'kullanıcı teyidi':'ölçümün görünümü'}: ${label}`];}
+    return;
+  }
+  const decided=cues.findIndex(c=>c.view==='on');
+  if(decided<0&&cues.every(c=>c.view==='teyit'&&!c.viewConflict)) {
+    cues[front].view='on';cues[1-front].view='arka';
+    for(const c of cues){c.viewSource='baska_baski';c.pairVotes=[...(c.pairVotes||[]),`aynı görselin başka baskısı: ${label}`];}
+  } else if(decided>=0&&decided!==front) {
+    for(const c of cues){c.view='teyit';c.viewSource='baska_baski';c.viewConflict=`bu baskı ${decided+1}. ürünü, aynı görselin başka baskısı ${front+1}. ürünü ön buldu`;}
+  }
+}
 // Re-reading a page at a higher resolution keeps the garment found on the
 // scan raster: its mask is enlarged and its measurements scaled.
 const HI_RES_SHORT=120, HI_RES_TARGET=160, HI_RES_EDGE=1600, HI_RES_PIXELS=2.5e6, SMALL_PRINT_PX=64;
@@ -1840,7 +1882,7 @@ function positionPrint(match,ref,position) {
   return {...chosen,ambiguous:false,others:[],known:ranked.slice(1).map(r=>r.c.box)};
 }
 // Artwork recovery uses the existing placement detector but never infers a physical scale.
-async function extractArtwork({image,position,product:productKey,color}) {
+async function extractArtwork({image,position,product:productKey,color,viewHint=null}) {
   const view=viewForPosition(position);
   const supported=['gogus','sol_gogus','sag_gogus','sirt'];
   if(!supported.includes(position))return {reason:'Bu konumda üründen güvenilir desen ayrıştırılamadı; ayrı desen dosyası bağlayın.'};
@@ -1877,6 +1919,7 @@ async function extractArtwork({image,position,product:productKey,color}) {
     const cues=productViewCues(p,refs,productKey);
     const matches=refs.map(ref=>colorDesign(p,ref,position==='sirt'));
     pairViews(p,refs,cues,matches,labels);
+    if(i===0)applyViewHint(refs,cues,viewHint);
     for(const [index,ref] of refs.entries()) {
       const cue=cues[index];
       if(cue.view!=='teyit'&&cue.view!==view)continue;
@@ -2109,4 +2152,4 @@ async function extractArtwork({image,position,product:productKey,color}) {
     return {buffer:canvas.toBuffer('image/png'),placement:{page,view,rasterWidth:w,rasterHeight:h,designBoxPx:{...box,x:x+box.x,y:y+box.y}},warnings,notes};
   } finally {canvas.width=canvas.height=0;}
 }
-module.exports={autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette,silhouettes,extractArtwork};
+module.exports={paleGroundReason,applyViewHint,autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette,silhouettes,extractArtwork};

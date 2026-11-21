@@ -75,6 +75,12 @@ function init(db) {
     version_id INTEGER PRIMARY KEY REFERENCES order_versions(id),
     token TEXT, started_at INTEGER, ready INTEGER NOT NULL DEFAULT 0, source_json TEXT
   );
+  -- G58: the user's front/back answer for one product picture (by its bytes) in a draft version.
+  CREATE TABLE IF NOT EXISTS document_image_views (
+    version_id INTEGER NOT NULL REFERENCES order_versions(id), sha256 TEXT NOT NULL,
+    front TEXT NOT NULL CHECK(front IN ('sol','sag','ust','alt')), user_id INTEGER, created_at INTEGER NOT NULL,
+    PRIMARY KEY(version_id,sha256)
+  );
   `);
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS document_file_path ON files(version_id,path)');
   flats.init(db);
@@ -400,18 +406,80 @@ function artworkFor(db,v,line,app) {
   const selected=productImageFor(v,line,app),image=selected.image;
   const gap=explicit||candidates.length>1 ? 'Bu uygulama için desenDosyaId ile tek bir geçerli kaynak bağlayın.' : selected.gap;
   // The line colour picks one garment on a sheet of colour variants.
-  const key=JSON.stringify([ARTWORK_EXTRACTION_REVISION,line.product_key,line.color_name??null,app.position,app.kind,image?.id,image?.sha256,image?.gorunum,gap]);
-  return {image,key,gap};
+  // G58: the separation follows the front/back this print was measured with (or the picture's answer).
+  const measured=provenance(app),own=image && measured.gorselFileId===image.id ? frontSide(measured.views,measured.selectedPage ?? 1) : null;
+  const viewHint=own ? {front:own,source:'olcum'} : imageViewHint(db,v,image,app.id);
+  const key=JSON.stringify([ARTWORK_EXTRACTION_REVISION,line.product_key,line.color_name??null,app.position,app.kind,image?.id,image?.sha256,image?.gorunum,gap,...(viewHint?[viewHint]:[])]);
+  return {image,key,gap,...(viewHint?{viewHint}:{})};
+}
+// G58: where the front garment sits on a sheet whose two garments are named front and back.
+function frontSide(views,page=1) {
+  const pair=(views||[]).filter(g=>g?.page===page && g.productBoxPx);
+  const on=pair.filter(g=>g.view==='on'),back=pair.filter(g=>g.view==='arka');
+  if(pair.length!==2 || on.length!==1 || back.length!==1)return null;
+  const c=b=>({x:b.x+b.w/2,y:b.y+b.h/2}),a=c(on[0].productBoxPx),b=c(back[0].productBoxPx);
+  return Math.abs(a.x-b.x)>=Math.abs(a.y-b.y) ? (a.x<b.x?'sol':'sag') : (a.y<b.y?'ust':'alt');
+}
+const sameImageIds=(v,image)=>new Set(v.files.filter(f=>f.kind==='urun_gorsel' && image && f.sha256===image.sha256).map(f=>f.id));
+// G58: one front/back decision per picture. Another print of the same picture
+// (same bytes, any upload) that settled the pair from its own evidence hands
+// its answer on; prints that disagree turn into one open question.
+function imageViewHint(db,v,image,appId) {
+  if(!image)return null;
+  // The user's answer for the picture decides; it is asked once, not per print.
+  const answered=db && v.id!=null ? db.prepare('SELECT front FROM document_image_views WHERE version_id=? AND sha256=?').get(v.id,image.sha256) : null;
+  if(answered)return {front:answered.front,source:'kullanici'};
+  const ids=sameImageIds(v,image),sides=new Set();
+  for(const line of v.lines) for(const app of line.applications) {
+    if(app.id===appId)continue;
+    const s=provenance(app);
+    if(!ids.has(s.gorselFileId) || !['otomatik','otomatik_renk'].includes(s.method))continue;
+    // A pair settled by a handed-on answer is no evidence of its own.
+    if((s.views||[]).some(g=>g?.viewEvidence?.viewSource==='baska_baski'))continue;
+    const side=frontSide(s.views,s.selectedPage ?? 1);
+    if(side)sides.add(side);
+  }
+  if(sides.size>1)return {conflict:'aynı görselin baskıları önü farklı üründe buldu; ön/arka teyit edilmeli'};
+  return sides.size ? {front:[...sides][0],source:'baska_baski'} : null;
+}
+// G58: answers an open measurement confirmation with "the front garment is on the
+// left/right/top/bottom of this picture". The answer is stored for the picture's bytes
+// and every print on it is measured again at once; no size is entered here.
+async function answerView(db,dataDir,confirmationId,front,user) {
+  const {versionId}=tx(db,()=> {
+    assertUser(db,user.id);
+    if(!['sol','sag','ust','alt'].includes(front))fail('onUrun sol, sag, ust veya alt olmalı');
+    const c=db.prepare('SELECT * FROM confirmations WHERE id=?').get(confirmationId);
+    if(!c)fail('Teyit bulunamadı',404);
+    if(c.kind!=='olcu' || c.ref_table!=='applications')fail('Ön/arka yalnız uygulama ölçü teyidinde cevaplanır');
+    if(c.status!=='acik')fail('Teyit zaten kapalı',409);
+    const app=db.prepare('SELECT * FROM applications WHERE id=?').get(c.ref_id);
+    const line=app && db.prepare('SELECT * FROM order_lines WHERE id=?').get(app.line_id);
+    if(!line)fail('Uygulama bulunamadı',404);
+    const v=draft(db,line.version_id);unlocked(db,v.id);
+    const s=provenance(app),measured=v.files.find(f=>f.id===s.gorselFileId && f.kind==='urun_gorsel');
+    const image=measured || productImageFor(v,v.lines.find(l=>l.id===line.id),app).image;
+    if(!image)fail('Bu uygulamanın ölçüldüğü ürün görseli yok',409);
+    db.prepare(`INSERT INTO document_image_views(version_id,sha256,front,user_id,created_at) VALUES(?,?,?,?,?)
+      ON CONFLICT(version_id,sha256) DO UPDATE SET front=excluded.front,user_id=excluded.user_id,created_at=excluded.created_at`).run(v.id,image.sha256,front,user.id,Date.now());
+    audit(db,user.id,'gorunum_teyit',app.id,{confirmationId:c.id,gorselDosyaId:image.id,onUrun:front});
+    return {versionId:v.id};
+  });
+  const olcuHatasi=await measureAfterSave(db,dataDir,versionId,user,true);
+  return {teyit:db.prepare('SELECT * FROM confirmations WHERE id=?').get(confirmationId),onUrun:front,
+    acikTeyitler:openMeasurements(db,versionId),...(olcuHatasi?{olcuHatasi}:{})};
 }
 // G53: the garment of `view` in a product picture that holds two (autoMeasure pairViews),
 // as recorded by the applications measured on it. All of them must name one garment
 // for the view; disagreement, an undecided ('teyit') or missing pairing gives null
 // and the form keeps the whole picture, so nothing uncertain is hidden.
+// fileId: one id, or the ids of every upload with the same bytes (G58: one picture, one decision).
 function garmentCrop(apps,fileId,view) {
+  const ids=fileId instanceof Set ? fileId : new Set([fileId]);
   let found=null;
   for (const app of apps) {
     const s=provenance(app);
-    if (s.gorselFileId!==fileId || !Array.isArray(s.views)) continue;
+    if (!ids.has(s.gorselFileId) || !Array.isArray(s.views)) continue;
     const {rasterWidth:W,rasterHeight:H}=s, page=s.selectedPage ?? 1;
     if (![W,H].every(n=>Number.isSafeInteger(n) && n>0)) return null;
     const garments=s.views.filter(g=>g?.page===page && g.productBoxPx && [g.productBoxPx.x,g.productBoxPx.y,g.productBoxPx.w,g.productBoxPx.h].every(Number.isFinite));
@@ -419,8 +487,14 @@ function garmentCrop(apps,fileId,view) {
     const named=garments.filter(g=>g.view===view);
     if (named.length!==1) return null;
     const b=named[0].productBoxPx, pad=Math.round(Math.max(b.w,b.h)*.04);
-    const x=Math.max(0,b.x-pad), y=Math.max(0,b.y-pad);
-    const crop={page,x,y,w:Math.min(W,b.x+b.w+pad)-x,h:Math.min(H,b.y+b.h+pad)-y,rasterWidth:W,rasterHeight:H};
+    let x0=Math.max(0,b.x-pad), y0=Math.max(0,b.y-pad), x1=Math.min(W,b.x+b.w+pad), y1=Math.min(H,b.y+b.h+pad);
+    // The margin stops at a neighbouring garment: its sleeve must not show in this view's slot (G58).
+    for (const {productBoxPx:o} of garments.filter(g=>g!==named[0])) {
+      if (o.x>=b.x+b.w) x1=Math.min(x1,o.x); else if (o.x+o.w<=b.x) x0=Math.max(x0,o.x+o.w);
+      if (o.y>=b.y+b.h) y1=Math.min(y1,o.y); else if (o.y+o.h<=b.y) y0=Math.max(y0,o.y+o.h);
+    }
+    const x=x0, y=y0;
+    const crop={page,x,y,w:x1-x,h:y1-y,rasterWidth:W,rasterHeight:H};
     const same=a=>['x','w'].every(k=>Math.abs(a[k]/a.rasterWidth-crop[k]/W)<=.02) && ['y','h'].every(k=>Math.abs(a[k]/a.rasterHeight-crop[k]/H)<=.02);
     if (found && (found.page!==page || !same(found))) return null;
     found ??= crop;
@@ -478,7 +552,7 @@ async function extractPreview(db,dataDir,v,line,app,input,user,signal,retryError
     if(previous&&(!retryError||previous.status!=='hata'))return previous;
     // A small print is read a second time at a higher resolution; on a slow
     // single CPU a ten-page sheet then needs more than the former 15 s.
-    artwork=await generateInChild({type:'extractArtwork',input:{image:original,position:app.position,product:line.product_key,color:line.color_name}},signal,{timeoutMs:30000});
+    artwork=await generateInChild({type:'extractArtwork',input:{image:original,position:app.position,product:line.product_key,color:line.color_name,viewHint:input.viewHint??null}},signal,{timeoutMs:30000});
     if(artwork.reason) {message=artwork.reason;status='teyit';}
     else {
       result=await generateInChild({type:'vector',designBox:true,input:{buffer:artwork.buffer,mime:'image/png'}},signal);
@@ -555,10 +629,10 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPendi
       }
       // A picture with both garments fills each slot with its own garment; a single upload fills both.
       for (const [key,view,other] of [['front','on','back'],['back','arka','front']]) {
-        const own=images[key] && garmentCrop(l.applications,images[key].fileId,view);
+        const own=images[key] && garmentCrop(l.applications,sameImageIds(v,files[key].file),view);
         if (own) images[key].crop=own;
         else if (!images[key] && files[other]) {
-          const crop=garmentCrop(l.applications,files[other].file.id,view);
+          const crop=garmentCrop(l.applications,sameImageIds(v,files[other].file),view);
           if (crop) images[key]={fileId:files[other].file.id,view,mime:files[other].mime,buffer:images[other].buffer,crop};
         }
       }
@@ -705,7 +779,8 @@ function autoInputs(db,v,line,app) {
   const library=flats.list(db),{candidates,flat}=flats.selection(db,line,view==='teyit'?image.gorunum:view,library);
   const flatNote=!flat && candidates.length>1 ? 'Bu ürün için birden çok kalıp var; kalıbı seçin' : !candidates.length || flat ? flats.missingLNote(db,line,flat,library) : null;
   // The line colour only adds an information note to the measurement.
-  return {image,design,flat,product:line.product_key,position:app.position,...(line.color_name?{color:line.color_name}:{}),...(flatNote?{flatNote}:{}),...(design && linked==null?{linkDesign:true}:{})};
+  const viewHint=SLEEVES.includes(app.position) ? null : imageViewHint(db,v,image,app.id);
+  return {image,design,flat,product:line.product_key,position:app.position,...(line.color_name?{color:line.color_name}:{}),...(viewHint?{viewHint}:{}),...(flatNote?{flatNote}:{}),...(design && linked==null?{linkDesign:true}:{})};
 }
 function autoFingerprint({desenDosyaId,...app},input) {return JSON.stringify({app,input});}
 // autoMeasure states these two when no single L pattern was passed; a known ambiguity replaces them.
@@ -714,7 +789,16 @@ function explain(result,input) {
   let reasons=Array.isArray(result.reasons) ? result.reasons : result.reason ? [result.reason] : [];
   if(input.flatNote)reasons=[input.flatNote,...reasons.filter(r=>!NO_FLAT_REASONS.some(prefix=>String(r).startsWith(prefix)))];
   if(SLEEVES.includes(input.position) && reasons.length && result.width_mm==null)reasons=[`Kol konumu ${input.image.gorunum==='kol'?'ayrı kol':input.image.gorunum==='arka'?'arka':'ön'} görselde ölçülemedi: ${reasons.join(' ')}`];
-  return {...result,reasons,reason:reasons.join(' '),needs_confirmation:result.needs_confirmation || reasons.length>0};
+  const oneri=measureSuggestion(result);
+  // G58: the located candidate goes to the confirmation as a proposal; the size stays empty.
+  if(oneri)reasons=[...reasons,`Sistem önerisi (bulunan aday kutudan): ${String(oneri.width_mm/10).replace('.',',')} × ${String(oneri.height_mm/10).replace('.',',')} cm; yukarıdaki gerekçeye bakıp doğruysa elle onaylayın.`];
+  return {...result,...(oneri?{measure_source:{...result.measure_source,oneri}}:{}),reasons,reason:reasons.join(' '),needs_confirmation:result.needs_confirmation || reasons.length>0};
+}
+// A candidate box with a physical scale that the measurement would not vouch for (G58).
+function measureSuggestion(result) {
+  const s=result?.measure_source,b=s?.candidateBoxPx,k=s?.mmPerPx;
+  if(result.width_mm!=null || !b || !(k>0) || ![b.w,b.h].every(n=>Number.isFinite(n) && n>0))return null;
+  return {width_mm:Math.round(b.w*k),height_mm:Math.round(b.h*k)};
 }
 // Replace a stale or generic open measurement confirmation with the concrete reason; nothing is measured.
 function noteReason(db,user,appId,reason) {
@@ -746,12 +830,12 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
   return renderQueue(async signal=> {
     const v=draft(db,versionId);unlocked(db,versionId);
     const results=[];
-    for(const line of v.lines) for(const original of line.applications) {
-      if(lineId!=null && line.id!==lineId)continue;
+    const one=async(line,original,changed)=> {
       signal.throwIfAborted();
       const app=db.prepare('SELECT * FROM applications WHERE id=?').get(original.id);
-      if(!app || (!regenerate && manuallyMeasured(app)))continue;
-      const input=autoInputs(db,v,line,app);
+      if(!app || (!regenerate && manuallyMeasured(app)))return;
+      // A fresh snapshot: a print measured just before may have settled this picture's views.
+      const fresh=draft(db,versionId),input=autoInputs(db,fresh,fresh.lines.find(l=>l.id===line.id),app);
       if(input.gap) {
         tx(db,()=> {
           draft(db,versionId);unlocked(db,versionId);
@@ -760,11 +844,12 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
           if(current && !manuallyMeasured(current) && current.width_mm==null && noteReason(db,user,app.id,input.gap))
             results.push({applicationId:app.id,width_mm:null,height_mm:null,needs_confirmation:true,reason:input.gap});
         });
-        continue;
+        return;
       }
       const previous=provenance(app);
-      if(changedOnly && ['otomatik','otomatik_renk'].includes(previous.method) && previous.gorselFileId===input.image.id && previous.desenFileId===(input.design?.id??null) &&
-        previous.flatId===(input.flat?.id??null) && previous.refCm===(input.flat?.refLengthCm??null) && previous.refBeden===(input.flat?.refBeden??null) && JSON.stringify(previous.olculerL??null)===JSON.stringify(input.flat?.olculerL??null))continue;
+      if(changed && ['otomatik','otomatik_renk'].includes(previous.method) && previous.gorselFileId===input.image.id && previous.desenFileId===(input.design?.id??null) &&
+        previous.flatId===(input.flat?.id??null) && previous.refCm===(input.flat?.refLengthCm??null) && previous.refBeden===(input.flat?.refBeden??null) && JSON.stringify(previous.olculerL??null)===JSON.stringify(input.flat?.olculerL??null) &&
+        JSON.stringify(previous.viewHint??null)===JSON.stringify(input.viewHint??null))return;
       const fingerprint=autoFingerprint(app,input);
       let result;
       try {
@@ -796,6 +881,17 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
         audit(db,user.id,'uygulama_otomatik_olc',app.id,{width_mm:result.width_mm,height_mm:result.height_mm,reason:result.reason});
         results.push({applicationId:app.id,...result});
       });
+    };
+    for(const line of v.lines) for(const original of line.applications) {
+      if(lineId!=null && line.id!==lineId)continue;
+      await one(line,original,changedOnly);
+    }
+    // G58: a front/back answer found by a later print reaches the earlier prints of the same picture.
+    const settled=draft(db,versionId);
+    for(const line of settled.lines) for(const app of line.applications) {
+      if((lineId!=null && line.id!==lineId) || manuallyMeasured(app))continue;
+      const input=autoInputs(db,settled,line,app);
+      if(!input.gap && JSON.stringify(provenance(app).viewHint??null)!==JSON.stringify(input.viewHint??null))await one(line,app,false);
     }
     return {results};
   }).then(r=>{requalifyVersion(db,dataDir,versionId,user);return r;});
@@ -1212,7 +1308,7 @@ function registerWorkshop(boundDb,dataDir) {
     return {providerRef:result.providerRef};
   });
 }
-module.exports={flatCalibrationInput,FLAT_CALIBRATIONS,editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,previewForms,pendingApplications,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+module.exports={explain,measureSuggestion,answerView,garmentCrop,frontSide,imageViewHint,flatCalibrationInput,FLAT_CALIBRATIONS,editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,previewForms,pendingApplications,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
 function vectorModule() {
   // Native tracer/canvas binaries come from npm; a platform without them must say so, not fail anonymously.
   try { return require('./vector'); }

@@ -78,6 +78,10 @@ module.exports = function documentRouter({db,dataDir}) {
     documents.assertFresh(db,v);
     next();
   }));
+  // G58: the confirmation screen answers "which garment is the front" once per picture;
+  // without onUrun the core route resolves the confirmation as before.
+  router.post('/teyitler/:id/coz',(req,res,next)=>req.body?.onUrun===undefined ? next('route') : next(),
+    wrap(async(req,res)=>res.json(await documents.answerView(db,dataDir,id(req),req.body.onUrun,req.user))));
   router.get('/surumler/:id/atolye-paketi',wrap((req,res)=>res.json(documents.workshopPackage(db,id(req)))));
   return router;
 };
