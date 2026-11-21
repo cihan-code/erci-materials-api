@@ -249,6 +249,15 @@ Eksik bedenler L'den türetilmez. CEKET gibi ürün tarifi olmayan kayıtlar bu 
 ile oluşturulmaz; eşleşmeyen adlar ayrıca raporlanır. Seçili kalıbın tablosu
 sonradan yüklenirse hazırlanmış formlar güncelliğini yitirir ve yeniden üretilir.
 
+`kalip-olcu-yukle <kalip-olculeri.json> [--kuru]` (G66) ek ölçü noktalarını (omuz,
+kol boyu, pazu, kol ağzı …) taşıyan, repo dışındaki ölçü dosyasını yükler. Dosyada
+değerler tam sayı mm, her değerin kaynak hücresi vardır; `bedenTablosu`ya cm olarak
+(`kaynakTuru`, `hucreler`, `gogusTuru` ile) yazılır, form tablosu yine yalnız
+`boy`/`gogus` okur. Öncelik: Excel > resim. Boş tablo doldurulur, resimden gelen
+tablo Excel ile güncellenir; elle girilen ve eşit/üstün kaynaklı tablo ezilmez.
+Ölçüm kodu için tek işlev: `flats.kalipOlculeri(db, kalipId, beden)` -> mm ölçüleri,
+kaynak, kaynak türü ve hücreler (bilinmeyen bedende `null`).
+
 ## G24c — Çoklu görünüm ve desen dosyası olmadan otomatik ölçü
 
 `document_flats.olculerL`, L bedenin pozitif cm değerlerini içeren JSON nesnesidir (`omuzdan_boy`, `etek`, `gogus`, `tum_omuz` vb.). Otomatik fiziksel ölçek yalnız açık `refBeden: "L"` ve `olculerL` ile kurulur. Eski `refLengthPx`, `refLengthCm`, `refAciklama`, `refBeden` ve API/uploader sözleşmeleri korunur. Kalıp pikseli veya standart baskı ölçüsü fiziksel ölçek sağlamaz.
