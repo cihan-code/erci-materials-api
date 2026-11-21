@@ -15,7 +15,8 @@ const USAGE = [
   '  kullanici-onaysiz <ad> | kullanici-onayli <ad>',
   '  eski-kumaslari-aktar [--kuru]',
   '  kartela-uygula [--kuru]         (kartelalı kalemlere renk no, hex ve standart ad yazar)',
-  '  kalip-l-tamamla <L-listesi.json> [--kuru]  (kalıpların yalnız boş refBeden/olculerL alanlarını doldurur)'
+  '  kalip-l-tamamla <L-listesi.json> [--kuru]  (kalıpların yalnız boş refBeden/olculerL alanlarını doldurur)',
+  '  kalip-beden-tamamla <kaynakli-tablolar.json> [--kuru]  (yalnız boş bedenTablosu alanlarını doldurur)'
 ].join('\n');
 const dataDir = () => process.env.DATA_DIR || path.join(__dirname, '../../data');
 async function readPassword() {
@@ -90,14 +91,14 @@ function findUser(db, name) {
   return user;
 }
 // The L list stays outside the public repository; only empty fields are filled.
-function fillFlatsL(args) {
+function fillFlatsL(args, method = 'fillMissingL') {
   const files = args.filter(a => a !== '--kuru');
   if (files.length !== 1 || args.length > 2 || files[0].startsWith('--')) throw new Error(USAGE);
   const records = JSON.parse(fs.readFileSync(files[0], 'utf8')), dry = args.includes('--kuru');
   const db = openDb(path.join(dataDir(), 'siparis.sqlite'));
   try {
     require('./flats').init(db);
-    const result = require('./flats').fillMissingL(db, records, { dry });
+    const result = require('./flats')[method](db, records, { dry });
     if (dry) console.log('[KURU ÇALIŞTIRMA, hiçbir şey yazılmadı]');
     const label = { dolduruldu: dry ? 'doldurulacak' : 'dolduruldu', tam: 'zaten tam', atlandi: 'atlandı' };
     console.log('kalıp\tdurum\tayrıntı');
@@ -110,6 +111,7 @@ function fillFlatsL(args) {
 async function main(argv = process.argv.slice(2)) {
   const [command, name, role, ...flags] = argv;
   if (command === 'kalip-l-tamamla') return fillFlatsL(argv.slice(1));
+  if (command === 'kalip-beden-tamamla') return fillFlatsL(argv.slice(1), 'fillMissingSizeCharts');
   const needsName = ['kullanici-ekle', 'sifre-degistir', 'kullanici-onaysiz', 'kullanici-onayli'];
   const dryCapable = ['eski-kumaslari-aktar', 'kartela-uygula'];
   if (!['kullanici-listele', ...dryCapable, ...needsName].includes(command) || (needsName.includes(command) && !name)) throw new Error(USAGE);

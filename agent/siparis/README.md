@@ -222,6 +222,33 @@ Test: `node --test test/siparis-duz-cizim-araclari.test.js`. Çizimler ve ayarla
 uydurmadır; geçici DATA_DIR ve 127.0.0.1 API üzerinde yükleme, tekrar yükleme ve
 göğüs okunun yarısı genişliğinde desenin 26 cm ölçülmesi denetlenir.
 
+## G57 — Onay ve baskı/nakış formu düzeni
+
+Onay ve baskı/nakış formları üretim formuyla aynı yerleşim işlevini kullanır:
+kartlar görsellerin sağındaki tek sütundan başlar, sığmayanlar alta veya devam
+sayfasına geçer. Üst bilgi şeritlerinin iki sütunu eşit yüksekliktedir ve sayfa
+kenarlarından 40 puan içeridedir. Adetsiz önizlemede adetler `…` ile boş bırakılır.
+
+`document_flats.bedenTablosu`, yalnız asıl kalıp tablosundan okunmuş cm verisini
+saklar. Repo dışında tutulan aktarım dosyasının **sentetik** örneği:
+
+```json
+[{"ad":"Örnek Kalıp","urun":"tisort","bedenTablosu":{"birim":"cm","kaynak":"/yerel/ornek-kalip.png","bedenler":{"S":{"boy":63.2,"gogus":47},"L":{"boy":72.1,"gogus":56}}}}]
+```
+
+```sh
+DATA_DIR=/yerel/veri node agent/siparis/cli.js kalip-beden-tamamla /yerel/tablolar.json --kuru
+DATA_DIR=/yerel/veri node agent/siparis/cli.js kalip-beden-tamamla /yerel/tablolar.json
+```
+
+CLI yalnız boş `bedenTablosu` alanını doldurur; mevcut tabloya ve ölçü referansına
+dokunmaz. Kaynaksız veya geçersiz değerler reddedilir. Form seçili kalıbın tablosunu
+kartların üstünde gösterir; yalnız hem `boy` hem `gogus` değeri bulunan bedenler
+basılır. Veri yoksa veya kalıp yalnız yan boy/basen içeriyorsa boş tablo çıkmaz.
+Eksik bedenler L'den türetilmez. CEKET gibi ürün tarifi olmayan kayıtlar bu CLI
+ile oluşturulmaz; eşleşmeyen adlar ayrıca raporlanır. Seçili kalıbın tablosu
+sonradan yüklenirse hazırlanmış formlar güncelliğini yitirir ve yeniden üretilir.
+
 ## G24c — Çoklu görünüm ve desen dosyası olmadan otomatik ölçü
 
 `document_flats.olculerL`, L bedenin pozitif cm değerlerini içeren JSON nesnesidir (`omuzdan_boy`, `etek`, `gogus`, `tum_omuz` vb.). Otomatik fiziksel ölçek yalnız açık `refBeden: "L"` ve `olculerL` ile kurulur. Eski `refLengthPx`, `refLengthCm`, `refAciklama`, `refBeden` ve API/uploader sözleşmeleri korunur. Kalıp pikseli veya standart baskı ölçüsü fiziksel ölçek sağlamaz.

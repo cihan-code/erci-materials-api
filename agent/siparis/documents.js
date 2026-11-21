@@ -368,7 +368,12 @@ function pendingApplications(db,v) {
 }
 function inputFingerprint(db,v) {
   const pending=[...pendingApplications(db,v).keys()];
-  return JSON.stringify({...(pending.length?{pending}:{}),order:db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id),
+  const bedenTablolari=v.lines.flatMap(line=> {
+    const flat=require('./flats').selection(db,line).flat;
+    return require('./sizeChart').bodyRows(flat?.bedenTablosu).length
+      ? [{lineId:line.id,kalipId:flat.id,bedenTablosu:flat.bedenTablosu}] : [];
+  });
+  return JSON.stringify({...(pending.length?{pending}:{}),...(bedenTablolari.length?{bedenTablolari}:{}),order:db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id),
     lines:v.lines.map(({recipe_version,...line})=>line),files:v.files.filter(f=>!GENERATED.includes(f.kind) && f.kind!==PREVIEW),
     sources:db.prepare(`SELECT s.application_id,s.file_id FROM document_application_sources s
       JOIN applications a ON a.id=s.application_id JOIN order_lines l ON l.id=a.line_id
@@ -575,7 +580,8 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPendi
       const item=l.fabric_item_id ? db.prepare('SELECT name,color_name,color_no FROM stock_items WHERE id=?').get(l.fabric_item_id) : null;
       // The fabric colour of the stock item (same colour name) is the application cards' ground.
       const colorHex=garmentColor(db,l.id);
-      return {id:lineId,product:productLabel(l.product_key),...(colorHex?{colorHex}:{}),color:l.color_name ? require('./pdf').stockColorLabel(l.color_name,item) : 'Renk belirtilmedi',fabric:item ? item.name : 'Kumaş belirtilmedi',sizes,quantity:l.quantity,images,...(l.numune?{numune:true}:{}),...(l.note?{note:l.note}:{})};
+      const flat=require('./flats').selection(db,l).flat;
+      return {id:lineId,product:productLabel(l.product_key),...(flat?.bedenTablosu?{bedenTablosu:flat.bedenTablosu}:{}),...(colorHex?{colorHex}:{}),color:l.color_name ? require('./pdf').stockColorLabel(l.color_name,item) : 'Renk belirtilmedi',fabric:item ? item.name : 'Kumaş belirtilmedi',sizes,quantity:l.quantity,images,...(l.numune?{numune:true}:{}),...(l.note?{note:l.note}:{})};
     }),
     applications,
   };

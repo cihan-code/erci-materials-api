@@ -4,6 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { tx, audit, fail } = require('./db');
 const { assertUser } = require('./auth');
+const { validSizeChart } = require('./sizeChart');
 
 function init(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS document_flats (
@@ -16,6 +17,8 @@ function init(db) {
     db.exec('ALTER TABLE document_flats ADD COLUMN refBeden TEXT');
   if (!db.prepare('PRAGMA table_info(document_flats)').all().some(c => c.name === 'olculerL'))
     db.exec('ALTER TABLE document_flats ADD COLUMN olculerL TEXT');
+  if (!db.prepare('PRAGMA table_info(document_flats)').all().some(c => c.name === 'bedenTablosu'))
+    db.exec('ALTER TABLE document_flats ADD COLUMN bedenTablosu TEXT');
 }
 function get(db, id) {
   const row = db.prepare('SELECT * FROM document_flats WHERE id=?').get(id);
@@ -24,6 +27,7 @@ function get(db, id) {
 }
 function decode(row) {
   if (typeof row.olculerL === 'string') { try {row.olculerL=JSON.parse(row.olculerL);} catch {row.olculerL=null;} }
+  if (typeof row.bedenTablosu === 'string') { try {row.bedenTablosu=JSON.parse(row.bedenTablosu);} catch {row.bedenTablosu=null;} }
   return row;
 }
 function list(db) { return db.prepare('SELECT * FROM document_flats ORDER BY ad,id').all().map(decode); }
@@ -95,6 +99,35 @@ function fillMissingL(db, records, { dry=false } = {}) {
   const unused = [...byName.keys()].filter(ad=>!seen.has(ad));
   return { rows, unused, filled:rows.filter(r=>r.durum==='dolduruldu').length };
 }
+// Filled tables are preserved. Importing a chart never changes scale fields.
+function fillMissingSizeCharts(db, records, { dry=false } = {}) {
+  if (!Array.isArray(records)) fail('Beden tablosu listesi bir dizi olmalı');
+  const names = new Set();
+  for (const r of records) {
+    if (!r || typeof r.ad !== 'string' || !r.ad.trim() || names.has(r.ad.trim()) || !validSizeChart(r.bedenTablosu))
+      fail('Tekil kalıp adı ve kaynaklı gerçek bedenTablosu gerekli');
+    names.add(r.ad.trim());
+  }
+  const rows = [], seen = new Set();
+  const run = () => {
+    for (const f of list(db)) {
+      const r = records.find(r => r.ad.trim() === f.ad.trim()), row = { id:f.id, ad:f.ad, alanlar:[] };
+      rows.push(row);
+      if (!r) { row.durum='atlandi'; row.neden='kaynak listesinde yok'; continue; }
+      seen.add(r.ad.trim());
+      if (r.urun != null && r.urun !== f.urun) { row.durum='atlandi'; row.neden='ürün farklı'; continue; }
+      const stored = db.prepare('SELECT bedenTablosu FROM document_flats WHERE id=?').get(f.id).bedenTablosu;
+      if (stored != null && stored.trim() && stored !== 'null' && stored !== '{}') { row.durum='tam'; continue; }
+      row.alanlar.push('bedenTablosu'); row.durum='dolduruldu';
+      if (!dry) {
+        db.prepare('UPDATE document_flats SET bedenTablosu=? WHERE id=?').run(JSON.stringify(r.bedenTablosu), f.id);
+        audit(db, null, 'kalip_beden_tamamla', f.id, { kaynak:r.bedenTablosu.kaynak, cli:true });
+      }
+    }
+  };
+  dry ? run() : tx(db, run);
+  return { rows, unused:[...names].filter(ad => !seen.has(ad)), filled:rows.filter(r => r.durum==='dolduruldu').length };
+}
 function lineSelection(db,line) {
   const {candidates,flat}=selection(db,line);
   return {kalipId:flat?.id??null,kalipAdaylari:candidates.map(({id,ad,refBeden})=>({id,ad,refBeden}))};
@@ -126,6 +159,7 @@ function saveReference(db, id, input, user) {
     if (!Number.isFinite(input[key]) || input[key] <= 0) fail('Pozitif referans px ve cm gerekli');
   if (typeof input.refAciklama !== 'string' || !input.refAciklama.trim()) fail('Referans açıklaması gerekli');
   if (input.refBeden!=null && (typeof input.refBeden!=='string' || !input.refBeden.trim())) fail('Geçerli referans beden gerekli');
+  if (Object.hasOwn(input,'bedenTablosu') && !validSizeChart(input.bedenTablosu)) fail('Kaynaklı gerçek bedenTablosu gerekli');
   if (Object.hasOwn(input,'olculerL') && (!input.olculerL || typeof input.olculerL!=='object' || Array.isArray(input.olculerL) || !Object.keys(input.olculerL).length || Object.entries(input.olculerL).some(([k,v])=> !/^[a-z][a-z0-9_]*$/.test(k) || !Number.isFinite(v) || v<=0))) fail('olculerL pozitif cm değerleri içeren bir nesne olmalı');
   return tx(db, () => {
     get(db, id);
@@ -133,8 +167,9 @@ function saveReference(db, id, input, user) {
       .run(input.refLengthPx, input.refLengthCm, input.refAciklama.trim(), id);
     if (Object.hasOwn(input,'refBeden')) db.prepare('UPDATE document_flats SET refBeden=? WHERE id=?').run(input.refBeden?.trim()??null,id);
     if (Object.hasOwn(input,'olculerL')) db.prepare('UPDATE document_flats SET olculerL=? WHERE id=?').run(JSON.stringify(input.olculerL),id);
+    if (Object.hasOwn(input,'bedenTablosu')) db.prepare('UPDATE document_flats SET bedenTablosu=? WHERE id=?').run(JSON.stringify(input.bedenTablosu),id);
     audit(db, user.id, 'duz_cizim_referans', id, input);
     return get(db, id);
   });
 }
-module.exports = { init, get, list, upload, saveReference, selection, lineSelection, missingLNote, fillMissingL };
+module.exports = { init, get, list, upload, saveReference, selection, lineSelection, missingLNote, fillMissingL, fillMissingSizeCharts };
