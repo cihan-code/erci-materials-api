@@ -166,3 +166,53 @@ test('G53-4 all three forms print the recipe label of the product, not its key',
     assert.doesNotMatch(text, /\btisort\b/, kind);
   }
 });
+
+// Dimension label rectangles (the light-blue fill) on every page of a rendered form.
+async function labelRects(buffer) {
+  const lib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const doc = await lib.getDocument({ data: Uint8Array.from(buffer), isEvalSupported: false, verbosity: 0 }).promise;
+  const pages = [];
+  try {
+    for (let n = 1; n <= doc.numPages; n++) {
+      const page = await doc.getPage(n), ops = await page.getOperatorList(), rects = [];
+      // PDFKit writes the rectangle, then its fill colour, then the fill.
+      let path = null;
+      for (let i = 0; i < ops.fnArray.length; i++) {
+        const fn = ops.fnArray[i], args = ops.argsArray[i];
+        if (fn === lib.OPS.constructPath) path = args;
+        else if (fn === lib.OPS.setFillRGBColor && path && Array.from(args).join() === '148,220,255' && Array.from(path[0]).join() === '19') {
+          const [x0, y0, x1, y1] = Array.from(path[2]);
+          rects.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+          path = null;
+        }
+      }
+      pages.push({ rects, width: page.view[2], height: page.view[3] });
+    }
+  } finally { await doc.destroy(); }
+  return pages;
+}
+const overlaps = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+test('G53-5 dimension labels never overlap and stay on the page in all three forms', async () => {
+  const pdf = require('../agent/siparis/pdf');
+  // Invented back view: a small neck print just above a wide back print (the EXE layout), plus a label at the right edge.
+  const canvas = require('@napi-rs/canvas').createCanvas(1478, 794), ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, 1478, 794); ctx.fillStyle = '#222222'; ctx.fillRect(784, 61, 676, 657);
+  const back = { fileId: 7, view: 'arka', mime: 'image/png', buffer: canvas.toBuffer('image/png') };
+  const placement = box => ({ fileId: 7, view: 'arka', page: 1, rasterWidth: 1478, rasterHeight: 794, box, swapAxes: false });
+  const order = () => ({ orderNo: 'G53-T1', name: 'Örnek', version: 1, date: '21.11.2026', deliveryDate: 'Teslim tarihi belirtilmedi', description: [],
+    lines: [{ id: '1', product: 'Tişört', color: 'Siyah', fabric: 'Örnek kumaş', quantity: 1, sizes: { M: 1 }, images: { back } }],
+    applications: [
+      { type: 'baski', position: 'ense', width_mm: 28, height_mm: 21, lineIds: ['1'], placement: placement({ x: 1116, y: 103, w: 23, h: 17 }) },
+      { type: 'baski', position: 'sirt', width_mm: 487, height_mm: 379, lineIds: ['1'], placement: placement({ x: 922, y: 172, w: 393, h: 306 }) },
+      { type: 'baski', position: 'kapuson', width_mm: 120, height_mm: 40, lineIds: ['1'], placement: placement({ x: 1380, y: 600, w: 95, h: 60 }) }] });
+  for (const render of [pdf.renderProductionForm, pdf.renderApprovalForm, pdf.renderPrintForm]) {
+    const pages = await labelRects(await render(order()));
+    const rects = pages.flatMap(p => p.rects);
+    assert.equal(rects.length, 6, render.name);
+    for (const page of pages) for (const r of page.rects) {
+      assert.ok(r.x >= 0 && r.y >= 0 && r.x + r.w <= page.width + 0.01 && r.y + r.h <= page.height + 0.01, `${render.name} sayfa dışı`);
+      for (const o of page.rects) if (o !== r) assert.ok(!overlaps(r, o), `${render.name}: ${JSON.stringify(r)} ${JSON.stringify(o)}`);
+    }
+  }
+});

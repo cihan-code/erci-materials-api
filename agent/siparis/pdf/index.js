@@ -357,7 +357,24 @@ async function resolveProductImages(order) {
 
 const DIMENSION_BLUE = '#94dcff';
 
-function dimensionMark(doc, x0, y0, x1, y1, label, bounds, vertical) {
+// A label goes to the first free spot: its own side of the line, the other side,
+// then stepped along the line. Free means inside the picture (so inside the page)
+// and clear of every label already drawn on it. Without a free spot it keeps the
+// first in-bounds position, as before.
+function labelSpot(desired, size, bounds, taken, vertical) {
+  const inside = r => r.x >= bounds.x && r.y >= bounds.y && r.x + r.w <= bounds.right && r.y + r.h <= bounds.bottom;
+  const clear = r => taken.every(t => r.x + r.w + 2 <= t.x || t.x + t.w + 2 <= r.x || r.y + r.h + 2 <= t.y || t.y + t.h + 2 <= r.y);
+  const clamp = r => ({ ...r, x: Math.max(bounds.x, Math.min(bounds.right - r.w, r.x)), y: Math.max(bounds.y, Math.min(bounds.bottom - r.h, r.y)) });
+  const step = vertical ? size.h + 3 : size.w / 2 + 3;
+  for (let k = 0; k <= 8; k++) for (const sign of k ? [1, -1] : [1]) for (const side of desired) {
+    const shift = sign * k * step;
+    const spot = clamp({ x: side.x + (vertical ? 0 : shift), y: side.y + (vertical ? shift : 0), w: size.w, h: size.h });
+    if (inside(spot) && clear(spot)) return spot;
+  }
+  return clamp({ ...desired[0], w: size.w, h: size.h });
+}
+
+function dimensionMark(doc, x0, y0, x1, y1, label, bounds, vertical, taken = []) {
   // A dark outline keeps the pale blue line visible on both light and dark products.
   doc.save().lineCap('round');
   const ticks = vertical ? [3, 0] : [0, 3];
@@ -369,9 +386,11 @@ function dimensionMark(doc, x0, y0, x1, y1, label, bounds, vertical) {
   }
   const fontSize = 11, labelHeight = 16;
   const labelWidth = doc.font('Bold').fontSize(fontSize).widthOfString(label) + 10;
-  const labelX = Math.max(bounds.x, Math.min(bounds.right - labelWidth, vertical ? x0 + 5 : (x0 + x1 - labelWidth) / 2));
-  const desiredY = vertical ? (y0 + y1 - labelHeight) / 2 : y0 - labelHeight - 4;
-  const labelY = Math.max(bounds.y, Math.min(bounds.bottom - labelHeight, desiredY));
+  const sides = vertical
+    ? [{ x: x0 + 5, y: (y0 + y1 - labelHeight) / 2 }, { x: x0 - 5 - labelWidth, y: (y0 + y1 - labelHeight) / 2 }]
+    : [{ x: (x0 + x1 - labelWidth) / 2, y: y0 - labelHeight - 4 }, { x: (x0 + x1 - labelWidth) / 2, y: y0 + 4 }];
+  const { x: labelX, y: labelY } = labelSpot(sides, { w: labelWidth, h: labelHeight }, bounds, taken, vertical);
+  taken.push({ x: labelX, y: labelY, w: labelWidth, h: labelHeight });
   doc.rect(labelX, labelY, labelWidth, labelHeight).fill(DIMENSION_BLUE);
   text(doc, label, labelX, labelY + 1, labelWidth, fontSize, true, { color: '#183448', align: 'center', lineBreak: false });
   doc.restore();
@@ -386,7 +405,7 @@ function productImage(doc, source, apps, x, y, w, h) {
   const scale = Math.min(w / opened.width, h / opened.height);
   const width = opened.width * scale, height = opened.height * scale;
   const left = x + (w - width) / 2, top = y + (h - height) / 2;
-  const bounds = { x, y, right: x + w, bottom: y + h };
+  const bounds = { x: Math.max(0, x), y: Math.max(0, y), right: Math.min(doc.page.width, x + w), bottom: Math.min(doc.page.height, y + h) }, taken = [];
   for (const app of placements) {
     if (!apps.includes(app)) continue;
     const { box, rasterWidth, rasterHeight, swapAxes } = app.placement;
@@ -397,8 +416,8 @@ function productImage(doc, source, apps, x, y, w, h) {
     const y0 = top + box.y * sy, y1 = y0 + box.h * sy;
     const widthY = y0 - y >= 24 ? y0 - 6 : y0 + 6;
     const heightX = x1 + 6 <= bounds.right - 6 ? x1 + 6 : x1 - 6;
-    dimensionMark(doc, x0, widthY, x1, widthY, `${cm(swapAxes ? app.height_mm : app.width_mm)} cm`, bounds, false);
-    dimensionMark(doc, heightX, y0, heightX, y1, `${cm(swapAxes ? app.width_mm : app.height_mm)} cm`, bounds, true);
+    dimensionMark(doc, x0, widthY, x1, widthY, `${cm(swapAxes ? app.height_mm : app.width_mm)} cm`, bounds, false, taken);
+    dimensionMark(doc, heightX, y0, heightX, y1, `${cm(swapAxes ? app.width_mm : app.height_mm)} cm`, bounds, true, taken);
   }
 }
 
