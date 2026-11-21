@@ -113,7 +113,6 @@ function createOrder(db, input, user) {
   return tx(db, () => {
     assertUser(db, userId);
     if (typeof input.order_no !== 'string' || !input.order_no.trim()) fail('Sipariş numarası gerekli');
-    if (db.prepare('SELECT 1 FROM orders WHERE order_no=? AND deleted_at IS NOT NULL').get(input.order_no.trim())) fail('Bu sipariş numarası silinmiş bir siparişte kayıtlı; farklı bir numara verin', 409);
     const orderId = Number(db.prepare('INSERT INTO orders(order_no,job_no,customer_name) VALUES(?,?,?)').run(input.order_no.trim(), input.job_no ?? null, input.customer_name ?? null).lastInsertRowid);
     const versionId = Number(db.prepare('INSERT INTO order_versions(order_id,version_no,created_by) VALUES(?,1,?)').run(orderId, userId).lastInsertRowid);
     for (const line of input.lines || []) insertLine(db, versionId, line);
@@ -255,7 +254,8 @@ function deleteOrder(db, orderId, input, user) {
         (c.ref_table='order_versions' AND c.ref_id IN (${marks(versions.length ? versions : [0])})))`)
       .all(...(lines.length ? lines : [0]), ...(lines.length ? lines : [0]), ...(versions.length ? versions : [0])).map(c => c.id);
     for (const id of open) db.prepare("UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE id=?").run(userId, id);
-    db.prepare('UPDATE orders SET deleted_at=?,deleted_by=? WHERE id=?').run(new Date().toISOString(), userId, orderId);
+    // The number is archived under a unique name so a new order can reuse it; the original stays in deleted_order_no and the audit.
+    db.prepare('UPDATE orders SET deleted_at=?,deleted_by=?,deleted_order_no=?,order_no=? WHERE id=?').run(new Date().toISOString(), userId, order.order_no, `${order.order_no}~sil~${orderId}`, orderId);
     audit(db, userId, 'siparis_sil', orderId, { orderNo: order.order_no, versions, kapatilanTeyitler: open });
     return { ok: true, id: orderId, order_no: order.order_no };
   });

@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS orders (
  id INTEGER PRIMARY KEY, order_no TEXT NOT NULL UNIQUE, job_no TEXT, customer_name TEXT,
  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
- deleted_at TEXT, deleted_by INTEGER REFERENCES users(id)
+ deleted_at TEXT, deleted_by INTEGER REFERENCES users(id), deleted_order_no TEXT
 );
 CREATE TABLE IF NOT EXISTS order_versions (
  id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id), version_no INTEGER NOT NULL,

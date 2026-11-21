@@ -76,7 +76,11 @@ test('delete: soft, needs confirmation, hidden from list/detail/panel counters, 
   assert.equal(f.db.prepare('SELECT COUNT(*) n FROM order_lines WHERE version_id=?').get(a.version.id).n, 1);
   const [log] = audits(f.db, 'siparis_sil');
   assert.deepEqual([log.user_id, log.ref, JSON.parse(log.detail_json).orderNo], [f.team.id, String(a.id), a.order_no]);
-  assert.throws(() => orders.createOrder(f.db, { order_no: a.order_no, lines: [] }, f.team), /silinmiş bir siparişte kayıtlı/);
+  const again = f.make({}, { order_no: a.order_no });
+  assert.equal(again.order_no, a.order_no, 'the deleted number can be reused');
+  const kept = f.db.prepare('SELECT * FROM orders WHERE id=?').get(a.id);
+  assert.deepEqual([kept.order_no, kept.deleted_order_no], [`${a.order_no}~sil~${a.id}`, a.order_no]);
+  assert.equal((await call('/siparisler')).body.filter(o => o.order_no === a.order_no).length, 1);
   assert.equal((await call(`/siparisler/${b.id}/sil`, { body: { onay: true }, token: null })).status, 401);
 });
 
