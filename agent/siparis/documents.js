@@ -75,6 +75,12 @@ function init(db) {
     version_id INTEGER PRIMARY KEY REFERENCES order_versions(id),
     token TEXT, started_at INTEGER, ready INTEGER NOT NULL DEFAULT 0, source_json TEXT
   );
+  -- G58: the user's front/back answer for one product picture (by its bytes) in a draft version.
+  CREATE TABLE IF NOT EXISTS document_image_views (
+    version_id INTEGER NOT NULL REFERENCES order_versions(id), sha256 TEXT NOT NULL,
+    front TEXT NOT NULL CHECK(front IN ('sol','sag','ust','alt')), user_id INTEGER, created_at INTEGER NOT NULL,
+    PRIMARY KEY(version_id,sha256)
+  );
   `);
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS document_file_path ON files(version_id,path)');
   flats.init(db);
@@ -420,6 +426,9 @@ const sameImageIds=(v,image)=>new Set(v.files.filter(f=>f.kind==='urun_gorsel' &
 // its answer on; prints that disagree turn into one open question.
 function imageViewHint(db,v,image,appId) {
   if(!image)return null;
+  // The user's answer for the picture decides; it is asked once, not per print.
+  const answered=db && v.id!=null ? db.prepare('SELECT front FROM document_image_views WHERE version_id=? AND sha256=?').get(v.id,image.sha256) : null;
+  if(answered)return {front:answered.front,source:'kullanici'};
   const ids=sameImageIds(v,image),sides=new Set();
   for(const line of v.lines) for(const app of line.applications) {
     if(app.id===appId)continue;
@@ -432,6 +441,33 @@ function imageViewHint(db,v,image,appId) {
   }
   if(sides.size>1)return {conflict:'aynı görselin baskıları önü farklı üründe buldu; ön/arka teyit edilmeli'};
   return sides.size ? {front:[...sides][0],source:'baska_baski'} : null;
+}
+// G58: answers an open measurement confirmation with "the front garment is on the
+// left/right/top/bottom of this picture". The answer is stored for the picture's bytes
+// and every print on it is measured again at once; no size is entered here.
+async function answerView(db,dataDir,confirmationId,front,user) {
+  const {versionId}=tx(db,()=> {
+    assertUser(db,user.id);
+    if(!['sol','sag','ust','alt'].includes(front))fail('onUrun sol, sag, ust veya alt olmalı');
+    const c=db.prepare('SELECT * FROM confirmations WHERE id=?').get(confirmationId);
+    if(!c)fail('Teyit bulunamadı',404);
+    if(c.kind!=='olcu' || c.ref_table!=='applications')fail('Ön/arka yalnız uygulama ölçü teyidinde cevaplanır');
+    if(c.status!=='acik')fail('Teyit zaten kapalı',409);
+    const app=db.prepare('SELECT * FROM applications WHERE id=?').get(c.ref_id);
+    const line=app && db.prepare('SELECT * FROM order_lines WHERE id=?').get(app.line_id);
+    if(!line)fail('Uygulama bulunamadı',404);
+    const v=draft(db,line.version_id);unlocked(db,v.id);
+    const s=provenance(app),measured=v.files.find(f=>f.id===s.gorselFileId && f.kind==='urun_gorsel');
+    const image=measured || productImageFor(v,v.lines.find(l=>l.id===line.id),app).image;
+    if(!image)fail('Bu uygulamanın ölçüldüğü ürün görseli yok',409);
+    db.prepare(`INSERT INTO document_image_views(version_id,sha256,front,user_id,created_at) VALUES(?,?,?,?,?)
+      ON CONFLICT(version_id,sha256) DO UPDATE SET front=excluded.front,user_id=excluded.user_id,created_at=excluded.created_at`).run(v.id,image.sha256,front,user.id,Date.now());
+    audit(db,user.id,'gorunum_teyit',app.id,{confirmationId:c.id,gorselDosyaId:image.id,onUrun:front});
+    return {versionId:v.id};
+  });
+  const olcuHatasi=await measureAfterSave(db,dataDir,versionId,user,true);
+  return {teyit:db.prepare('SELECT * FROM confirmations WHERE id=?').get(confirmationId),onUrun:front,
+    acikTeyitler:openMeasurements(db,versionId),...(olcuHatasi?{olcuHatasi}:{})};
 }
 // G53: the garment of `view` in a product picture that holds two (autoMeasure pairViews),
 // as recorded by the applications measured on it. All of them must name one garment
@@ -1263,7 +1299,7 @@ function registerWorkshop(boundDb,dataDir) {
     return {providerRef:result.providerRef};
   });
 }
-module.exports={garmentCrop,frontSide,imageViewHint,flatCalibrationInput,FLAT_CALIBRATIONS,editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,previewForms,pendingApplications,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+module.exports={answerView,garmentCrop,frontSide,imageViewHint,flatCalibrationInput,FLAT_CALIBRATIONS,editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,previewForms,pendingApplications,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
 function vectorModule() {
   // Native tracer/canvas binaries come from npm; a platform without them must say so, not fail anonymously.
   try { return require('./vector'); }
