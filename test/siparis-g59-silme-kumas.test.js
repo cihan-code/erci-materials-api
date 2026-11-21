@@ -165,10 +165,11 @@ test('old orders (fabric_item_id only) open and revise unchanged; a line by name
     const Database = require('better-sqlite3'), file = path.join(dir, 'old.sqlite');
     const raw = new Database(file);
     raw.exec(fs.readFileSync(path.join(__dirname, '../agent/siparis/schema.sql'), 'utf8')
-      .replace(/,\n deleted_at TEXT, deleted_by INTEGER REFERENCES users\(id\)/, '').replace(' fabric_type TEXT,', ''));
+      .replace(/,\n deleted_at TEXT, deleted_by INTEGER REFERENCES users\(id\), deleted_order_no TEXT/, '').replace(' fabric_type TEXT,', ''));
     raw.close();
     const db = openDb(file);
     assert.ok(db.prepare('PRAGMA table_info(orders)').all().some(c => c.name === 'deleted_at'));
+    assert.ok(db.prepare('PRAGMA table_info(orders)').all().some(c => c.name === 'deleted_order_no'));
     assert.ok(db.prepare('PRAGMA table_info(order_lines)').all().some(c => c.name === 'fabric_type'));
     db.close();
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
