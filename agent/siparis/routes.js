@@ -99,12 +99,15 @@ module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, r
   router.post('/outbox/:id/manuel', requireUser('onay'), wrap((req,res) => res.json(outbox.setManual(db,Number(req.params.id),req.user))));
   router.post('/outbox/:id/elle-gonderildi', requireUser('onay'), wrap((req,res) => res.json(outbox.markManualSent(db,Number(req.params.id),req.user,req.body.providerRef))));
   require('./routes-maliyet')(router, { db, dataDir, worker });
+  // G63: approval chain (İşler + Üretim Takip); does nothing unless ONAY_ZINCIRI=1.
+  const stopChain = require('./onayZinciri').mount(db, { dataDir, recipes, worker });
   router.use((err,req,res,next) => {
     if (res.headersSent) return next(err);
     const status = err.status || (err.code?.startsWith('SQLITE_CONSTRAINT') ? 409 : 500);
     res.status(status).json({error:status===500 ? 'Sipariş işlemi tamamlanamadı' : err.message});
   });
   app.use('/api/siparis',router); // Parent app already applies CORS_ORIGIN before this router.
-  const stop = worker ? outbox.startWorker(db) : () => {};
+  const stopWorker = worker ? outbox.startWorker(db) : () => {};
+  const stop = () => { stopWorker(); stopChain(); };
   return { db, stop, close() { stop(); if (!suppliedDb) db.close(); } };
 };

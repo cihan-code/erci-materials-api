@@ -16,7 +16,8 @@ const USAGE = [
   '  eski-kumaslari-aktar [--kuru]',
   '  kartela-uygula [--kuru]         (kartelalı kalemlere renk no, hex ve standart ad yazar)',
   '  kalip-l-tamamla <L-listesi.json> [--kuru]  (kalıpların yalnız boş refBeden/olculerL alanlarını doldurur)',
-  '  kalip-beden-tamamla <kaynakli-tablolar.json> [--kuru]  (yalnız boş bedenTablosu alanlarını doldurur)'
+  '  kalip-beden-tamamla <kaynakli-tablolar.json> [--kuru]  (yalnız boş bedenTablosu alanlarını doldurur)',
+  '  onay-zinciri --kuru <surumId>  (onayda açılacak İşler kaydını ve takip kartını JSON gösterir, yazmaz)'
 ].join('\n');
 const dataDir = () => process.env.DATA_DIR || path.join(__dirname, '../../data');
 async function readPassword() {
@@ -108,8 +109,23 @@ function fillFlatsL(args, method = 'fillMissingL') {
     return result;
   } finally { db.close(); }
 }
+// G63 dry run only: the chain itself runs in the server's queue. Opens the database read-only so nothing can be written.
+function chainDryRun(args) {
+  const ids = args.filter(a => a !== '--kuru');
+  if (!args.includes('--kuru') || ids.length !== 1 || args.length !== 2 || !/^\d+$/.test(ids[0])) throw new Error(USAGE);
+  const Database = require('better-sqlite3');
+  const file = path.join(dataDir(), 'siparis.sqlite');
+  if (!fs.existsSync(file)) throw new Error(`Dosya bulunamadı: ${file}`);
+  const db = new Database(file, { readonly: true, fileMustExist: true });
+  try {
+    const result = require('./onayZinciri').dryRun(db, Number(ids[0]), { panel: require('../store').readPanelRaw() });
+    console.log(JSON.stringify(result, null, 2));
+    return result;
+  } finally { db.close(); }
+}
 async function main(argv = process.argv.slice(2)) {
   const [command, name, role, ...flags] = argv;
+  if (command === 'onay-zinciri') return chainDryRun(argv.slice(1));
   if (command === 'kalip-l-tamamla') return fillFlatsL(argv.slice(1));
   if (command === 'kalip-beden-tamamla') return fillFlatsL(argv.slice(1), 'fillMissingSizeCharts');
   const needsName = ['kullanici-ekle', 'sifre-degistir', 'kullanici-onaysiz', 'kullanici-onayli'];
