@@ -419,8 +419,14 @@ function garmentCrop(apps,fileId,view) {
     const named=garments.filter(g=>g.view===view);
     if (named.length!==1) return null;
     const b=named[0].productBoxPx, pad=Math.round(Math.max(b.w,b.h)*.04);
-    const x=Math.max(0,b.x-pad), y=Math.max(0,b.y-pad);
-    const crop={page,x,y,w:Math.min(W,b.x+b.w+pad)-x,h:Math.min(H,b.y+b.h+pad)-y,rasterWidth:W,rasterHeight:H};
+    let x0=Math.max(0,b.x-pad), y0=Math.max(0,b.y-pad), x1=Math.min(W,b.x+b.w+pad), y1=Math.min(H,b.y+b.h+pad);
+    // The margin stops at a neighbouring garment: its sleeve must not show in this view's slot (G58).
+    for (const {productBoxPx:o} of garments.filter(g=>g!==named[0])) {
+      if (o.x>=b.x+b.w) x1=Math.min(x1,o.x); else if (o.x+o.w<=b.x) x0=Math.max(x0,o.x+o.w);
+      if (o.y>=b.y+b.h) y1=Math.min(y1,o.y); else if (o.y+o.h<=b.y) y0=Math.max(y0,o.y+o.h);
+    }
+    const x=x0, y=y0;
+    const crop={page,x,y,w:x1-x,h:y1-y,rasterWidth:W,rasterHeight:H};
     const same=a=>['x','w'].every(k=>Math.abs(a[k]/a.rasterWidth-crop[k]/W)<=.02) && ['y','h'].every(k=>Math.abs(a[k]/a.rasterHeight-crop[k]/H)<=.02);
     if (found && (found.page!==page || !same(found))) return null;
     found ??= crop;
@@ -1212,7 +1218,7 @@ function registerWorkshop(boundDb,dataDir) {
     return {providerRef:result.providerRef};
   });
 }
-module.exports={flatCalibrationInput,FLAT_CALIBRATIONS,editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,previewForms,pendingApplications,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+module.exports={garmentCrop,flatCalibrationInput,FLAT_CALIBRATIONS,editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,previewForms,pendingApplications,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
 function vectorModule() {
   // Native tracer/canvas binaries come from npm; a platform without them must say so, not fail anonymously.
   try { return require('./vector'); }
