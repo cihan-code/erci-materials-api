@@ -12,6 +12,7 @@ const REASON_TEXT = {
   dolgu_detay_kalinligi_olculemedi: 'Dolgu detaylarının kalınlığı ölçülemedi.',
   supheli_oran: 'Desenin en-boy oranı olağan dışı.',
   oran_bozuldu: 'Hedef ölçü desenin en-boy oranını değiştiriyor.',
+  zemin_cikarildi: 'Kenarlara değen düz zemin desen sayılmadı ve çıkarıldı; zemin ürün rengiyle eşleşmiyor veya ürün rengi bilinmiyor. Zemin baskının parçasıysa teyit edin.',
 };
 const reasonText = reason => REASON_TEXT[reason] ?? String(reason);
 const reasonTexts = reasons => (Array.isArray(reasons) ? reasons : []).map(reasonText);

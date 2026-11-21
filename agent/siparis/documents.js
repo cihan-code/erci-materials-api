@@ -548,6 +548,14 @@ function flatCalibrationInput(flat,leg) {
   if(!mime)return {flat,key:null};
   try {return {flat:{...flat,cizim:{buffer:fs.readFileSync(flat.dosya),mime}},key};} catch {return {flat,key:null};}
 }
+// The line's fabric colour, when the stock item states one under the same colour name.
+// A proof ground in this colour is the garment itself (vector.js findGround).
+function garmentColor(db,lineId) {
+  const line=lineId==null ? null : db.prepare('SELECT color_name,fabric_item_id FROM order_lines WHERE id=?').get(lineId);
+  const item=line?.fabric_item_id ? db.prepare('SELECT color_name,color_hex FROM stock_items WHERE id=?').get(line.fabric_item_id) : null;
+  const same=(a,b)=>String(a??'').trim().toLocaleLowerCase('tr')===String(b??'').trim().toLocaleLowerCase('tr');
+  return item && /^#[0-9a-f]{6}$/i.test(item.color_hex ?? '') && (!line.color_name || same(line.color_name,item.color_name)) ? item.color_hex : null;
+}
 async function vectorInput(dataDir,file) {
   return {manualVector:file.kind==='desen_kaynak_vektor',buffer:readFile(dataDir,file),mime:{'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.pdf':'application/pdf','.svg':'image/svg+xml'}[path.extname(file.path).toLowerCase()]};
 }
@@ -885,10 +893,10 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
         const cached=prev && (!raster || (Number.isFinite(prev.report.rasterQuality?.pathCount) && Number.isFinite(prev.report.rasterQuality?.nodeCount)));
         // Legacy previews without complexity metrics are retraced from the original raster.
         // Keep cached vector paths; final raster quality is measured against the original artwork.
-        const result=await generateInChild({type:'vector',input:cached
+        const result=await generateInChild({type:'vector',input:{...(cached
           ? {manualVector:true,buffer:prev.buffer,mime:'application/pdf',targetMm,applicationType:a.kind,
             ...(raster ? {qualitySource:{...original,metrics:prev.report.rasterQuality}} : {})}
-          : {...original,targetMm,applicationType:a.kind}},signal);
+          : {...original,targetMm,applicationType:a.kind}),garmentColor:garmentColor(db,line.id)}},signal);
         const report=prev && !raster && !original.manualVector ? {...result.report,quality:prev.report.quality==='teyit' || result.report.aspectRatioError>0.01 ? 'teyit' : 'iyi',
           reasons:[...new Set([...(prev.report.reasons||[]),...(result.report.aspectRatioError>0.01 ? ['oran_bozuldu'] : [])])]} : result.report;
         generated.push({kind:'desen_vektor',buffer:result.pdf,meta:{applicationId:a.id,...(!input.source?{lineId:line.id}:{})},report});
@@ -971,7 +979,8 @@ function queuePreview(db,dataDir,file,user) {
   const task=(async()=> {
     const written=[];
     try {
-      const result=await renderQueue(async signal=>generateInChild({type:'vector',designBox:true,input:await vectorInput(dataDir,file)},signal));
+      const lineId=db.prepare('SELECT line_id FROM document_file_meta WHERE file_id=?').get(file.id)?.line_id;
+      const result=await renderQueue(async signal=>generateInChild({type:'vector',designBox:true,input:{...await vectorInput(dataDir,file),garmentColor:garmentColor(db,lineId)}},signal));
       tx(db,()=> {
         const v=draft(db,file.version_id);
         if (!db.prepare('SELECT 1 FROM files WHERE id=?').get(file.id)) fail('Kaynak dosya silindi',409);
@@ -1133,7 +1142,8 @@ function vectorModule() {
 async function designBoxOf(input) {
   try {
     const auto=require('./autoMeasure'),[page]=await auto.rasterPages(input,600,input.mime==='application/pdf'?[1]:null);
-    const box=page && auto.designContent(page).box;
+    // Same matte rule as the measurement: a uniform proof ground is not the artwork's box.
+    const box=page && auto.designContent(page,true).box;
     return box ? {w:box.w,h:box.h} : null;
   } catch { return null; }
 }

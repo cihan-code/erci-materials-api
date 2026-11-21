@@ -3,7 +3,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
-const { PDFDocument, PDFName, PDFArray, PDFNumber } = require('pdf-lib');
+const { PDFDocument, PDFName, PDFArray, PDFNumber, PDFRawStream, decodePDFRawStream } = require('pdf-lib');
 const PDFKit = require('pdfkit');
 const SVGtoPDF = require('svg-to-pdfkit');
 const tracer = require('@neplex/vectorizer');
@@ -84,6 +84,16 @@ function svgPdf(svg, source, target) {
 function alphaBounds({width,height,pixels}) {
   let left=width,top=height,right=-1,bottom=-1;
   for (let y=0;y<height;y++) for (let x=0;x<width;x++) if (pixels[(y*width+x)*4+3]>8) {
+    left=Math.min(left,x);right=Math.max(right,x);top=Math.min(top,y);bottom=Math.max(bottom,y);
+  }
+  return right<0 ? null : {x:left,y:top,w:right-left+1,h:bottom-top+1};
+}
+// Same 20-level colour step as the measurement's matte rule (autoMeasure.designContent).
+function inkBounds({width,height,pixels},ground) {
+  let left=width,top=height,right=-1,bottom=-1;
+  for (let y=0;y<height;y++) for (let x=0;x<width;x++) {
+    const i=(y*width+x)*4;
+    if (pixels[i+3]<=8 || Math.max(Math.abs(pixels[i]-ground[0]),Math.abs(pixels[i+1]-ground[1]),Math.abs(pixels[i+2]-ground[2]))<=20) continue;
     left=Math.min(left,x);right=Math.max(right,x);top=Math.min(top,y);bottom=Math.max(bottom,y);
   }
   return right<0 ? null : {x:left,y:top,w:right-left+1,h:bottom-top+1};
@@ -655,8 +665,126 @@ function rasterMinDetail(image, widthMm) {
   return min === Infinity ? null : min * widthMm / width;
 }
 
+// G53: a proof exported "on black" paints the garment colour as a full-page
+// rectangle before any artwork. That ground is not ink: kept, it turns the
+// content box into the page (DYNAMICS 3:1 instead of ~16:1) and the fitted
+// letters are flattened. Only the plainest form is recognised: the first
+// painted object is one opaque rectangle fill (`re`, or m/l corners) in a device colour, nothing is
+// clipped or drawn before it, and after the CTM it covers the whole crop box
+// (touches all four edges). Anything else is left exactly as drawn.
+const GROUND_OPS=new Set(['q','Q','cm','w','J','j','M','d','ri','i','gs','g','G','rg','RG','k','K','cs','CS','sc','scn','SC','SCN',
+  'm','l','c','v','y','h','re','BMC','BDC','EMC','MP','DP']);
+function contentTokens(text) {
+  const tokens=[], delimiter=c=>'()<>[]{}/%'.includes(c), space=c=>' \t\r\n\f\0'.includes(c);
+  let i=0;
+  while (i<text.length) {
+    const c=text[i];
+    if (space(c)) { i++; continue; }
+    if (c==='%') { while (i<text.length && text[i]!=='\n' && text[i]!=='\r') i++; continue; }
+    const start=i;
+    if (c==='(') {
+      let depth=0;
+      for (; i<text.length; i++) {
+        if (text[i]==='\\') { i++; continue; }
+        if (text[i]==='(') depth++;
+        if (text[i]===')' && --depth===0) { i++; break; }
+      }
+      tokens.push({operand:true,value:null,start,end:i});
+    } else if (c==='<' && text[i+1]==='<') { tokens.push({operand:true,value:'<<',start,end:i+=2}); }
+    else if (c==='>' && text[i+1]==='>') { tokens.push({operand:true,value:'>>',start,end:i+=2}); }
+    else if (c==='<') { i=text.indexOf('>',i)+1 || text.length; tokens.push({operand:true,value:null,start,end:i}); }
+    else if ('[]{}'.includes(c)) { tokens.push({operand:true,value:c,start,end:++i}); }
+    else if (c==='/') { i++; while (i<text.length && !space(text[i]) && !delimiter(text[i])) i++; tokens.push({operand:true,value:text.slice(start,i),start,end:i}); }
+    else {
+      while (i<text.length && !space(text[i]) && !delimiter(text[i])) i++;
+      if (i===start) { i++; continue; }
+      const word=text.slice(start,i);
+      tokens.push(/^[+-]?(\d+\.?\d*|\.\d+)$/.test(word) ? {operand:true,value:Number(word),start,end:i} : {operand:false,value:word,start,end:i});
+    }
+  }
+  return tokens;
+}
+function contentText(doc, page) {
+  const contents=page.node.Contents();
+  if (!contents) return null;
+  const streams=contents instanceof PDFArray ? contents.asArray().map(ref=>doc.context.lookup(ref)) : [contents];
+  if (!streams.every(stream=>stream instanceof PDFRawStream)) return null;
+  // Array parts may only be split between tokens, so a line break joins them safely.
+  return streams.map(stream=>Buffer.from(decodePDFRawStream(stream).decode()).toString('latin1')).join('\n');
+}
+function opaqueState(page, name) {
+  const states=page.node.Resources()?.lookup(PDFName.of('ExtGState'));
+  const state=states && typeof name==='string' && states.lookup(PDFName.of(name.slice(1)));
+  if (!state || typeof state.lookup!=='function') return false;
+  const alpha=state.lookup(PDFName.of('ca')), mask=state.lookup(PDFName.of('SMask')), blend=state.lookup(PDFName.of('BM'));
+  return (!alpha || alpha.asNumber?.()===1) && (!mask || String(mask)==='/None') && (!blend || ['/Normal','/Compatible'].includes(String(blend)));
+}
+function findGround(doc, page) {
+  let text;
+  try { text=contentText(doc,page); } catch { return null; }
+  if (text==null) return null;
+  const box=page.getCropBox(), stack=[];
+  let ctm=[1,0,0,1,0,0], fill=[0,0,0], operands=[], path=[];
+  for (const token of contentTokens(text)) {
+    if (token.operand) { operands.push(token.value); continue; }
+    const op=token.value, args=operands; operands=[];
+    if (['f','F','f*'].includes(op)) {
+      const corners=path.length===1 && rectangleCorners(path[0]);
+      if (!corners || !fill) return null;
+      const points=corners.map(([px,py])=>[ctm[0]*px+ctm[2]*py+ctm[4],ctm[1]*px+ctm[3]*py+ctm[5]]);
+      const xs=points.map(p=>p[0]), ys=points.map(p=>p[1]), tol=Math.max(1,Math.max(box.width,box.height)*.005);
+      const axisAligned=(Math.abs(ctm[1])<1e-9 && Math.abs(ctm[2])<1e-9) || (Math.abs(ctm[0])<1e-9 && Math.abs(ctm[3])<1e-9);
+      if (!axisAligned || Math.min(...xs)>box.x+tol || Math.max(...xs)<box.x+box.width-tol
+        || Math.min(...ys)>box.y+tol || Math.max(...ys)<box.y+box.height-tol) return null;
+      return {text,start:token.start,end:token.end,color:fill.map(v=>Math.round(Math.max(0,Math.min(1,v))*255))};
+    }
+    if (!GROUND_OPS.has(op)) return null;
+    if (op==='q') stack.push({ctm:ctm.slice(),fill});
+    else if (op==='Q') { if (!stack.length) return null; ({ctm,fill}=stack.pop()); }
+    else if (op==='cm') {
+      if (args.length!==6 || !args.every(Number.isFinite)) return null;
+      const [a,b,c,d,e,f]=args, m=ctm;
+      ctm=[a*m[0]+b*m[2],a*m[1]+b*m[3],c*m[0]+d*m[2],c*m[1]+d*m[3],e*m[0]+f*m[2]+m[4],e*m[1]+f*m[3]+m[5]];
+    }
+    else if (op==='rg') fill=args.length===3 && args.every(Number.isFinite) ? args : null;
+    else if (op==='g') fill=args.length===1 && Number.isFinite(args[0]) ? [args[0],args[0],args[0]] : null;
+    else if (op==='k') fill=args.length===4 && args.every(Number.isFinite) ? [0,1,2].map(n=>(1-args[n])*(1-args[3])) : null;
+    // A named colour space or pattern is not a plain device colour.
+    else if (['cs','sc','scn'].includes(op)) fill=null;
+    else if (op==='gs' && !opaqueState(page,args[0])) return null;
+    else if (op==='re') {
+      if (args.length!==4 || !args.every(Number.isFinite)) return null;
+      const [x,y,w,h]=args; path.push([[x,y],[x+w,y],[x+w,y+h],[x,y+h]]);
+    }
+    else if (op==='m') { if (args.length!==2 || !args.every(Number.isFinite)) return null; path.push([args]); }
+    else if (op==='l') { if (!path.length || !path.at(-1) || args.length!==2 || !args.every(Number.isFinite)) return null; path.at(-1).push(args); }
+    else if (op==='h') { if (!path.length) return null; }
+    else if (['c','v','y'].includes(op)) return null;
+  }
+  return null;
+}
+// Four axis-aligned corners in order (a closing point back to the start is allowed).
+function rectangleCorners(points) {
+  const p=points.length===5 && points[4][0]===points[0][0] && points[4][1]===points[0][1] ? points.slice(0,4) : points;
+  if (p.length!==4) return null;
+  const edges=[0,1,2,3].map(i=>[p[i],p[(i+1)%4]]);
+  const straight=edges.every(([a,b])=>a[0]===b[0] || a[1]===b[1]), alternating=(edges[0][0][0]===edges[0][1][0])!==(edges[1][0][0]===edges[1][1][0]);
+  return straight && alternating ? p : null;
+}
+// The ground's fill becomes `n` (end the path, paint nothing); every other operator is untouched.
+function removeGround(doc, page, ground) {
+  const text=ground.text.slice(0,ground.start)+'n'+ground.text.slice(ground.end);
+  page.node.set(PDFName.of('Contents'),doc.context.register(doc.context.flateStream(Buffer.from(text,'latin1'))));
+}
+const hexColor=rgb=>'#'+rgb.map(v=>v.toString(16).padStart(2,'0')).join('');
+function parseHex(value) {
+  const match=/^#?([0-9a-f]{6})$/i.exec(String(value??'').trim());
+  return match ? [0,2,4].map(i=>parseInt(match[1].slice(i,i+2),16)) : null;
+}
+
 // Measure rendered ink, then transform the original PDF operators; the output stays vector.
-async function pageContentBox(page) {
+// With a removed ground, paint in the ground's own colour (letter counters, shading) is not ink.
+async function pageContentBox(page, groundColor) {
   const scale=2, viewport=page.getViewport({scale});
   const {width,height,data:pixels}=PNG.sync.read(await renderPage(page,scale,'rgba(0,0,0,0)'));
   let transparent=false;
@@ -666,27 +794,39 @@ async function pageContentBox(page) {
   }
   // Alpha includes white and dark ink on clear pages. A painted page with a
   // light backdrop still uses the established color bounds on a white canvas.
-  const bounds=transparent?alphaBounds({width,height,pixels}):pixelBounds(PNG.sync.read(await renderPage(page,scale)),250);
+  let bounds=transparent&&groundColor?inkBounds({width,height,pixels},groundColor):null;
+  bounds??=transparent?alphaBounds({width,height,pixels}):pixelBounds(PNG.sync.read(await renderPage(page,scale)),250);
   if (!bounds) throw new Error('PDF desen içerik kutusu boş');
   const corners=[viewport.convertToPdfPoint(bounds.x,bounds.y),
     viewport.convertToPdfPoint(bounds.x+bounds.w,bounds.y+bounds.h)];
   return {x:Math.min(corners[0][0],corners[1][0]),y:Math.min(corners[0][1],corners[1][1]),
     width:Math.abs(corners[1][0]-corners[0][0]),height:Math.abs(corners[1][1]-corners[0][1])};
 }
+// Sizes are stored in whole millimetres, so a small print cannot carry its exact
+// ratio (DYNAMICS 163 x 10.2 mm is stored as 163 x 10). When the artwork ratio
+// fits both stored sides to within that half-millimetre, the artwork keeps its
+// ratio and is centred (the slack stays under 0.5 mm); a larger difference is a
+// real change of ratio and is applied and reported as before.
+const SIZE_QUANTUM = 0.5 * PT_PER_MM;
 function resizePage(page, target, crop) {
   const rotation = ((page.getRotation().angle % 360) + 360) % 360;
   const rotated = rotation === 90 || rotation === 270;
   const physicalTarget = rotated ? {width:target.height,height:target.width} : target;
-  const {scaleX,scaleY}=fit(crop,physicalTarget);
+  let {scaleX,scaleY}=fit(crop,physicalTarget), dx=0, dy=0;
+  const ratio=crop.width/crop.height, {width:W,height:H}=physicalTarget;
+  if (H>SIZE_QUANTUM && W>SIZE_QUANTUM && ratio>=(W-SIZE_QUANTUM)/(H+SIZE_QUANTUM) && ratio<=(W+SIZE_QUANTUM)/(H-SIZE_QUANTUM)) {
+    scaleX=scaleY=Math.min(scaleX,scaleY);
+    dx=(W-crop.width*scaleX)/2; dy=(H-crop.height*scaleY)/2;
+  }
   page.scaleContent(scaleX,scaleY);
-  page.translateContent(-crop.x*scaleX,-crop.y*scaleY);
+  page.translateContent(-crop.x*scaleX+dx,-crop.y*scaleY+dy);
   page.scaleAnnotations(scaleX,scaleY);
   const annots=page.node.Annots();
   if (annots) for (let i=0;i<annots.size();i++) {
     const annotation=page.doc.context.lookup(annots.get(i));
     const rect=annotation.lookup(PDFName.of('Rect'),PDFArray);
     if (rect) for (let j=0;j<4;j++) rect.set(j,PDFNumber.of(rect.lookup(j,PDFNumber).asNumber()
-      - (j%2 ? crop.y*scaleY : crop.x*scaleX)));
+      - (j%2 ? crop.y*scaleY-dy : crop.x*scaleX-dx)));
   }
   for (const box of ['setMediaBox','setCropBox','setTrimBox','setBleedBox','setArtBox'])
     page[box](0,0,physicalTarget.width,physicalTarget.height);
@@ -694,11 +834,11 @@ function resizePage(page, target, crop) {
 }
 
 /** Local only. targetMm is the artwork content boundary in millimetres. */
-async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = false, applicationType = 'baski', qualitySource } = {}) {
+async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = false, applicationType = 'baski', qualitySource, garmentColor } = {}) {
   if (!Buffer.isBuffer(buffer) || !buffer.length) throw new TypeError('buffer gerekli');
   const target = targetSize(targetMm);
   mime = String(mime || '').split(';')[0].toLowerCase();
-  let pdf, kind, inputPages, rasterQualityReport, designBox, rasterDetails = [], reasons = [], aspectRatioError = 0;
+  let pdf, kind, inputPages, rasterQualityReport, designBox, rasterDetails = [], reasons = [], aspectRatioError = 0, grounds = [];
   const vectorizers = new Set();
   if (!['baski','nakis'].includes(applicationType)) throw new TypeError('applicationType baski veya nakis olmalı');
   if (manualVector && mime!=='application/pdf') throw new Error('Hazır vektör PDF gerekli');
@@ -731,11 +871,19 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
       throw Object.assign(new Error('Hazır vektör raster veya boş sayfa içeremez'),{status:400});
     const rasterPages = inputPages.map(x => x.imageCount > 0 && x.vectorPaintCount === 0 && x.textCount === 0);
     kind = rasterPages.every(Boolean) ? 'raster' : 'vector';
-    if (!rasterPages.some(Boolean) && !target) pdf = Buffer.from(buffer);
+    // A cached preview (qualitySource) was traced from pixels and is never a proof ground.
+    let source = buffer;
+    if (kind === 'vector' && !qualitySource) {
+      const grounded = await PDFDocument.load(buffer);
+      grounds = grounded.getPages().map((page, i) => rasterPages[i] ? null : findGround(grounded, page));
+      grounds.forEach((ground, i) => { if (ground) removeGround(grounded, grounded.getPage(i), ground); });
+      if (grounds.some(Boolean)) source = Buffer.from(await grounded.save({ updateFieldAppearances: false }));
+    }
+    if (!rasterPages.some(Boolean) && !target) pdf = Buffer.from(source);
     else {
       // Fresh document for pure raster inputs avoids serializing unused source image objects.
-      const original = kind === 'raster' ? await PDFDocument.create() : await PDFDocument.load(buffer);
-      const rendered = rasterPages.some(Boolean) || target ? await openPdf(buffer) : null;
+      const original = kind === 'raster' ? await PDFDocument.create() : await PDFDocument.load(source);
+      const rendered = rasterPages.some(Boolean) || target ? await openPdf(source) : null;
       try {
         for (let i = 0; i < inputPages.length; i++) {
           if (rasterPages[i]) {
@@ -760,13 +908,17 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
           } else if (target) aspectRatioError=Math.max(aspectRatioError,
             resizePage(original.getPage(i),target,qualitySource
               ? {x:0,y:0,width:inputPages[i].width,height:inputPages[i].height}
-              : await pageContentBox(await rendered.getPage(i+1))));
+              : await pageContentBox(await rendered.getPage(i+1),grounds[i]?.color)));
         }
         pdf = Buffer.from(await original.save({ updateFieldAppearances: false }));
       } finally { if (rendered) await rendered.destroy(); }
     }
     if (rasterPages.some(Boolean)) reasons.push('raster_detay_ve_metin_gorsel_teyidi');
     if (inputPages.some((x, i) => x.imageCount && !rasterPages[i])) reasons.push('karma_sayfada_raster_korundu');
+    // A ground in the garment's own colour is the garment; any other ground may be a printed box.
+    const garment = parseHex(garmentColor);
+    if (grounds.some(g => g && !(garment && delta(lab(g.color), lab(garment)) <= qualityLimits(applicationType).colorDeltaE)))
+      reasons.push('zemin_cikarildi');
   } else throw new TypeError('Desteklenen MIME: image/png, image/jpeg, application/pdf');
 
   // A cached preview is resized as vector paths; assess its final PDF against the original raster.
@@ -807,6 +959,8 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
     rasterQuality: rasterQualityReport?.metrics,
     ...(vectorizers.size ? {vectorizer:[...vectorizers].join('+')} : {}),
     ...(designBox?{designBox}:{}),
+    ...(grounds.some(Boolean) ? {ground:{removed:true,pages:grounds.flatMap((g,i)=>g?[{page:i+1,color:hexColor(g.color)}]:[]),
+      garmentColor:parseHex(garmentColor) ? hexColor(parseHex(garmentColor)) : null}} : {}),
     quality: manualVector && !qualitySource ? 'iyi' : rasterQualityReport && !target ? 'beklemede' : reasons.length ? 'teyit' : 'iyi',
     qualityLabel: rasterQualityReport && !target ? 'Kalite ölçüden sonra değerlendirilecek' : undefined,
     reasons: rasterQualityReport && !target ? [] : [...new Set(reasons)],
