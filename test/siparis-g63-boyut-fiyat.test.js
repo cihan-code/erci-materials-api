@@ -188,6 +188,8 @@ test('"ölçü yaklaşık": ölçücünün durum alanı (yaklasik/standart) önc
   assert.equal(chain.approximate(app({ method: 'otomatik', durum: 'standart' })), true);
   assert.equal(chain.approximate(app({ method: 'standart_tablo', durum: 'kesin' })), false);
   assert.equal(chain.approximate(app({ method: 'elle' })), false);
+  assert.equal(chain.approximate(app({ method: 'elle', olcuDurumu: 'yaklasik' })), true, 'G64 reads olcuDurumu too');
+  assert.equal(chain.approximate(app({ method: 'elle', standart: true })), true);
   assert.equal(chain.approximate(app({ method: 'tahmin' })), true);
   assert.equal(chain.approximate({ ...app({ method: 'elle', durum: 'kesin' }), needs_confirmation: 1 }), true);
 });

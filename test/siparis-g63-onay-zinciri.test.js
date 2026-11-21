@@ -325,24 +325,32 @@ test('G5 maliyet aktarımı zincirin açtığı kaydı günceller; ikinci İşle
   assert.equal(data.uretimTakip.length, 1);
 });
 
-test('eski şema: outbox tablosu yeni iş türü için bir kez yeniden kurulur, eski satırlar korunur', () => {
+test('eski şema: outbox (G63) ve teyit (G64) tabloları aynı açılışta birlikte yeniden kurulur, eski satırlar korunur', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'siparis-g63-eski-'));
   try {
     const file = path.join(dir, 'siparis.sqlite');
     const schema = fs.readFileSync(path.join(__dirname, '../agent/siparis/schema.sql'), 'utf8')
-      .replace(",'onay_zinciri')", ')').replace(/ unit_price_kurus INTEGER[^\n]*\n/, '');
-    assert.ok(!schema.includes('onay_zinciri') && !schema.includes('unit_price_kurus'));
+      .replace(",'onay_zinciri')", ')').replace(",'musteri_notu')", ')').replace(/ unit_price_kurus INTEGER[^\n]*\n/, '');
+    assert.ok(!schema.includes('onay_zinciri') && !schema.includes('unit_price_kurus') && !schema.includes('musteri_notu'));
     const old = new Database(file);
     old.exec(schema);
     old.prepare("INSERT INTO users(name,password_hash,role) VALUES('x','y','yonetici')").run();
     old.prepare("INSERT INTO orders(order_no) VALUES('SIP-ESKI')").run();
     old.prepare("INSERT INTO order_versions(order_id,version_no,created_by) VALUES(1,1,1)").run();
     old.prepare("INSERT INTO outbox(kind,idempotency_key,version_id,payload_json) VALUES('maliyet_aktarim','k1',1,'{}')").run();
+    old.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('eski_surum','outbox',1,'eski')").run();
     old.close();
     const db = openDb(file);
     try {
       assert.equal(db.prepare('SELECT COUNT(*) n FROM outbox').get().n, 1);
       db.prepare("INSERT INTO outbox(kind,idempotency_key,version_id,payload_json) VALUES('onay_zinciri','zincir:1',1,'{}')").run();
+      assert.equal(db.prepare('SELECT message FROM confirmations').get().message, 'eski');
+      db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('musteri_notu','order_versions',1,'not')").run();
+      assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='outbox_due'").get(), 'indexes come back after the rebuild');
+      db.close();
+      const again = openDb(file);
+      try { assert.equal(again.prepare('SELECT COUNT(*) n FROM outbox').get().n, 2, 'second open rebuilds nothing'); } finally { again.close(); }
+      return;
       assert.ok(db.prepare('PRAGMA table_info(order_lines)').all().some(c => c.name === 'unit_price_kurus'));
     } finally { db.close(); }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }

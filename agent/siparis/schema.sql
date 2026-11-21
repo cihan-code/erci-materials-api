@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS allocations (
  consumed_milli INTEGER NOT NULL DEFAULT 0 CHECK(typeof(consumed_milli)='integer' AND consumed_milli>=0), UNIQUE(order_line_id,material_key)
 );
 CREATE TABLE IF NOT EXISTS confirmations (
- id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('olcu','fatura_eslesme','eksik_alan','baglanti_hatasi','vektor_kalite','eski_surum')),
+ id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('olcu','fatura_eslesme','eksik_alan','baglanti_hatasi','vektor_kalite','eski_surum','musteri_notu')),
  ref_table TEXT NOT NULL, ref_id INTEGER NOT NULL, message TEXT NOT NULL,
  status TEXT NOT NULL DEFAULT 'acik' CHECK(status IN ('acik','cozuldu')), resolved_by INTEGER REFERENCES users(id)
 );
@@ -92,3 +92,20 @@ CREATE INDEX IF NOT EXISTS outbox_due ON outbox(status,next_run_at);
 CREATE INDEX IF NOT EXISTS lines_version ON order_lines(version_id);
 CREATE INDEX IF NOT EXISTS files_version ON files(version_id,kind);
 CREATE INDEX IF NOT EXISTS confirmations_ref ON confirmations(ref_table,ref_id,status);
+-- G64: customer link. Only the SHA-256 of the token is stored; the token itself is shown once.
+CREATE TABLE IF NOT EXISTS customer_links (
+ id INTEGER PRIMARY KEY, version_id INTEGER NOT NULL REFERENCES order_versions(id), token_hash TEXT NOT NULL UNIQUE,
+ expires_at TEXT NOT NULL, revoked_at TEXT, created_by INTEGER NOT NULL REFERENCES users(id),
+ created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE TABLE IF NOT EXISTS customer_notes (
+ id INTEGER PRIMARY KEY, version_id INTEGER NOT NULL REFERENCES order_versions(id), link_id INTEGER NOT NULL REFERENCES customer_links(id),
+ full_name TEXT NOT NULL, note TEXT NOT NULL, ip TEXT, user_agent TEXT,
+ created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE TABLE IF NOT EXISTS customer_approvals (
+ id INTEGER PRIMARY KEY, version_id INTEGER NOT NULL UNIQUE REFERENCES order_versions(id), link_id INTEGER NOT NULL REFERENCES customer_links(id),
+ full_name TEXT NOT NULL, ip TEXT, user_agent TEXT, approved_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS customer_links_version ON customer_links(version_id);
+CREATE INDEX IF NOT EXISTS customer_notes_version ON customer_notes(version_id);

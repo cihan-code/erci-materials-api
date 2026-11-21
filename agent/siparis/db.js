@@ -4,7 +4,8 @@ const fs = require('fs');
 const path = require('path');
 // Constraint changes since the first schema. SQLite cannot alter CHECK/UNIQUE, so an older table is rebuilt once.
 const REBUILDS = {
-  confirmations: sql => !sql.includes("'eski_surum'"),
+  // G64: 'musteri_notu' joined the allowed kinds.
+  confirmations: sql => !sql.includes("'eski_surum'") || !sql.includes("'musteri_notu'"),
   // G45c: sample lines may carry zero pieces; the old CHECK(quantity>0) forces a table rebuild.
   order_lines: sql => /quantity>0\)/.test(sql) && !sql.includes('numune'),
   files: sql => /UNIQUE\s*\(\s*version_id\s*,\s*kind\s*\)/i.test(sql),

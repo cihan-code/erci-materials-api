@@ -111,7 +111,10 @@ function approximate(app) {
   if (app.needs_confirmation) return true;
   let source = null;
   try { source = JSON.parse(app.measure_source || 'null'); } catch { source = null; }
-  if (source?.durum != null) return APPROX_DURUM.includes(source.durum);
+  // Same fields the G64 customer page reads: durum (or olcuDurumu), or the yaklasik/standart booleans.
+  const flag = [source?.durum, source?.olcuDurumu].find(x => typeof x === 'string');
+  if (flag != null) return APPROX_DURUM.includes(flag);
+  if (source?.yaklasik === true || source?.standart === true) return true;
   return !EXACT_METHODS.includes(source?.method ?? null);
 }
 const SAME = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
