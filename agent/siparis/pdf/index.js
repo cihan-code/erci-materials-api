@@ -779,9 +779,11 @@ function renderWorkshop(input, options, type) {
     title(doc, `${TYPES[type]} Formu`);
     const headerBottom = formBands(doc, order, lines, 150);
     if (lines.some(line => line.numune)) numuneBadge(doc, 630, 10);
-    text(doc, 'Ürün Açıklaması:', 54, headerBottom + 20, 700, 24, true);
     const notes = lines.filter(line => line.note).map(line => `${line.product}: ${line.note}`);
-    let visualY = bulletList(doc, [...notes, ...order.description, ...missing], headerBottom + 54) + 15;
+    const described = [...notes, ...order.description, ...missing];
+    // Nothing to describe: no heading either; the images move up.
+    if (described.length) text(doc, 'Ürün Açıklaması:', 54, headerBottom + 20, 700, 24, true);
+    let visualY = described.length ? bulletList(doc, described, headerBottom + 54) + 15 : headerBottom + 20;
     if (visualY + 400 > 1210) { page(doc); visualY = 60; }
     text(doc, 'Ürün Görseli:', 28, visualY, 720, 24, true);
     visualY += 50;
