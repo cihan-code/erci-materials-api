@@ -361,3 +361,83 @@ test('G54 five applications wrap to fit: cards and pictures never overlap and st
     if (render !== pdf.renderPrintForm) assert.equal((pages[0].text.map(t => t.str).join(' ').match(/En: /g) || []).length, 5, render.name);
   }
 });
+
+// G56: invented designs with extreme ratios on a black proof ground (wide 20:1, tall 1:8).
+async function extremeDesign(wide) {
+  const doc = await PDFDocument.create(), page = doc.addPage([600, 600]);
+  page.drawRectangle({ x: 0, y: 0, width: 600, height: 600, color: rgb(0, 0, 0) });
+  if (wide) page.drawRectangle({ x: 50, y: 285, width: 500, height: 25, color: rgb(1, 1, 1) });
+  else page.drawRectangle({ x: 281, y: 60, width: 60, height: 480, color: rgb(1, 1, 1) });
+  return Buffer.from(await doc.save());
+}
+// Decoded images drawn on every page, with their drawn box in page space (PDFKit top-down).
+async function drawnImages(buffer) {
+  const lib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const doc = await lib.getDocument({ data: Uint8Array.from(buffer), isEvalSupported: false, isOffscreenCanvasSupported: false, verbosity: 0 }).promise;
+  const out = [];
+  try {
+    for (let n = 1; n <= doc.numPages; n++) {
+      const page = await doc.getPage(n), ops = await page.getOperatorList();
+      let transform = null;
+      for (let i = 0; i < ops.fnArray.length; i++) {
+        if (ops.fnArray[i] === lib.OPS.transform) transform = Array.from(ops.argsArray[i]);
+        if (ops.fnArray[i] !== lib.OPS.paintImageXObject || !transform) continue;
+        const img = await new Promise(resolve => page.objs.get(ops.argsArray[i][0], resolve));
+        out.push({ page: n, x: transform[4], y: transform[5] - Math.abs(transform[3]), w: Math.abs(transform[0]), h: Math.abs(transform[3]),
+          width: img.width, height: img.height, data: img.data, kind: img.kind });
+      }
+    }
+  } finally { await doc.destroy(); }
+  return out;
+}
+// Alpha (or brightness for opaque images) along the outermost pixel ring.
+function edgeInk(img) {
+  const channels = img.data.length / (img.width * img.height);
+  let ink = 0;
+  for (let y = 0; y < img.height; y++) for (let x = 0; x < img.width; x++) {
+    if (x && y && x < img.width - 1 && y < img.height - 1) continue;
+    const i = (y * img.width + x) * channels;
+    if (channels === 4 ? img.data[i + 3] > 8 : img.data[i] > 40) ink++;
+  }
+  return ink;
+}
+
+test('G56 previews show the whole design at its own ratio with an even margin, whatever the measured box', async t => {
+  const f = await fixture(t), o = await f.order(), id = o.version.id, lineId = o.version.lines[0].id;
+  for (const wide of [true, false]) {
+    const source = ok(await f.upload(id, { kind: 'desen_kaynak_vektor', name: wide ? 'genis.pdf' : 'uzun.pdf', mime: 'application/pdf', buffer: await extremeDesign(wide) }), 201);
+    await documents.settled();
+    // The measured box (280 x 120 mm) has a very different ratio from either design.
+    ok(await f.measure(lineId, { desenDosyaId: source.id, position: wide ? 'sirt' : 'gogus' }), 201);
+  }
+  await documents.settled();
+  const files = ok(await f.post(`/surumler/${id}/hazirla`));
+  for (const kind of ['baski_formu', 'uretim_formu', 'onay_formu']) {
+    const images = await drawnImages(await formOf(f, files, kind));
+    for (const [wide, expected] of [[true, 20], [false, 1 / 8]]) {
+      const preview = images.find(img => (wide ? img.width / img.height > 8 : img.width / img.height < 0.3));
+      assert.ok(preview, `${kind}: ${wide ? 'geniş' : 'uzun'} önizleme yok ${JSON.stringify(images.map(i => [i.width, i.height]))}`);
+      // Own ratio (with its padding), drawn without distortion, nothing cut at the image edge.
+      const ratio = preview.width / preview.height;
+      assert.ok(wide ? ratio > 14 && ratio < 21 : ratio > 0.1 && ratio < 0.2, `${kind}: oran ${ratio}`);
+      assert.ok(Math.abs(preview.w / preview.h - ratio) / ratio < 0.02, `${kind}: çizim oranı ${preview.w / preview.h}`);
+      assert.equal(edgeInk(preview), 0, `${kind}: kenarda kesilmiş mürekkep`);
+    }
+  }
+  // Per-application pages: the preview stays inside its 460 x 230 box with at least the margin on every side.
+  const pages = (await drawnImages(await formOf(f, files, 'baski_formu'))).filter(img => img.page > 1);
+  assert.equal(pages.length, 2);
+  for (const img of pages) {
+    assert.ok(img.x >= 175 + 19.5 && img.x + img.w <= 635 - 19.5, JSON.stringify([img.x, img.w]));
+    assert.ok(img.w <= 420.5 && img.h <= 190.5, JSON.stringify([img.w, img.h]));
+  }
+});
+
+test('G56 a preview cut from the product picture says so on its card', async () => {
+  const pdf = require('../agent/siparis/pdf');
+  const order = fiveApplications({ note: false });
+  for (const app of order.applications) delete app.preview;
+  const text = (await pdfText(await pdf.renderProductionForm(order))).join('\n');
+  // Ense, sol göğüs and sırt have a box on the product picture; the sleeves have none.
+  assert.equal((text.match(/görselden kırpıldı/g) || []).length, 3, text);
+});

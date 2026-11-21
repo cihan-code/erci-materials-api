@@ -156,7 +156,8 @@ async function vectorPreviews(order) {
     try {
       const canvasLib = require('@napi-rs/canvas');
       const { rasterPages } = require('../autoMeasure');
-      const [raster] = await rasterPages({ buffer: vector.buffer, mime: 'application/pdf' }, 1000, [1], { transparent: true });
+      // 1600 px keeps thin line ends of a large design inside the ink bounds.
+      const [raster] = await rasterPages({ buffer: vector.buffer, mime: 'application/pdf' }, 1600, [1], { transparent: true });
       const ground = /^#[0-9a-f]{6}$/i.test(vector.background ?? '') ? [1, 3, 5].map(i => parseInt(vector.background.slice(i, i + 2), 16)) : null;
       let x0 = raster.width, y0 = raster.height, x1 = -1, y1 = -1;
       for (let y = 0; y < raster.height; y++) for (let x = 0; x < raster.width; x++) {
@@ -165,7 +166,8 @@ async function vectorPreviews(order) {
         x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
       }
       if (x1 < 0) continue;
-      const pad = Math.round(Math.max(x1 - x0, y1 - y0) * 0.03) + 2;
+      // Two clear pixels keep antialiased edges whole; the visible margin comes from the card (contain).
+      const pad = 2;
       x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad); x1 = Math.min(raster.width - 1, x1 + pad); y1 = Math.min(raster.height - 1, y1 + pad);
       const full = canvasLib.createCanvas(raster.width, raster.height);
       full.getContext('2d').putImageData(raster, 0, 0);
@@ -413,13 +415,16 @@ function lineText(doc, value, x, y, width, size, bold, color = '#111111') {
   while (size > 6 && doc.fontSize(size).widthOfString(String(value)) > width) size -= 0.5;
   text(doc, value, x, y, width, size, bold, { align: 'center', color, lineBreak: false, height: size * 1.4, ellipsis: true });
 }
+const PREVIEW_MARGIN = 10;
 function applicationCard(doc, line, app, x, y, cw, notes) {
   lineText(doc, `${TYPES[app.type]} · ${POSITION_LABELS[app.position]}`, x, y, cw, 11, true);
   const ph = Math.round(cw * 0.5), py = y + 20, color = cardColor(line, app);
   doc.save().roundedRect(x, py, cw, ph, 6).fill(color).restore();
   doc.save().lineWidth(0.6).strokeColor('#b0b0b0').roundedRect(x, py, cw, ph, 6).stroke().restore();
-  if (Buffer.isBuffer(app.preview)) doc.image(app.preview, x + 8, py + 8, { fit: [cw - 16, ph - 16], align: 'center', valign: 'center' });
+  // Contain: the whole design at its own ratio, an even margin on the limiting side.
+  if (Buffer.isBuffer(app.preview)) doc.image(app.preview, x + PREVIEW_MARGIN, py + PREVIEW_MARGIN, { fit: [cw - 2 * PREVIEW_MARGIN, ph - 2 * PREVIEW_MARGIN], align: 'center', valign: 'center' });
   else lineText(doc, 'Önizleme yok', x, py + ph / 2 - 6, cw, 9, false, isDark(color) ? '#ffffff' : '#666666');
+  if (Buffer.isBuffer(app.preview) && app.previewCropped) lineText(doc, 'görselden kırpıldı', x, py + ph - 10, cw, 6.5, false, isDark(color) ? '#dddddd' : '#555555');
   lineText(doc, sizeLine(app), x, py + ph + 6, cw, 10, true);
   const note = cardNote(app);
   if (notes && note) lineText(doc, note, x, py + ph + 21, cw, 8, false, '#555555');
@@ -772,7 +777,9 @@ function renderWorkshop(input, options, type) {
       if (app.lineIds) text(doc, lines.filter(line => app.lineIds.includes(line.id)).map(line => `${line.product} / ${line.color}`).join(', '), 45, y + 42, 720, 16, false, { align: 'center' });
       // Same fabric-coloured ground as the card, so white ink stays visible.
       if (Buffer.isBuffer(app.preview)) doc.save().roundedRect(175, y + 85, 460, 230, 6).fill(cardColor(lines.find(line => app.lineIds?.includes(line.id)), app)).restore();
-      image(doc, app.preview, 175, y + 85, 460, 230, 'Desen önizlemesi sağlanmadı');
+      if (Buffer.isBuffer(app.preview)) doc.image(app.preview, 175 + 2 * PREVIEW_MARGIN, y + 85 + 2 * PREVIEW_MARGIN,
+        { fit: [460 - 4 * PREVIEW_MARGIN, 230 - 4 * PREVIEW_MARGIN], align: 'center', valign: 'center' });
+      else image(doc, app.preview, 175, y + 85, 460, 230, 'Desen önizlemesi sağlanmadı');
       text(doc, dimensions(app), 45, y + 335, 720, 26, true, { align: 'center' });
       scaleFootnote(doc, [app], 45, y + 368, 720);
       if (app.previewCropped) text(doc, 'Ürün görselinden kırpıldı', 175, y + 318, 460, 11, false, { align: 'center', color: '#666666' });

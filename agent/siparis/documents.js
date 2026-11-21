@@ -960,7 +960,9 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
         const report=cached && !raster ? {...result.report,quality:prev.report.quality==='teyit' || result.report.aspectRatioError>0.01 ? 'teyit' : 'iyi',
           reasons:[...new Set([...(prev.report.reasons||[]),...(result.report.aspectRatioError>0.01 ? ['oran_bozuldu'] : [])])]} : result.report;
         generated.push({kind:'desen_vektor',buffer:result.pdf,meta:{applicationId:a.id,...(!input.source?{lineId:line.id}:{})},report});
-        if (input.source) vectorByApp.set(a.id,{buffer:result.pdf,background:groundOf(report)});
+        // G56: the preview shows the design itself (its own ratio, nothing cut), never the vector
+        // fitted to the measured box; that box can differ from the design's ratio (sırt %14,5).
+        if (input.source && prev) vectorByApp.set(a.id,{buffer:prev.buffer,background:groundOf(prev.report)});
       }
       const model=formOrder(db,dataDir,v,sourceByApp,extractedByApp,{allowPending:true,vectorByApp});
       generated.push(...await generateInChild({type:'forms',model},signal));
