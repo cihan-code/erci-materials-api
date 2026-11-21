@@ -193,30 +193,6 @@ async function labelRects(buffer) {
 }
 const overlaps = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 
-test('G53-5 dimension labels never overlap and stay on the page in all three forms', async () => {
-  const pdf = require('../agent/siparis/pdf');
-  // Invented back view: a small neck print just above a wide back print (the EXE layout), plus a label at the right edge.
-  const canvas = require('@napi-rs/canvas').createCanvas(1478, 794), ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, 1478, 794); ctx.fillStyle = '#222222'; ctx.fillRect(784, 61, 676, 657);
-  const back = { fileId: 7, view: 'arka', mime: 'image/png', buffer: canvas.toBuffer('image/png') };
-  const placement = box => ({ fileId: 7, view: 'arka', page: 1, rasterWidth: 1478, rasterHeight: 794, box, swapAxes: false });
-  const order = () => ({ orderNo: 'G53-T1', name: 'Örnek', version: 1, date: '21.11.2026', deliveryDate: 'Teslim tarihi belirtilmedi', description: [],
-    lines: [{ id: '1', product: 'Tişört', color: 'Siyah', fabric: 'Örnek kumaş', quantity: 1, sizes: { M: 1 }, images: { back } }],
-    applications: [
-      { type: 'baski', position: 'ense', width_mm: 28, height_mm: 21, lineIds: ['1'], placement: placement({ x: 1116, y: 103, w: 23, h: 17 }) },
-      { type: 'baski', position: 'sirt', width_mm: 487, height_mm: 379, lineIds: ['1'], placement: placement({ x: 922, y: 172, w: 393, h: 306 }) },
-      { type: 'baski', position: 'kapuson', width_mm: 120, height_mm: 40, lineIds: ['1'], placement: placement({ x: 1380, y: 600, w: 95, h: 60 }) }] });
-  for (const render of [pdf.renderProductionForm, pdf.renderApprovalForm, pdf.renderPrintForm]) {
-    const pages = await labelRects(await render(order()));
-    const rects = pages.flatMap(p => p.rects);
-    assert.equal(rects.length, 6, render.name);
-    for (const page of pages) for (const r of page.rects) {
-      assert.ok(r.x >= 0 && r.y >= 0 && r.x + r.w <= page.width + 0.01 && r.y + r.h <= page.height + 0.01, `${render.name} sayfa dışı`);
-      for (const o of page.rects) if (o !== r) assert.ok(!overlaps(r, o), `${render.name}: ${JSON.stringify(r)} ${JSON.stringify(o)}`);
-    }
-  }
-});
-
 // Product pictures drawn on a page: [width, height] of every image except small ones (logos stay out by size).
 async function pictures(buffer, page = 1) {
   const lib = await import('pdfjs-dist/legacy/build/pdf.mjs');
@@ -269,23 +245,23 @@ test('G53-6 one picture uploaded as front and back prints one garment per slot; 
     // One garment per slot (the approval form also carries its logo).
     assert.equal(drawn.filter(p => Math.abs(p.w / p.h - 1) < 0.1).length, 2, `${kind}: ${JSON.stringify(drawn)}`);
   }
-  // Both measurements are still drawn, each with two labels, inside the page.
-  const labels = (await labelRects(forms.uretim_formu))[0].rects;
-  assert.equal(labels.length, 4);
+  // G54: the cut pictures stay clean; the sizes are on the cards.
+  assert.equal((await labelRects(forms.uretim_formu))[0].rects.length, 0);
+  assert.match((await pdfText(forms.uretim_formu))[0], /En: 11,3 cm\s+Boy: 4,6 cm/);
 });
 
 test('G53-6 a single upload holding both garments fills ÖN and ARKA from the same picture', async t => {
   const f = await fixture(t), forms = await twoViewOrder(f, { both: false });
-  const shown = (await pictures(forms.uretim_formu)).filter(p => p.w > 60);
-  assert.equal(shown.length, 2);
-  for (const p of shown) assert.ok(Math.abs(p.w / p.h - 1) < 0.1, `${p.w}x${p.h}`);
+  const drawn = await pictures(forms.uretim_formu);
+  assert.equal(drawn.filter(p => Math.abs(p.w / p.h - 1) < 0.1).length, 2, JSON.stringify(drawn));
+  assert.equal(drawn.filter(p => Math.abs(p.w / p.h - 1478 / 794) < 0.05).length, 0);
 });
 
 test('G53-6 an undecided front/back pairing keeps the whole picture visible', async t => {
   const f = await fixture(t), forms = await twoViewOrder(f, { pairing: ['teyit', 'teyit'] });
-  const shown = (await pictures(forms.uretim_formu)).filter(p => p.w > 60);
-  assert.ok(shown.length >= 1);
-  for (const p of shown) assert.ok(Math.abs(p.w / p.h - 1478 / 794) < 0.05, `${p.w}x${p.h}`);
+  const drawn = await pictures(forms.uretim_formu);
+  assert.ok(drawn.filter(p => Math.abs(p.w / p.h - 1478 / 794) < 0.05).length >= 1, JSON.stringify(drawn));
+  assert.equal(drawn.filter(p => Math.abs(p.w / p.h - 1) < 0.1).length, 0);
 });
 
 test('G53-7 a manual size keeps an optional short source note: stored, audited, printed small beside the size', async t => {
@@ -310,4 +286,78 @@ test('G53-7 a manual size keeps an optional short source note: stored, audited, 
   // A new manual size without a note drops the old note: it described the previous size.
   ok(await patch({ width_mm: 140, height_mm: 9, elleTeyit: true }));
   assert.equal(JSON.parse(f.db.prepare('SELECT measure_source FROM applications WHERE id=?').get(appId).measure_source).kaynak, undefined);
+});
+
+// G54: invented five-application order for the card layout (no real customer, design or size).
+function fiveApplications({ note = true } = {}) {
+  const canvas = require('@napi-rs/canvas').createCanvas(1478, 794), ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, 1478, 794); ctx.fillStyle = '#202020'; ctx.fillRect(12, 60, 681, 659); ctx.fillRect(784, 61, 676, 657);
+  const product = canvas.toBuffer('image/png');
+  const art = require('@napi-rs/canvas').createCanvas(300, 120), a = art.getContext('2d');
+  a.fillStyle = '#ffffff'; a.fillRect(10, 40, 280, 40); // white ink on a transparent ground
+  const preview = art.toBuffer('image/png');
+  const placement = (view, box) => ({ fileId: view === 'on' ? 1 : 2, view, page: 1, rasterWidth: 1478, rasterHeight: 794, box, swapAxes: false });
+  return { orderNo: 'G54-T1', name: 'Örnek', version: 1, date: '21.11.2026', deliveryDate: 'Teslim tarihi belirtilmedi', description: [],
+    lines: [{ id: '1', product: 'Tişört', color: 'Siyah', colorHex: '#000000', fabric: 'Örnek kumaş', quantity: 15, sizes: { S: 1, M: 3, L: 5, XL: 4, XXL: 2 },
+      images: { front: { fileId: 1, view: 'on', mime: 'image/png', buffer: product }, back: { fileId: 2, view: 'arka', mime: 'image/png', buffer: product } } }],
+    applications: [
+      { type: 'baski', position: 'sag_kol', width_mm: 150, height_mm: 9, lineIds: ['1'], preview, ...(note ? { measureNote: 'atölye ölçüsü' } : {}) },
+      { type: 'baski', position: 'sol_kol', width_mm: 30, height_mm: 23, lineIds: ['1'], preview, ...(note ? { measureNote: 'atölye ölçüsü' } : {}) },
+      { type: 'baski', position: 'ense', width_mm: 28, height_mm: 21, lineIds: ['1'], preview, placement: placement('arka', { x: 1116, y: 103, w: 23, h: 17 }) },
+      { type: 'baski', position: 'sol_gogus', width_mm: 113, height_mm: 46, lineIds: ['1'], preview, placement: placement('on', { x: 416, y: 220, w: 91, h: 37 }) },
+      { type: 'nakis', position: 'sirt', width_mm: 487, height_mm: 379, lineIds: ['1'], preview, placement: placement('arka', { x: 922, y: 172, w: 393, h: 306 }) }] };
+}
+// Every filled path and drawn image on a page, as boxes in page space (PDFKit draws top-down).
+async function pageBoxes(buffer) {
+  const lib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const doc = await lib.getDocument({ data: Uint8Array.from(buffer), isEvalSupported: false, verbosity: 0 }).promise;
+  const pages = [];
+  try {
+    for (let n = 1; n <= doc.numPages; n++) {
+      const page = await doc.getPage(n), ops = await page.getOperatorList(), images = [], text = (await page.getTextContent()).items;
+      let transform = null;
+      for (let i = 0; i < ops.fnArray.length; i++) {
+        if (ops.fnArray[i] === lib.OPS.transform) transform = Array.from(ops.argsArray[i]);
+        if (ops.fnArray[i] === lib.OPS.paintImageXObject && transform) images.push({ x: transform[4], y: transform[5], w: Math.abs(transform[0]), h: Math.abs(transform[3]) });
+      }
+      pages.push({ width: page.view[2], height: page.view[3], images, text });
+    }
+  } finally { await doc.destroy(); }
+  return pages;
+}
+
+test('G54 the three forms keep the product pictures clean and print one card per application with En/Boy', async () => {
+  const pdf = require('../agent/siparis/pdf');
+  for (const render of [pdf.renderProductionForm, pdf.renderApprovalForm, pdf.renderPrintForm, pdf.renderEmbroideryForm]) {
+    const buffer = await render(fiveApplications());
+    // No dimension line labels on any picture.
+    assert.equal((await labelRects(buffer)).flatMap(p => p.rects).length, 0, render.name);
+    const text = (await pdfText(buffer)).join('\n');
+    const own = render === pdf.renderPrintForm ? ['baski'] : render === pdf.renderEmbroideryForm ? ['nakis'] : ['baski', 'nakis'];
+    const apps = fiveApplications().applications.filter(app => own.includes(app.type));
+    for (const app of apps) {
+      const title = `${app.type === 'baski' ? 'Baskı' : 'Nakış'} · ${{ sag_kol: 'Sağ kol', sol_kol: 'Sol kol', ense: 'Ense', sol_gogus: 'Sol göğüs', sirt: 'Sırt' }[app.position]}`;
+      assert.ok(text.includes(title), `${render.name}: ${title}`);
+      assert.match(text, new RegExp(`En: ${String(app.width_mm / 10).replace('.', ',')} cm\\s+Boy: ${String(app.height_mm / 10).replace('.', ',')} cm`), render.name);
+    }
+    if (own.includes('baski')) assert.match(text, /atölye ölçüsü/, render.name);
+  }
+});
+
+test('G54 five applications wrap to fit: cards and pictures never overlap and stay on the page', async () => {
+  const pdf = require('../agent/siparis/pdf');
+  for (const note of [true, false]) for (const render of [pdf.renderProductionForm, pdf.renderApprovalForm, pdf.renderPrintForm]) {
+    const pages = await pageBoxes(await render(fiveApplications({ note })));
+    for (const [n, page] of pages.entries()) {
+      for (const box of [...page.images, ...page.text.map(t => ({ x: t.transform[4], y: page.height - t.transform[5], w: t.width, h: 0 }))])
+        assert.ok(box.x >= -0.5 && box.x + box.w <= page.width + 0.5 && box.y >= -0.5 && box.y <= page.height + 0.5,
+          `${render.name} s${n + 1}: ${JSON.stringify(box)}`);
+      // Drawn images (pictures, card designs, logo) never cover each other.
+      const imgs = page.images.map(b => ({ x: b.x, y: b.y - b.h, w: b.w, h: b.h }));
+      for (const a of imgs) for (const b of imgs) if (a !== b)
+        assert.ok(!(a.x + 0.5 < b.x + b.w && b.x + 0.5 < a.x + a.w && a.y + 0.5 < b.y + b.h && b.y + 0.5 < a.y + a.h), `${render.name} s${n + 1}: ${JSON.stringify([a, b])}`);
+    }
+    // All five cards fit on the first page of the production and approval forms.
+    if (render !== pdf.renderPrintForm) assert.equal((pages[0].text.map(t => t.str).join(' ').match(/En: /g) || []).length, 5, render.name);
+  }
 });
