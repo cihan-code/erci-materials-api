@@ -84,7 +84,9 @@ module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, r
     res.json(stock.recordCount(db,{itemId:item.id,countedMilli:counted,countKey:b.countKey,note:b.note ?? null,userId:req.user.id}));
   }));
   router.post('/stok/cikis', wrap((req,res) => res.json(stock.consume(db,{...req.body,userId:req.user.id}))));
-  router.get('/teyitler', (req,res) => res.json(db.prepare('SELECT * FROM confirmations WHERE status=? ORDER BY id').all(req.query.status || 'acik')));
+  // G61: measurement confirmations also carry the suggestion (oneri) and whether they ask front/back (onArkaSorusu).
+  router.get('/teyitler', (req,res) => res.json(db.prepare('SELECT * FROM confirmations WHERE status=? ORDER BY id').all(req.query.status || 'acik')
+    .map(c => require('./documents').confirmationDetails(db,c))));
   router.post('/teyitler/:id/coz', wrap((req,res) => res.json(tx(db, () => {
     const row=db.prepare('SELECT * FROM confirmations WHERE id=?').get(req.params.id);
     if (!row) fail('Teyit bulunamadı',404);

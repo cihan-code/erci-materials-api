@@ -80,6 +80,12 @@ module.exports = function documentRouter({db,dataDir}) {
   }));
   // G58: the confirmation screen answers "which garment is the front" once per picture;
   // without onUrun the core route resolves the confirmation as before.
+  // G61: {oneriOnay:true} writes the confirmation's suggestion as the size and closes it.
+  router.post('/teyitler/:id/coz',(req,res,next)=>req.body?.oneriOnay===undefined ? next('route') : next(),
+    wrap((req,res)=> {
+      if(req.body.oneriOnay!==true)fail('oneriOnay yalnız true olabilir');
+      res.json(documents.acceptSuggestion(db,id(req),req.user));
+    }));
   router.post('/teyitler/:id/coz',(req,res,next)=>req.body?.onUrun===undefined ? next('route') : next(),
     wrap(async(req,res)=>res.json(await documents.answerView(db,dataDir,id(req),req.body.onUrun,req.user))));
   router.get('/surumler/:id/atolye-paketi',wrap((req,res)=>res.json(documents.workshopPackage(db,id(req)))));

@@ -97,7 +97,7 @@ function appsFor(order, lines, type) {
 function cm(mm) { return String(mm / 10).replace('.', ','); }
 // G61: a standard (unmeasured) size says so next to the numbers; ≈ marks every non-automatic size.
 const standardMark = app => app.measureState === 'standart' ? ' (standart)' : '';
-function dimensions(app) { return app.pending ? PENDING_LABEL : `${cm(app.width_mm)} × ${cm(app.height_mm)} cm${app.scaleNote ? ' ≈' : ''}${standardMark(app)}`; }
+function dimensions(app) { return app.pending ? (app.pendingLabel || PENDING_LABEL) : `${cm(app.width_mm)} × ${cm(app.height_mm)} cm${app.scaleNote ? ' ≈' : ''}${standardMark(app)}`; }
 
 // Measurements taken with the geometric mean of two scales carry "≈"; the note is printed once as a footnote.
 function scaleFootnote(doc, apps, x, y, width) {
@@ -410,7 +410,7 @@ const hexColor = value => /^#[0-9a-f]{6}$/i.test(value ?? '') ? value : null;
 function cardColor(line, app) { return hexColor(line?.colorHex) ?? hexColor(app.previewBackground) ?? '#eeeeee'; }
 const isDark = hex => [1, 3, 5].reduce((sum, i, k) => sum + parseInt(hex.slice(i, i + 2), 16) * [0.299, 0.587, 0.114][k], 0) < 140;
 function sizeLine(app) {
-  return app.pending ? PENDING_LABEL : `En: ${cm(app.width_mm)} cm   Boy: ${cm(app.height_mm)} cm${app.scaleNote ? ' ≈' : ''}${standardMark(app)}`;
+  return app.pending ? (app.pendingLabel || PENDING_LABEL) : `En: ${cm(app.width_mm)} cm   Boy: ${cm(app.height_mm)} cm${app.scaleNote ? ' ≈' : ''}${standardMark(app)}`;
 }
 // One line that shrinks (down to 6 pt) instead of wrapping or leaving its box.
 function lineText(doc, value, x, y, width, size, bold, color = '#111111') {
@@ -774,7 +774,7 @@ function renderWorkshop(input, options, type) {
   const apps = wanted.filter(app => !app.pending);
   if (apps.length === 0) return null;
   const missing = wanted.filter(app => app.pending).map(app =>
-    `*Eksik:* ${POSITION_LABELS[app.position]} ${TYPES[type].toLocaleLowerCase('tr-TR')} uygulaması için ölçü teyidi bekleniyor; forma alınmadı.`);
+    `*Eksik:* ${POSITION_LABELS[app.position]} ${TYPES[type].toLocaleLowerCase('tr-TR')} uygulaması için ${app.pendingLabel ? app.pendingLabel.toLocaleLowerCase('tr-TR') : 'ölçü teyidi bekleniyor'}; forma alınmadı.`);
   return build(order, options, (doc, brand) => {
     const lines = order.lines.filter(line => apps.some(app => !app.lineIds || app.lineIds.includes(line.id)));
     page(doc);

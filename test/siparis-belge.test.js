@@ -296,11 +296,15 @@ test('G14-2 revision is editable, carries open/resolved measurements and prepare
   const apps=v2.lines[0].applications;
   for (const [i,status] of ['acik','cozuldu'].entries())
     assert.equal(f.db.prepare("SELECT status FROM confirmations WHERE kind='olcu' AND ref_table='applications' AND ref_id=?").get(apps[i].id)?.status,status);
-  assert.equal((await f.post(`/surumler/${v2.id}/hazirla`)).status,409);
+  // G61: a print without a design file (or a size) no longer stops the forms; only its vector is missing.
+  const waiting=ok(await f.post(`/surumler/${v2.id}/hazirla`));
+  assert.match(waiting.find(x=>x.kind==='onay_formu').path,/\/v2\//);
+  assert.equal(waiting.filter(x=>x.kind==='desen_vektor').length,0);
   const pending=f.db.prepare("SELECT id FROM confirmations WHERE ref_table='applications' AND ref_id=? AND status='acik'").get(apps[0].id);
   ok(await f.post(`/teyitler/${pending.id}/coz`));ok(await f.upload(v2.id),201);
-  const files=ok(await f.post(`/surumler/${v2.id}/hazirla`));
+  const files=ok(await f.post(`/surumler/${v2.id}/hazirla?yeniden=1`));
   assert.match(files.find(x=>x.kind==='onay_formu').path,/\/v2\//);
+  assert.equal(files.filter(x=>x.kind==='desen_vektor').length,2);
 });
 test('G14-4 open vector quality blocks both submit and approval until resolved',async t=> {
   const f=await fixture(t), a=await prepared(f,{both:false});

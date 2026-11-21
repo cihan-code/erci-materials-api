@@ -101,10 +101,12 @@ test('G40b vector preview is available before physical measurement; prepare rema
   const f=await fixture(t),{version}=await f.order(),id=version.id,lineId=version.lines[0].id;
   const image=await uploadProduct(f,id,lineId,mockup().image);
   const app=ok(await f.post(`/satirlar/${lineId}/uygulamalar`,{kind:'nakis',position:'gogus'}),201);
-  assert.equal(app.width_mm,null);
-  // G41c: the unmeasured application no longer stops the forms; they print it as pending.
-  const pendingForms=ok(await f.post(`/surumler/${id}/hazirla`));
-  assert.ok(pendingForms.some(g=>g.kind==='onay_formu'));assert.ok(!pendingForms.some(g=>g.kind==='nakis_formu'));
+  // G61: without a pattern scale the print gets the position's standard width (≈), not an empty size.
+  const source=JSON.parse(app.measure_source);
+  assert.deepEqual([app.width_mm,app.needs_confirmation,source.olcuDurumu],[280,0,'standart'],app.measure_source);
+  assert.equal(app.height_mm,Math.round(280/(120/68)));
+  const standardForms=ok(await f.post(`/surumler/${id}/hazirla`));
+  assert.ok(standardForms.some(g=>g.kind==='onay_formu'));assert.ok(standardForms.some(g=>g.kind==='nakis_formu'));
   await documents.settled();
   const [preview]=await vectorStatus(f,id);
   assert.equal(preview.extracted,true);
@@ -113,7 +115,6 @@ test('G40b vector preview is available before physical measurement; prepare rema
   assert.equal(preview.position,'gogus');
   assert.equal(preview.placement.designBoxPx.w,120);
   assert.ok(preview.previewFileId);
-  assert.equal(preview.targetMm,undefined);
   ok(await f.request(`/uygulamalar/${app.id}`,{method:'PATCH',token:f.token,body:{width_mm:120,height_mm:68}}));
   ok(await f.post(`/teyitler/${openMeasure(f,app.id).id}/coz`));
   const results=await Promise.all([f.post(`/surumler/${id}/hazirla?yeniden=1`),f.post(`/surumler/${id}/hazirla?yeniden=1`)]);
@@ -141,9 +142,12 @@ test('G40b replacement invalidates a legacy application preview and an explicit 
   const stale=await f.post(`/surumler/${id}/hazirla`);
   assert.equal(stale.status,409);
   assert.match(stale.data.error,/Sürüm değişmiş/);
-  const ambiguous=await f.post(`/surumler/${id}/hazirla?yeniden=1`);
-  assert.equal(ambiguous.status,409);
-  assert.match(ambiguous.data.error,/birden çok/);
+  // G61: the print whose design cannot be separated waits for its design file; the forms are still made.
+  const ambiguous=ok(await f.post(`/surumler/${id}/hazirla?yeniden=1`));
+  assert.ok(ambiguous.some(g=>g.kind==='onay_formu'));
+  assert.equal(ambiguous.filter(g=>g.kind==='desen_vektor').length,0);
+  const waiting=JSON.parse(f.db.prepare("SELECT detail_json FROM audit_log WHERE action='belgeler_hazirla' ORDER BY id DESC LIMIT 1").get().detail_json);
+  assert.equal(waiting.desenBekleyen[0].applicationId,app.id);assert.match(waiting.desenBekleyen[0].message,/birden çok/);
   const [blocked]=await vectorStatus(f,id);
   assert.equal(blocked.sourceFileId,next.id);
   assert.equal(blocked.previewFileId,null);
@@ -158,15 +162,16 @@ test('G40b replacement invalidates a legacy application preview and an explicit 
   assert.equal(f.db.prepare('SELECT width_mm FROM applications WHERE id=?').get(app.id).width_mm,120);
 });
 
-test('G40b a crop that differs from old automatic measurement keeps its preview and blocks the measured PDF',async t=> {
+test('G40b a crop that differs from old automatic measurement keeps its preview and leaves only that PDF out',async t=> {
   const f=await fixture(t),{version}=await f.order(),id=version.id,lineId=version.lines[0].id;
   const image=await uploadProduct(f,id,lineId,mockup().image);
   orders.addApplication(f.db,lineId,{kind:'baski',position:'gogus',width_mm:120,height_mm:27,measure_source:JSON.stringify({
     method:'otomatik_renk',gorselFileId:image.id,selectedPage:1,rasterWidth:600,rasterHeight:650,designBoxPx:{x:240,y:290,w:120,h:27}
   })},f.team);
-  const response=await f.post(`/surumler/${id}/hazirla`);
-  assert.equal(response.status,409);
-  assert.match(response.data.error,/otomatik ölçü kutusuyla eşleşmedi/);
+  const files=ok(await f.post(`/surumler/${id}/hazirla`));
+  assert.ok(files.some(g=>g.kind==='onay_formu'));
+  const waiting=JSON.parse(f.db.prepare("SELECT detail_json FROM audit_log WHERE action='belgeler_hazirla' ORDER BY id DESC LIMIT 1").get().detail_json);
+  assert.match(waiting.desenBekleyen[0].message,/otomatik ölçü kutusuyla eşleşmedi/);
   const [preview]=await vectorStatus(f,id);
   assert.ok(preview.previewFileId);
   assert.equal(f.db.prepare("SELECT count(*) AS n FROM files WHERE kind='desen_vektor'").get().n,0);

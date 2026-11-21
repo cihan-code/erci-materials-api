@@ -11,6 +11,14 @@ function result(db, versionId) {
     allocations: db.prepare('SELECT a.* FROM allocations a JOIN order_lines l ON l.id=a.order_line_id WHERE l.version_id=? ORDER BY a.id').all(versionId),
     outbox: db.prepare('SELECT * FROM outbox WHERE version_id=? ORDER BY id').all(versionId) };
 }
+// Applications of the version without a production design vector or a valid size.
+function incompletePrints(db, versionId) {
+  // Without the documents module there are no prepared vectors to compare against.
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_file_meta'").get()) return [];
+  return db.prepare(`SELECT a.id FROM applications a JOIN order_lines l ON l.id=a.line_id WHERE l.version_id=? AND (
+      a.width_mm IS NULL OR a.height_mm IS NULL OR NOT EXISTS (SELECT 1 FROM files f JOIN document_file_meta m ON m.file_id=f.id
+        WHERE f.version_id=l.version_id AND f.kind='desen_vektor' AND m.application_id=a.id)) ORDER BY a.id`).all(versionId).map(r => r.id);
+}
 function approveVersion(db, { versionId, userId, fileId, recipes = recipeReader.load() }) {
   return tx(db, () => {
     assertUser(db, userId, true);
@@ -92,11 +100,19 @@ function approveVersion(db, { versionId, userId, fileId, recipes = recipeReader.
     db.prepare("UPDATE order_versions SET status='onaylandi' WHERE id=?").run(versionId);
     const order = db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id);
     const enqueue = db.prepare('INSERT INTO outbox(kind,idempotency_key,version_id,payload_json) VALUES(?,?,?,?)');
+    // G61: forms may now leave with prints still waiting for a design file or a size.
+    // Such a package never goes to the workshop by itself: its files wait for a person.
+    const incomplete = incompletePrints(db, versionId);
     for (const file of db.prepare(`SELECT * FROM files WHERE version_id=? AND kind IN (${WORKSHOP_KINDS.map(() => '?').join(',')}) ORDER BY id`).all(versionId, ...WORKSHOP_KINDS))
-      enqueue.run('atolye_dosya', `atolye:${versionId}:${file.id}`, versionId, JSON.stringify({ versionId, orderNo: order.order_no, versionNo: v.version_no, file }));
+      enqueue.run('atolye_dosya', `atolye:${versionId}:${file.id}`, versionId, JSON.stringify({ versionId, orderNo: order.order_no, versionNo: v.version_no, file,
+        ...(incomplete.length ? { eksikBaskilar: incomplete } : {}) }));
+    if (incomplete.length) {
+      db.prepare("UPDATE outbox SET status='manuel_bekliyor' WHERE version_id=? AND kind='atolye_dosya' AND status='bekliyor'").run(versionId);
+      audit(db, userId, 'atolye_paketi_eksik', versionId, { eksikBaskilar: incomplete });
+    }
     enqueue.run('maliyet_aktarim', `maliyet:${order.order_no}:${v.version_no}`, versionId, JSON.stringify({ versionId, orderNo: order.order_no, versionNo: v.version_no }));
     audit(db, userId, 'surum_onayla', versionId, { fileId, recipeVersion: recipes.version });
     return result(db, versionId);
   });
 }
-module.exports = { approveVersion, WORKSHOP_KINDS };
+module.exports = { approveVersion, incompletePrints, WORKSHOP_KINDS };
