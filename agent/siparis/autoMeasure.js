@@ -937,6 +937,66 @@ function sleevePrints(p,sleeve) {
     }
   return found;
 }
+// G55 (Patron, 21.11.2026): blur-aware aspect for small sleeve prints read by
+// the aligned path. The blur is the image's own edge spread: the 10-90% rise
+// of the print's outermost edges (background outside, ink plateau inside)
+// along scan lines in the print's frame, on the contrast map. Its median is
+// subtracted from the stroke thickness (the short side). The sleeve's curve
+// shows as shear: the along-centre of the ink drifting with the across
+// position; the along extent is taken after removing it. The ±10% rule is
+// unchanged. Few or scattered edges, or blur over half the thickness, make
+// the estimate unreliable.
+function edgeSpread(p,con,origin,u,v,along,across,peak) {
+  const w=p.width,h=p.height,at=(a,c)=>{
+    const X=origin.x+a*u.x+c*v.x,Y=origin.y+a*u.y+c*v.y,x0=Math.floor(X),y0=Math.floor(Y),fx=X-x0,fy=Y-y0;
+    if(x0<0||y0<0||x0+1>=w||y0+1>=h)return 0;
+    const g=(x,y)=>con[y*w+x];
+    return g(x0,y0)*(1-fx)*(1-fy)+g(x0+1,y0)*fx*(1-fy)+g(x0,y0+1)*(1-fx)*fy+g(x0+1,y0+1)*fx*fy;
+  };
+  const spreads=[];
+  for(const [lines,span,acrossLines] of [[along,across,true],[across,along,false]]) {
+    for(let s=lines.from;s<=lines.to;s++) {
+      const profile=[];for(let t=span.from-4;t<=span.to+4;t+=.25)profile.push(acrossLines?at(s,t):at(t,s));
+      const cross=[];for(let k=1;k<profile.length;k++)if((profile[k-1]<peak*.5)!==(profile[k]<peak*.5))cross.push(k);
+      if(cross.length<2)continue;
+      for(const [k,rising] of [[cross[0],true],[cross.at(-1),false]]) {
+        let i10=k,i90=k;
+        if(rising){while(i10>0&&profile[i10]>peak*.1)i10--;while(i90<profile.length-1&&profile[i90]<peak*.9)i90++;}
+        else{while(i10<profile.length-1&&profile[i10]>peak*.1)i10++;while(i90>0&&profile[i90]<peak*.9)i90--;}
+        if(i10===0||i10===profile.length-1)continue;
+        const inside=rising?profile.slice(k,k+16):profile.slice(Math.max(0,k-16),k);
+        if(Math.max(...inside)<peak*.9)continue;
+        spreads.push(Math.abs(i90-i10)*.25);
+      }
+    }
+  }
+  spreads.sort((a,b)=>a-b);
+  if(!spreads.length)return {spread:null,edges:0,iqr:null};
+  const q=f=>spreads[Math.floor(spreads.length*f)];
+  return {spread:q(.5),edges:spreads.length,iqr:q(.75)-q(.25)};
+}
+function blurAwareAspect(p,candidate,u,v,center,pts) {
+  const con=candidate.contrast,pixels=candidate.pixels;
+  const peak=Array.from(pixels,i=>con[i]).sort((a,b)=>a-b)[Math.floor(pixels.length*.95)];
+  const as=pts.map(q=>q[0]),cs=pts.map(q=>q[1]);
+  const along={from:Math.floor(Math.min(...as)),to:Math.ceil(Math.max(...as))},across={from:Math.floor(Math.min(...cs)),to:Math.ceil(Math.max(...cs))};
+  const blur=edgeSpread(p,con,center,u,v,along,across,peak);
+  // Shear: the ink's along-mean of each across row against the across
+  // position, weighted by the row's ink. Sparse rows (a word's tops and
+  // bottoms) only carry a few letters and are left out.
+  const rows=new Map();for(const [a,c] of pts){const k=Math.round(c);if(!rows.has(k))rows.set(k,{n:0,sum:0});const r=rows.get(k);r.n++;r.sum+=a;}
+  const full=Math.max(...[...rows.values()].map(r=>r.n)),used=[...rows].filter(([,r])=>r.n>=full*.25);
+  let tw=0,tx=0,ty=0;for(const [k,r] of used){tw+=r.n;tx+=k*r.n;ty+=r.sum;}
+  const mx=tx/tw,my=ty/tw;let sxy=0,sxx=0;
+  for(const [k,r] of used){sxy+=(k-mx)*(r.sum-my*r.n);sxx+=r.n*(k-mx)**2;}
+  // A sleeve curve tilts a print by a few degrees; a slope beyond 0.5 (27°)
+  // is letter shape, not a curve, and is not applied.
+  const fitted=sxx?sxy/sxx:0,shear=Math.abs(fitted)<=.5?fitted:0,straight=pts.map(([a,c])=>a-shear*c);
+  const W=Math.max(...straight)-Math.min(...straight)+1,H=Math.max(...cs)-Math.min(...cs)+1,thin=Math.min(W,H);
+  const reliable=blur.spread!=null&&blur.edges>=12&&blur.iqr<=Math.max(1,blur.spread*.5)&&blur.spread<thin*.5;
+  const Wc=W<H?W-blur.spread:W,Hc=H<=W?H-blur.spread:H;
+  return {reliable,spread:blur.spread,edges:blur.edges,iqr:blur.iqr,shear,ratio:reliable?Wc/Hc:null};
+}
 // G47d: a grouped sleeve print read in its own frame. Two axes are tried: the
 // principal axis of its ink (a word) and the stroke direction from the
 // contrast structure tensor (sheared bars). The frame is sampled back from
@@ -976,7 +1036,21 @@ function alignedSleeveMatch(p,sleeve,candidate,design,content) {
         best={confidence,rotation:turn,measuredAxis:turn%2?'boy':'en',designRatio,axis:u,axisOffsetDegrees:Math.round((theta-Math.atan2(sleeve.u.y,sleeve.u.x))*180/Math.PI),
           // Length is the full extent; the across side follows the robust
           // ratio, so a pixel of turning anti-aliasing does not read as shape.
-          projected:{...candidate,alongPx:W,acrossPx:W*H94/W94},aligned:true};
+          projected:{...candidate,alongPx:W,acrossPx:W*H94/W94},aligned:true,frame:{u,v}};
+    }
+  }
+  if(best) {
+    // G55: the aspect measureSleeve tests follows the blur- and shear-
+    // corrected ratio when the blur estimate is reliable; the length stays
+    // the full extent along the sleeve.
+    const {u,v}=best.frame;
+    const pts=Array.from(pixels,i=>{const dx=i%w-mx,dy=Math.floor(i/w)-my;return [dx*u.x+dy*u.y,dx*v.x+dy*v.y];});
+    const aspect=blurAwareAspect(p,candidate,u,v,{x:mx,y:my},pts);
+    best.blur={spread:aspect.spread,edges:aspect.edges,iqr:aspect.iqr,shear:Math.round(aspect.shear*1000)/1000,reliable:aspect.reliable};
+    if(aspect.reliable) {
+      // Frame ratio is along/across for rotation 0/2; a turned design reads across/along.
+      const frameRatio=best.rotation%2?1/aspect.ratio:aspect.ratio;
+      best.projected={...best.projected,acrossPx:best.projected.alongPx/(best.measuredAxis==='boy'?1/frameRatio:frameRatio)};
     }
   }
   return best;
@@ -1147,10 +1221,14 @@ async function autoMeasureSleeve({image,design,flat,product,position}) {
       }
       if(!source.mmPerPx)reasons.push(`Kol için ölçek kaynağı yok: geçerli L kol_boyu veya aynı görselde doğrulanmış gövde ${pairLabel} ölçeği bulunamadı.`);
       source.scale=source.mmPerPx?source.mmPerPx/10:null;
+      if(match.blur)source.bulaniklik=match.blur;
       if(!ambiguous&&match.confidence>=threshold) {
         const measured=measureSleeve({alongPx:candidate.alongPx,acrossPx:candidate.acrossPx,designRatio:match.designRatio,measuredAxis:match.measuredAxis,mmPerPx:source.mmPerPx});
         source.aspectRatioError=measured.aspectRatioError;
         reasons.push(...measured.reasons);width=measured.width_mm;height=measured.height_mm;
+        // The correction was needed and could not be made (G55).
+        if(match.aligned&&match.blur&&!match.blur.reliable&&measured.aspectRatioError>.10)
+          reasons.push(`Kol baskısının bulanıklığı görselden güvenilir ölçülemedi (${match.blur.edges} kenar${match.blur.spread!=null?`, yayılma ${match.blur.spread} px, çeyrekler arası ${match.blur.iqr} px`:''}); en-boy oranı düzeltilemedi.`);
         // The workshop reads a sleeve print's "en" along the sleeve; say which design axis that is.
         source.enEkseni=match.measuredAxis==='en'?'kol boyunca (desenin eni)':'kola dik (desenin boyu kol boyunca)';
         source.designBoxPx=candidate.box;
