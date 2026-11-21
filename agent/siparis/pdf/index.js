@@ -145,8 +145,9 @@ function logo(doc, brand, x, y, w, h) {
   image(doc, brand.logo || defaultLogo, x, y, w, h);
 }
 
-// A PDF/SVG design is shown from its vector: the page is rasterised, drawn on the
-// removed proof ground (white ink stays visible on the white form) and cut to its ink.
+// A PDF/SVG design is shown from its vector: the page is rasterised and cut to its ink.
+// It stays transparent; the application card behind it carries the fabric colour (or
+// the removed proof ground), so white ink stays visible.
 async function vectorPreviews(order) {
   for (const app of order.applications) {
     const vector = app.previewVector;
@@ -169,9 +170,9 @@ async function vectorPreviews(order) {
       const full = canvasLib.createCanvas(raster.width, raster.height);
       full.getContext('2d').putImageData(raster, 0, 0);
       const canvas = canvasLib.createCanvas(x1 - x0 + 1, y1 - y0 + 1), ctx = canvas.getContext('2d');
-      if (ground) { ctx.fillStyle = vector.background; ctx.fillRect(0, 0, canvas.width, canvas.height); }
       ctx.drawImage(full, x0, y0, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
       app.preview = canvas.toBuffer('image/png');
+      if (ground) app.previewBackground = vector.background;
     } catch {
       // An unreadable vector falls back to the product-image crop below.
     }
@@ -240,30 +241,6 @@ function title(doc, heading, subtitle) {
 }
 
 // Free text flows onto continuation pages. It is never shortened or clipped.
-function paragraphs(doc, items, y, { size = PORTRAIT, x = 45, width = size[0] - 90, fontSize = 19, bottom = size[1] - 110, align = 'left' } = {}) {
-  for (const item of items) {
-    const words = String(item).split(/\s+/);
-    let line = '';
-    for (const word of words) {
-      doc.font('Regular').fontSize(fontSize);
-      const candidate = line ? `${line} ${word}` : word;
-      if (doc.widthOfString(candidate) > width && line) {
-        if (y + fontSize * 1.6 > bottom) { page(doc, size); y = 60; }
-        y += text(doc, line, x, y, width, fontSize, false, { align }) + 5;
-        line = word;
-      } else line = candidate;
-    }
-    if (line) {
-      const height = doc.font('Regular').fontSize(fontSize).heightOfString(line, { width, lineGap: 3 });
-      if (y + height > bottom) { page(doc, size); y = 60; }
-      if (height > bottom - 60) throw new RangeError('Bir metin parçası sayfaya sığmayacak kadar uzun.');
-      y += text(doc, line, x, y, width, fontSize, false, { align }) + 10;
-    }
-  }
-  return y;
-}
-
-// "*vurgu*" prints red; an unpaired asterisk stays literal.
 function parseEmphasis(value) {
   const segments = [];
   String(value).split(/\*([^*\n]+)\*/).forEach((part, i) => {
@@ -381,79 +358,141 @@ async function resolveProductImages(order) {
   }
 }
 
-const DIMENSION_BLUE = '#94dcff';
-
-// A label goes to the first free spot: its own side of the line, the other side,
-// then stepped along the line. Free means inside the picture (so inside the page)
-// and clear of every label already drawn on it. Without a free spot it keeps the
-// first in-bounds position, as before.
-function labelSpot(desired, size, bounds, taken, vertical) {
-  const inside = r => r.x >= bounds.x && r.y >= bounds.y && r.x + r.w <= bounds.right && r.y + r.h <= bounds.bottom;
-  const clear = r => taken.every(t => r.x + r.w + 2 <= t.x || t.x + t.w + 2 <= r.x || r.y + r.h + 2 <= t.y || t.y + t.h + 2 <= r.y);
-  const clamp = r => ({ ...r, x: Math.max(bounds.x, Math.min(bounds.right - r.w, r.x)), y: Math.max(bounds.y, Math.min(bounds.bottom - r.h, r.y)) });
-  const step = vertical ? size.h + 3 : size.w / 2 + 3;
-  for (let k = 0; k <= 8; k++) for (const sign of k ? [1, -1] : [1]) for (const side of desired) {
-    const shift = sign * k * step;
-    const spot = clamp({ x: side.x + (vertical ? 0 : shift), y: side.y + (vertical ? shift : 0), w: size.w, h: size.h });
-    if (inside(spot) && clear(spot)) return spot;
-  }
-  return clamp({ ...desired[0], w: size.w, h: size.h });
-}
-
-function dimensionMark(doc, x0, y0, x1, y1, label, bounds, vertical, taken = []) {
-  // A dark outline keeps the pale blue line visible on both light and dark products.
-  doc.save().lineCap('round');
-  const ticks = vertical ? [3, 0] : [0, 3];
-  for (const [weight, color] of [[3.2, '#244358'], [1.5, DIMENSION_BLUE]]) {
-    doc.lineWidth(weight).strokeColor(color)
-      .moveTo(x0, y0).lineTo(x1, y1)
-      .moveTo(x0 - ticks[0], y0 - ticks[1]).lineTo(x0 + ticks[0], y0 + ticks[1])
-      .moveTo(x1 - ticks[0], y1 - ticks[1]).lineTo(x1 + ticks[0], y1 + ticks[1]).stroke();
-  }
-  const fontSize = 11, labelHeight = 16;
-  const labelWidth = doc.font('Bold').fontSize(fontSize).widthOfString(label) + 10;
-  const sides = vertical
-    ? [{ x: x0 + 5, y: (y0 + y1 - labelHeight) / 2 }, { x: x0 - 5 - labelWidth, y: (y0 + y1 - labelHeight) / 2 }]
-    : [{ x: (x0 + x1 - labelWidth) / 2, y: y0 - labelHeight - 4 }, { x: (x0 + x1 - labelWidth) / 2, y: y0 + 4 }];
-  const { x: labelX, y: labelY } = labelSpot(sides, { w: labelWidth, h: labelHeight }, bounds, taken, vertical);
-  taken.push({ x: labelX, y: labelY, w: labelWidth, h: labelHeight });
-  doc.rect(labelX, labelY, labelWidth, labelHeight).fill(DIMENSION_BLUE);
-  text(doc, label, labelX, labelY + 1, labelWidth, fontSize, true, { color: '#183448', align: 'center', lineBreak: false });
-  doc.restore();
-}
-
-function productImage(doc, source, apps, x, y, w, h) {
+// G54: product pictures stay clean; sizes are printed on the application cards.
+function productImage(doc, source, x, y, w, h) {
   if (source == null || Buffer.isBuffer(source)) return image(doc, source, x, y, w, h);
-  const { buffer, placements } = source;
-  const opened = doc.openImage(buffer);
-  doc.image(opened, x, y, { fit: [w, h], align: 'center', valign: 'center' });
-  if (opened.orientation && opened.orientation !== 1) return;
-  const scale = Math.min(w / opened.width, h / opened.height);
-  const width = opened.width * scale, height = opened.height * scale;
-  const left = x + (w - width) / 2, top = y + (h - height) / 2;
-  const bounds = { x: Math.max(0, x), y: Math.max(0, y), right: Math.min(doc.page.width, x + w), bottom: Math.min(doc.page.height, y + h) }, taken = [];
-  for (const app of placements) {
-    if (!apps.includes(app)) continue;
-    const { box, rasterWidth, rasterHeight, swapAxes } = app.placement;
-    // The measured raster can round either side by one pixel during downsampling.
-    if (Math.abs(rasterWidth * opened.height - rasterHeight * opened.width) > opened.width + opened.height) continue;
-    const sx = width / rasterWidth, sy = height / rasterHeight;
-    const x0 = left + box.x * sx, x1 = x0 + box.w * sx;
-    const y0 = top + box.y * sy, y1 = y0 + box.h * sy;
-    const widthY = y0 - y >= 24 ? y0 - 6 : y0 + 6;
-    const heightX = x1 + 6 <= bounds.right - 6 ? x1 + 6 : x1 - 6;
-    dimensionMark(doc, x0, widthY, x1, widthY, `${cm(swapAxes ? app.height_mm : app.width_mm)} cm`, bounds, false, taken);
-    dimensionMark(doc, heightX, y0, heightX, y1, `${cm(swapAxes ? app.width_mm : app.height_mm)} cm`, bounds, true, taken);
-  }
+  doc.image(source.buffer, x, y, { fit: [w, h], align: 'center', valign: 'center' });
 }
 
-function productPair(doc, line, apps, y, { x = 40, width = 730, height = 380, labelSize = 22, bold = true } = {}) {
+function productPair(doc, line, y, { x = 40, width = 730, height = 380, labelSize = 22, bold = true } = {}) {
   const half = width / 2;
-  productImage(doc, line.images.front, apps, x, y, half - 12, height);
-  productImage(doc, line.images.back, apps, x + half + 12, y, half - 12, height);
+  productImage(doc, line.images.front, x, y, half - 12, height);
+  productImage(doc, line.images.back, x + half + 12, y, half - 12, height);
   text(doc, 'ÖN', x, y + height + 10, half, labelSize, bold, { align: 'center' });
   text(doc, 'ARKA', x + half, y + height + 10, half, labelSize, bold, { align: 'center' });
 }
+// Width/height of each product picture of a line (a missing one draws a 1:1 placeholder).
+function pictureAspects(doc, line) {
+  const aspect = source => {
+    const buffer = Buffer.isBuffer(source) ? source : source?.buffer;
+    if (!Buffer.isBuffer(buffer)) return 1;
+    try { const opened = doc.openImage(buffer); return opened.width / opened.height || 1; } catch { return 1; }
+  };
+  const both = line.images.front != null && line.images.back != null;
+  return both ? [aspect(line.images.front), aspect(line.images.back)] : [aspect(line.images.front ?? line.images.back)];
+}
+// Drawn picture area in a w x h box: two views side by side with labels under them, or one view.
+function pictureFit(aspects, w, h, labelSize) {
+  if (aspects.length === 1) { const width = Math.min(w, h * aspects[0]); return { area: width * width / aspects[0], height: width / aspects[0] }; }
+  const slotW = w / 2 - 12, slotH = Math.max(0, h - labelSize * 1.3 - 12);
+  const sizes = aspects.map(a => Math.min(slotW, slotH * a)).map((width, i) => [width, width / aspects[i]]);
+  return { area: sizes.reduce((sum, [a, b]) => sum + a * b, 0), height: Math.max(...sizes.map(([, b]) => b)) };
+}
+// Both views with their ÖN/ARKA labels right under the drawn pictures; a single view fills the box.
+function pictures(doc, line, x, y, w, h, { labelSize = 22, bold = true } = {}) {
+  const aspects = pictureAspects(doc, line);
+  if (aspects.length === 2) productPair(doc, line, y, { x, width: w, height: pictureFit(aspects, w, h, labelSize).height, labelSize, bold });
+  else productImage(doc, line.images.front ?? line.images.back, x, y, w, h);
+}
+
+// G54 application cards: title, the design on the fabric colour, then "En / Boy".
+// A manual size adds its source note in small grey type. Pictures stay clean.
+const CARD_WIDTHS = [220, 200, 180, 160, 140, 120, 100];
+const CARD_GAP = 10;
+const cardNote = app => !app.pending && typeof app.measureNote === 'string' && app.measureNote.trim() ? app.measureNote.trim() : null;
+const cardHeight = (cw, notes) => 20 + Math.round(cw * 0.5) + 6 + 15 + (notes ? 12 : 0);
+const hexColor = value => /^#[0-9a-f]{6}$/i.test(value ?? '') ? value : null;
+function cardColor(line, app) { return hexColor(line?.colorHex) ?? hexColor(app.previewBackground) ?? '#eeeeee'; }
+const isDark = hex => [1, 3, 5].reduce((sum, i, k) => sum + parseInt(hex.slice(i, i + 2), 16) * [0.299, 0.587, 0.114][k], 0) < 140;
+function sizeLine(app) {
+  return app.pending ? PENDING_LABEL : `En: ${cm(app.width_mm)} cm   Boy: ${cm(app.height_mm)} cm${app.scaleNote ? ' ≈' : ''}`;
+}
+// One line that shrinks (down to 6 pt) instead of wrapping or leaving its box.
+function lineText(doc, value, x, y, width, size, bold, color = '#111111') {
+  doc.font(bold ? 'Bold' : 'Regular');
+  while (size > 6 && doc.fontSize(size).widthOfString(String(value)) > width) size -= 0.5;
+  text(doc, value, x, y, width, size, bold, { align: 'center', color, lineBreak: false, height: size * 1.4, ellipsis: true });
+}
+function applicationCard(doc, line, app, x, y, cw, notes) {
+  lineText(doc, `${TYPES[app.type]} · ${POSITION_LABELS[app.position]}`, x, y, cw, 11, true);
+  const ph = Math.round(cw * 0.5), py = y + 20, color = cardColor(line, app);
+  doc.save().roundedRect(x, py, cw, ph, 6).fill(color).restore();
+  doc.save().lineWidth(0.6).strokeColor('#b0b0b0').roundedRect(x, py, cw, ph, 6).stroke().restore();
+  if (Buffer.isBuffer(app.preview)) doc.image(app.preview, x + 8, py + 8, { fit: [cw - 16, ph - 16], align: 'center', valign: 'center' });
+  else lineText(doc, 'Önizleme yok', x, py + ph / 2 - 6, cw, 9, false, isDark(color) ? '#ffffff' : '#666666');
+  lineText(doc, sizeLine(app), x, py + ph + 6, cw, 10, true);
+  const note = cardNote(app);
+  if (notes && note) lineText(doc, note, x, py + ph + 21, cw, 8, false, '#555555');
+}
+// Every arrangement that fits the area is scored by the drawn area of the product
+// pictures at their own aspect ratio; within 10% of the best area, larger cards win,
+// then fewer rows under the pictures. Everything stays inside the area; null when
+// nothing fits.
+// below: cards only in the grid under full-width pictures (a tall area such as the print form).
+function cardLayout(n, area, notes, { minImageW = 200, maxImageW = Infinity, minImageH = 120, top = 0, maxRows = Infinity, labelSize = 22, aspects = [1, 1], below = false } = {}) {
+  const fits = [];
+  for (const cw of CARD_WIDTHS) {
+    const ch = cardHeight(cw, notes), gridCols = Math.max(1, Math.floor((area.w + CARD_GAP) / (cw + CARD_GAP)));
+    for (let rightCols = below ? 0 : 1; rightCols <= (below ? 0 : 6); rightCols++) {
+      const rightW = rightCols ? rightCols * cw + (rightCols - 1) * CARD_GAP : 0, imageW = area.w - rightW - (rightCols ? 16 : 0);
+      if (imageW < minImageW) break;
+      if (imageW > maxImageW) continue;
+      for (let rows = 0; rows <= Math.min(maxRows, Math.ceil(n / gridCols)); rows++) {
+        const imageH = area.h - rows * (ch + CARD_GAP);
+        if (imageH < minImageH) break;
+        const right = rightCols ? Math.min(n, Math.max(0, Math.floor((imageH - top + CARD_GAP) / (ch + CARD_GAP))) * rightCols) : 0;
+        if (n - right > rows * gridCols) continue;
+        fits.push({ cw, ch, rightCols, rightW, imageW, imageH, right, gridCols, rows,
+          picture: pictureFit(aspects, imageW, imageH, labelSize).area });
+        break;
+      }
+    }
+  }
+  if (!fits.length) return null;
+  const best = Math.max(...fits.map(f => f.picture));
+  return fits.filter(f => f.picture >= best * 0.9).sort((a, b) => b.cw - a.cw || a.rows - b.rows || a.rightCols - b.rightCols)[0];
+}
+// Pictures on the left, cards beside them and in a grid below. Cards that cannot fit
+// the area move to a cards page at the end of the form (flushCards), never off the page.
+function productBlock(doc, line, apps, area, options = {}) {
+  const notes = apps.some(cardNote), layout = apps.length ? cardLayout(apps.length, area, notes, { ...options, aspects: pictureAspects(doc, line) }) : null;
+  if (!layout) {
+    if (apps.length) (doc.deferredCards ||= []).push({ line, apps });
+    pictures(doc, line, area.x, area.y, options.imageOnlyW ?? area.w, area.h, options);
+    return null;
+  }
+  pictures(doc, line, area.x, area.y, layout.imageW, layout.imageH, options);
+  const { cw, ch, rightCols, rightW, right, gridCols } = layout, rightX = area.x + area.w - rightW;
+  // Without cards beside them the grid follows the drawn pictures, not the end of their box.
+  const aspects = pictureAspects(doc, line), labels = aspects.length === 2 ? (options.labelSize ?? 22) * 1.3 + 12 : 0;
+  const gridTop = area.y + (rightCols ? layout.imageH : Math.min(layout.imageH, pictureFit(aspects, layout.imageW, layout.imageH, options.labelSize ?? 22).height + labels)) + CARD_GAP;
+  apps.forEach((app, i) => {
+    const k = i - right;
+    const [x, y] = i < right
+      ? [rightX + (i % rightCols) * (cw + CARD_GAP), area.y + (options.top || 0) + Math.floor(i / rightCols) * (ch + CARD_GAP)]
+      : [area.x + (k % gridCols) * (cw + CARD_GAP), gridTop + Math.floor(k / gridCols) * (ch + CARD_GAP)];
+    applicationCard(doc, line, app, x, y, cw, notes);
+  });
+  return { ...layout, rightX };
+}
+function flushCards(doc, size = PORTRAIT) {
+  for (const { line, apps } of doc.deferredCards || []) {
+    const notes = apps.some(cardNote), cw = 220, ch = cardHeight(cw, notes), cols = Math.floor((size[0] - 80 + CARD_GAP) / (cw + CARD_GAP));
+    let y = size[1];
+    apps.forEach((app, i) => {
+      const col = i % cols;
+      if (col === 0 && y + ch > size[1] - 60) {
+        page(doc, size);
+        lineText(doc, `Uygulamalar · ${line.product} · ${line.color}`, 40, 30, size[0] - 80, 18, true);
+        y = 70;
+      }
+      applicationCard(doc, line, app, 40 + col * (cw + CARD_GAP), y, cw, notes);
+      if (col === cols - 1) y += ch + CARD_GAP;
+    });
+  }
+  doc.deferredCards = [];
+}
+const appsOfLine = (apps, line) => apps.filter(app => !app.lineIds || app.lineIds.includes(line.id));
 
 // Centered single-line label inside a table cell.
 function cellText(doc, value, x, y, w, h, size, bold, align = 'center') {
@@ -582,18 +621,19 @@ async function renderProductionForm(input, options = {}) {
       const note = appsList.some(app => app.scaleNote && !app.pending) ? 16 : 0;
       // The table and the size table are never split: the product image shrinks to what is left of the page.
       const sizeNeed = (sizeColumns([line]).length ? 34 + 3 * 37 : 0) + 60;
-      const room = top => Math.min(411, 1230 - top - 13 - tableHeight, 1330 - top - 13 - tableHeight - 31 - note - sizeNeed);
-      y = Math.max(y + 12, 497);
+      // Cards share the picture area, which may then grow past the old picture height.
+      const room = top => Math.min(appsList.length ? 640 : 411, 1230 - top - 13 - tableHeight, 1330 - top - 13 - tableHeight - 31 - note - sizeNeed);
+      // With cards under the pictures the template's spare space above them is used.
+      y = Math.max(y + 12, appsList.length ? 430 : 497);
       let imageHeight = room(y + 34);
       if (imageHeight < 130) { page(doc); y = 60; imageHeight = room(y + 34); }
       text(doc, 'Ürün Görseli:', 28, y, 700, 24, true);
-      const both = line.images.front != null && line.images.back != null;
-      if (both) productPair(doc, line, appsList, y + 34, { x: 82, width: 648, height: imageHeight - 30, labelSize: 14 });
-      else productImage(doc, line.images.front ?? line.images.back, appsList, 182, y + 34, 452, imageHeight);
+      productBlock(doc, line, appsList, { x: 40, y: y + 34, w: 730, h: imageHeight }, { labelSize: 14, minImageW: 300 });
       y = applicationTable(doc, appsList, y + 34 + imageHeight + 13);
       scaleFootnote(doc, appsList, 82, y - 24, 646);
       sizeTable(doc, [line], y, total(order.lines));
     }
+    flushCards(doc);
   });
 }
 
@@ -656,18 +696,22 @@ async function renderApprovalForm(input, options = {}) {
         band(doc, 'Tarih', order.date, 750, 126, 720, '#8f8f99', 941);
         wholeBand(doc, `Bedenler ve Adetler : ${sizeSummary(lines)}   Toplam:${isBlank(lines) ? '' : total(lines)}`, 171, '#454655');
         const apps = appsFor(order, batch);
+        let logoDrawn = false;
         batch.forEach((line, i) => {
           const y = 250 + i * 270;
           const labelHeight = batch.length > 1 ? fittedText(doc, line.product, 10, y, 760, 30, 16, true, { align: 'center' }) + 5 : 0;
-          const height = batch.length > 1 ? 190 : 340;
-          productPair(doc, line, apps, y + labelHeight + (batch.length > 1 ? 0 : 84), { x: 10, width: 760, height, labelSize: batch.length > 1 ? 18 : 28, bold: false });
+          const area = batch.length > 1 ? { x: 10, y: y + labelHeight, w: 1420, h: 260 - labelHeight } : { x: 10, y: 250, w: 1420, h: 495 };
+          // The first row keeps the logo above its cards.
+          const top = i === 0 ? 130 : 0;
+          const layout = productBlock(doc, line, appsOfLine(apps, line), area, { minImageW: 600, maxImageW: 780, maxRows: 0, top,
+            imageOnlyW: 760, minImageH: 150, labelSize: batch.length > 1 ? 18 : 28, bold: false });
+          if (i === 0 && layout) { logo(doc, brand, layout.rightX, area.y, layout.rightW, top - 10); logoDrawn = true; }
         });
-        logo(doc, brand, 940, 335, 320, 290);
-        paragraphs(doc, apps.map(app => `${TYPES[app.type]} · ${POSITION_LABELS[app.position]}: ${dimensions(app)}`), 650,
-          { size: LANDSCAPE, x: 900, width: 500, fontSize: 18, bottom: 750 });
+        if (!logoDrawn) logo(doc, brand, 940, 335, 320, 290);
         scaleFootnote(doc, apps, 40, 752, 1360);
       }
     }
+    flushCards(doc, LANDSCAPE);
     termsPage(doc, brand.termsText === undefined ? loadDefaultTerms() : requiredText(brand.termsText, 'brand.termsText'));
   });
 }
@@ -713,8 +757,8 @@ function renderWorkshop(input, options, type) {
         const y = visualY + r * rowHeight;
         const label = `${line.product} · ${line.color} · ${line.fabric}${order.omitQuantities ? ' · Adet:' : ` · Adet: ${total([line])}`}`;
         const labelHeight = fittedText(doc, label, 45, y, 720, 60, 18, true, { align: 'center' });
-        const imageHeight = Math.max(100, Math.min(350, rowHeight - labelHeight - 65));
-        productPair(doc, line, apps, y + labelHeight + 15, { height: imageHeight });
+        const areaHeight = Math.max(140, Math.min(count > 1 ? rowHeight - labelHeight - 25 : 640, rowHeight - labelHeight - 25));
+        productBlock(doc, line, appsOfLine(apps, line), { x: 45, y: y + labelHeight + 15, w: 720, h: areaHeight }, { minImageW: 300, below: count === 1 });
       }
       logo(doc, brand, 310, 1250, 190, 100);
       if (i < lines.length) { page(doc); visualY = 60; }
@@ -726,12 +770,15 @@ function renderWorkshop(input, options, type) {
       if (y + 395 > 1350) { page(doc); y = 60; }
       text(doc, POSITION_LABELS[app.position].toLocaleUpperCase('tr-TR'), 45, y, 720, 28, true, { align: 'center' });
       if (app.lineIds) text(doc, lines.filter(line => app.lineIds.includes(line.id)).map(line => `${line.product} / ${line.color}`).join(', '), 45, y + 42, 720, 16, false, { align: 'center' });
+      // Same fabric-coloured ground as the card, so white ink stays visible.
+      if (Buffer.isBuffer(app.preview)) doc.save().roundedRect(175, y + 85, 460, 230, 6).fill(cardColor(lines.find(line => app.lineIds?.includes(line.id)), app)).restore();
       image(doc, app.preview, 175, y + 85, 460, 230, 'Desen önizlemesi sağlanmadı');
       text(doc, dimensions(app), 45, y + 335, 720, 26, true, { align: 'center' });
       scaleFootnote(doc, [app], 45, y + 368, 720);
       if (app.previewCropped) text(doc, 'Ürün görselinden kırpıldı', 175, y + 318, 460, 11, false, { align: 'center', color: '#666666' });
       y += 420;
     }
+    flushCards(doc);
   });
 }
 

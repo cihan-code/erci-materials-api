@@ -29,7 +29,8 @@ test('geometrik ortalama notu ölçünün yanında ≈ ve dipnot olarak üç for
   order.applications[0].scaleNote=NOTE;
   for (const render of [renderProductionForm,renderApprovalForm,renderPrintForm]) {
     const {text}=await parsed(await render(order));
-    assert.match(text,/28 × 12 cm ≈/);assert.ok(text.replace(/\s+/g,' ').includes('≈ '+NOTE),render.name);
+    // G54: the approximate size is on the application card ("En … Boy … ≈").
+    assert.match(text,/En: 28 cm\s+Boy: 12 cm ≈/);assert.ok(text.replace(/\s+/g,' ').includes('≈ '+NOTE),render.name);
   }
   // Without a note nothing changes.
   delete order.applications[0].scaleNote;

@@ -109,12 +109,13 @@ test('müşteri ve atölye ölçüleri tek kaynaktan gelir; en/boy yer değişti
   order.applications[0].height_mm = 123;
   for (const render of [renderProductionForm, renderApprovalForm, renderPrintForm]) {
     const result = await extract(await render(order));
-    assert.match(result.text, /28,1 × 12,3 cm/);
-    assert.doesNotMatch(result.text, /12\.3 × 28\.1/);
+    // G54: every form prints the size under its application card.
+    assert.match(result.text, /En: 28,1 cm\s+Boy: 12,3 cm/);
+    assert.doesNotMatch(result.text, /12\.3 × 28\.1|En: 12,3/);
   }
   for (const render of [renderProductionForm, renderApprovalForm, renderEmbroideryForm]) {
     const result = await extract(await render(order));
-    assert.match(result.text, /7,5 × 4 cm/);
+    assert.match(result.text, /En: 7,5 cm\s+Boy: 4 cm/);
   }
 });
 
@@ -122,7 +123,7 @@ test('kabul ölçüsü 28 × 12 cm üretim/onay/baskıda aynıdır; toplamlar be
   const order = makeExampleOrder();
   for (const render of [renderProductionForm, renderApprovalForm, renderPrintForm]) {
     const { text } = await extract(await render(order));
-    assert.match(text, /28 × 12 cm/);
+    assert.match(text, /En: 28 cm\s+Boy: 12 cm/);
   }
   const production = await extract(await renderProductionForm(order));
   assert.match(production.pages[0], /Toplam adet: 10 · Sipariş toplamı: 16/);
@@ -146,8 +147,8 @@ test('satıra özel uygulama yalnız ilgili renk ve atölye satırında görün�
   const order = makeExampleOrder();
   order.applications[0].lineIds = ['ornek-kirmizi'];
   const approval = await extract(await renderApprovalForm(order));
-  assert.doesNotMatch(approval.pages[0], /28 × 12 cm/);
-  assert.match(approval.pages[1], /28 × 12 cm/);
+  assert.doesNotMatch(approval.pages[0], /En: 28 cm/);
+  assert.match(approval.pages[1], /En: 28 cm\s+Boy: 12 cm/);
   const workshop = await extract(await renderPrintForm(order));
   assert.doesNotMatch(workshop.pages[0], /Gece Mavisi/);
   assert.match(workshop.pages[0], /Kiremit/);
@@ -222,7 +223,8 @@ test('G14-8 all forms show totals without sizes and include other size quantitie
   }
 });
 
-test('adetsiz model üç formda dağılımı gizler ve kesin PDF sayfasına iki cm etiketi yerleştirir', async () => {
+// G54: sizes moved from the product picture to the application cards; the picture stays clean.
+test('adetsiz model üç formda dağılımı gizler; ölçü kartta, ürün görselinde cm etiketi yok', async () => {
   const order = makeExampleOrder({ twoColors: false });
   const line = order.lines[0];
   const input = await PDFDocument.create();
@@ -238,13 +240,13 @@ test('adetsiz model üç formda dağılımı gizler ve kesin PDF sayfasına iki 
     // Tables are drawn, every quantity field stays empty.
     assert.doesNotMatch(result.text, /\b\d+[ \t]*adet|[Tt]oplam adet:[ \t]*\d|Toplam:[ \t]*\d/);
     if (render !== renderPrintForm) assert.match(result.text, /Bedenler/);
-    assert.deepEqual(result.pages[0].split('\n').filter(text => /^(28|12) cm$/.test(text)), ['28 cm', '12 cm']);
-    assert.match(result.text, /28 × 12 cm/);
+    assert.deepEqual(result.pages[0].split('\n').filter(text => /^(28|12) cm$/.test(text)), []);
+    assert.match(result.text, /En: 28 cm\s+Boy: 12 cm/);
   }
   const conflictingApp = { ...app, placement: { ...app.placement, page: 1 } };
   const { pages } = await extract(await renderApprovalForm({ ...order, applications: [app, conflictingApp] }));
   assert.doesNotMatch(pages[0], /^(28|12) cm$/m);
-  assert.match(pages[0], /28 × 12 cm/);
+  assert.match(pages[0], /En: 28 cm\s+Boy: 12 cm/);
   assert.match(pages[0], /Toplam:10/);
 });
 
