@@ -10,11 +10,13 @@ const { approveVersion } = require('./approval');
 const stock = require('./stock');
 const { kartelaView, fabricTypeList } = require('./kartela');
 const outbox = require('./outbox');
-module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, recipes } = {}) {
+module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, recipes, customerLimits } = {}) {
   const db = suppliedDb || openDb(path.join(dataDir, 'siparis.sqlite'));
   const router = express.Router();
   const requireUser = authFor(db);
   const wrap = fn => (req,res,next) => Promise.resolve().then(() => fn(req,res)).catch(next);
+  // G64: customer link (own body limit, no login); the staff link-minting route inside needs requireUser.
+  require('./routes-musteri')(router, { db, dataDir, requireUser, recipes, ...(customerLimits ? { limits: customerLimits } : {}) });
   router.use(express.json({limit:'2mb'}));
   router.post('/giris', wrap(async (req,res) => res.json(await login(db, { name:req.body.name ?? req.body.ad, password:req.body.password ?? req.body.sifre }))));
   require('./routes-fatura')(router, { db, requireUser }); // before the user gate: intake also takes the service key
