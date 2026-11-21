@@ -1,0 +1,17 @@
+{
+  "aciklama": "G61 başlangıç değerleri (Patron düzeltecek). Ürün türü × konum → olağan en aralığı ve varsayılan en, mm. urunler altında bir ürün türü yalnız değişen konumları yazar.",
+  "konumlar": {
+    "sol_gogus": { "min": 70, "max": 120, "varsayilan": 100 },
+    "sag_gogus": { "min": 70, "max": 120, "varsayilan": 100 },
+    "gogus": { "min": 200, "max": 320, "varsayilan": 280 },
+    "sirt": { "min": 250, "max": 360, "varsayilan": 300, "kasaMax": 400 },
+    "ense": { "min": 30, "max": 100, "varsayilan": 80 },
+    "kol": { "min": 30, "max": 110, "varsayilan": 90, "dikey": { "min": 120, "max": 200, "varsayilan": 150 } },
+    "sol_kol": { "min": 30, "max": 110, "varsayilan": 90, "dikey": { "min": 120, "max": 200, "varsayilan": 150 } },
+    "sag_kol": { "min": 30, "max": 110, "varsayilan": 90, "dikey": { "min": 120, "max": 200, "varsayilan": 150 } },
+    "bacak": { "min": 60, "max": 150, "varsayilan": 100 },
+    "sol_bacak": { "min": 60, "max": 150, "varsayilan": 100 },
+    "sag_bacak": { "min": 60, "max": 150, "varsayilan": 100 }
+  },
+  "urunler": {}
+}
