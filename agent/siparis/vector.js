@@ -341,14 +341,14 @@ function skeletonWidth(mask, width, height, sx, sy) {
       for (let y = 1; y < height-1; y++) for (let x = 1; x < width-1; x++) {
         const i = y*width+x;
         if (!skeleton[i]) continue;
-        const p = [skeleton[i-width],skeleton[i-width+1],skeleton[i+1],skeleton[i+width+1],
-          skeleton[i+width],skeleton[i+width-1],skeleton[i-1],skeleton[i-width-1]];
-        const count = p.reduce((a,b) => a+b, 0);
+        // Same Zhang-Suen test as before, without a per-pixel array (large solid areas run many passes).
+        const p0 = skeleton[i-width], p1 = skeleton[i-width+1], p2 = skeleton[i+1], p3 = skeleton[i+width+1],
+          p4 = skeleton[i+width], p5 = skeleton[i+width-1], p6 = skeleton[i-1], p7 = skeleton[i-width-1];
+        const count = p0+p1+p2+p3+p4+p5+p6+p7;
         if (count < 2 || count > 6) continue;
-        let transitions = 0;
-        for (let j = 0; j < 8; j++) if (!p[j] && p[(j+1)%8]) transitions++;
+        const transitions = (!p0&&p1?1:0)+(!p1&&p2?1:0)+(!p2&&p3?1:0)+(!p3&&p4?1:0)+(!p4&&p5?1:0)+(!p5&&p6?1:0)+(!p6&&p7?1:0)+(!p7&&p0?1:0);
         if (transitions !== 1) continue;
-        if (pass ? p[0]*p[2]*p[6] || p[0]*p[4]*p[6] : p[0]*p[2]*p[4] || p[2]*p[4]*p[6]) continue;
+        if (pass ? p0*p2*p6 || p0*p4*p6 : p0*p2*p4 || p2*p4*p6) continue;
         remove.push(i);
       }
       for (const i of remove) skeleton[i] = 0;
@@ -509,7 +509,10 @@ async function renderPixels(pdf, width, height, transparent) {
   } finally {await doc.destroy();canvas.width=canvas.height=0;}
 }
 
-async function rasterQuality(image, pdf, svg, dimensions, applicationType, target, priorMetrics, tracing) {
+// options.ground: pixels in a removed proof ground's colour are the garment, not ink (both renders).
+// options.vectorSource: no trace to compare (IoU, edge deviation, notches) and the path/node
+// limits are tracer limits; a drawn vector has its own (cok_yol).
+async function rasterQuality(image, pdf, svg, dimensions, applicationType, target, priorMetrics, tracing, options = {}) {
   const limits = qualityLimits(applicationType), originalWidth = image.width, originalHeight = image.height;
   // Same pixel budget as the 800 px bound, so a larger flat raster costs no more skeleton work.
   const scale = Math.min(1, Math.sqrt(RASTER_EDGE*RASTER_EDGE/(originalWidth*originalHeight)),
@@ -578,7 +581,7 @@ async function rasterQuality(image, pdf, svg, dimensions, applicationType, targe
     await page.render({canvasContext:outputCtx,viewport,background:transparent ? 'rgba(0,0,0,0)' : 'white',
       transform:[width/viewport.width,0,0,height/viewport.height,0,0]}).promise;
   } finally {await doc.destroy();}
-  const rendered = outputCtx.getImageData(0,0,width,height).data;
+  const rendered = clearGround(outputCtx.getImageData(0,0,width,height).data, options.ground);
   const outputMask=new Uint8Array(mask.length);
   for(let i=0;i<width*height;i++) {
     const p=i*4;
@@ -610,14 +613,14 @@ async function rasterQuality(image, pdf, svg, dimensions, applicationType, targe
   const measured = flatMeasureImage(image);
   const flatSource = flatPalette(measured, perceptualPalette(measured.pixels,measured.width,measured.height,transparent,limits),
     {maxInks:limits.flatMaxColors,deltaE:limits.colorDeltaE});
-  const flat = flatSource.flat ? await flatQuality(flatSource.flat,(w,h)=>renderPixels(pdf,w,h,transparent)) : null;
+  const flat = flatSource.flat && !options.vectorSource ? await flatQuality(flatSource.flat,async(w,h)=>clearGround(await renderPixels(pdf,w,h,transparent),options.ground)) : null;
   global.gc?.();
   const metrics = { vectorizer:priorMetrics?.vectorizer ?? tracing?.vectorizer ?? null,
     ...(FLAT_VECTORIZERS.has(tracing?.vectorizer) ? {flatTrace:{upscale:tracing.upscale,thresholds:tracing.thresholds,layers:tracing.layers}} : {}),
     ...(tracing?.fallback ? {vectorizerFallback:tracing.fallback} : {}),
     flatQuality:flat, flatClass:flatSource.flat ? 'duz' : flatSource.reason, flatStats:flatSource.stats ?? null,
     gurultuSayisi, colorCount:palette.colorCount, minLineMm, minGapMm, minShapeMm2, pathCount, nodeCount:priorMetrics?.nodeCount ?? nodeCount,
-    iou:union ? 1-mismatch/union : 0, pixelDifference:difference/(width*height*3),
+    iou:options.vectorSource ? null : union ? 1-mismatch/union : 0, pixelDifference:options.vectorSource ? null : difference/(width*height*3),
     semiTransparentRatio:alphaEdgePixels ? semi/alphaEdgePixels : 0, alphaEdgePixels, semiTransparentPixels:semi, measurementSize:target ? 'target' : 'pending', analysisDpi:target ? Math.min(25.4/sx,25.4/sy) : null, noiseFilter:'one-pixel-opening', colorDeltaE:limits.colorDeltaE, minColorAreaRatio:limits.minColorAreaRatio, iouTolerancePx:1,
     widthMm:target ? dimensions.width/PT_PER_MM : null,heightMm:target ? dimensions.height/PT_PER_MM : null,
     applicationType, analysisWidth:width, analysisHeight:height, limits };
@@ -629,15 +632,34 @@ async function rasterQuality(image, pdf, svg, dimensions, applicationType, targe
   else if (minLineMm !== null && minLineMm < limits.minLineMm) reasons.push(`En ince çizgi ${minLineMm.toFixed(3)} mm; ${applicationType==='nakis' ? 'nakış' : 'baskı'} sınırı ${limits.minLineMm} mm.`);
   if (minGapMm !== null && minGapMm < limits.minGapMm) reasons.push(`En küçük boşluk ${minGapMm.toFixed(3)} mm; sınır ${limits.minGapMm} mm.`);
   if (minShapeMm2 !== null && minShapeMm2 < limits.minShapeMm2) reasons.push(`En küçük kapalı şekil ${minShapeMm2.toFixed(3)} mm²; sınır ${limits.minShapeMm2} mm².`);
-  if (metrics.iou < limits.minIou) reasons.push(`Vektör benzerliği ${metrics.iou.toFixed(4)}; gerekli IoU ${limits.minIou}.`);
-  if (metrics.pixelDifference > limits.maxPixelDifference) reasons.push(`Piksel farkı ${metrics.pixelDifference.toFixed(4)}; sınır ${limits.maxPixelDifference}.`);
+  if (metrics.iou !== null && metrics.iou < limits.minIou) reasons.push(`Vektör benzerliği ${metrics.iou.toFixed(4)}; gerekli IoU ${limits.minIou}.`);
+  if (metrics.pixelDifference !== null && metrics.pixelDifference > limits.maxPixelDifference) reasons.push(`Piksel farkı ${metrics.pixelDifference.toFixed(4)}; sınır ${limits.maxPixelDifference}.`);
   if (metrics.semiTransparentRatio > limits.maxSemiTransparentRatio) reasons.push(`Alfa kenarında yarı saydam piksel oranı ${metrics.semiTransparentRatio.toFixed(4)}; sınır ${limits.maxSemiTransparentRatio}.`);
-  if (pathCount > limits.maxPaths) reasons.push(`Yol sayısı ${pathCount}; sınır ${limits.maxPaths}.`);
-  if (metrics.nodeCount > limits.maxNodes) reasons.push(`Düğüm sayısı ${metrics.nodeCount}; sınır ${limits.maxNodes}.`);
+  if (!options.vectorSource && pathCount > limits.maxPaths) reasons.push(`Yol sayısı ${pathCount}; sınır ${limits.maxPaths}.`);
+  if (!options.vectorSource && metrics.nodeCount > limits.maxNodes) reasons.push(`Düğüm sayısı ${metrics.nodeCount}; sınır ${limits.maxNodes}.`);
   if (flat && flat.iou < limits.minFlatIou) reasons.push(`Düz renk vektör benzerliği ${flat.iou.toFixed(4)}; gerekli IoU ${limits.minFlatIou}.`);
   if (flat && flat.edgeDeviationPx > limits.maxEdgeDeviationPx) reasons.push(`Kenar sapması ${flat.edgeDeviationPx.toFixed(2)} kaynak pikseli; sınır ${limits.maxEdgeDeviationPx}.`);
   if (flat && flat.notchCount) reasons.push(`Kesişim veya köşelerde ${flat.notchCount} çentik var.`);
   return {metrics,reasons};
+}
+
+// On the garment the ground colour is no ink: the same 20-level step as the content box.
+function clearGround(data, ground) {
+  if (!ground) return data;
+  for (let i=0;i<data.length;i+=4) if (data[i+3] && Math.max(Math.abs(data[i]-ground[0]),Math.abs(data[i+1]-ground[1]),Math.abs(data[i+2]-ground[2]))<=20) data[i+3]=0;
+  return data;
+}
+// G53: a drawn vector PDF is judged at the target size by the G49 print checks of a
+// traced raster (colours, line, gap, closed shape, alpha edge), on its own rendering
+// within the same pixel budget, whichever upload kind brought it. IoU, edge deviation
+// and notches compare a trace with its source; a drawn vector has no trace (its paths
+// are the source's), so those are not computed for it.
+async function vectorQuality(pdf, page, applicationType, target, ground, pathCount) {
+  const scale=Math.min(300/72,Math.sqrt(RASTER_EDGE*RASTER_EDGE/(page.width*page.height)));
+  const width=Math.max(1,Math.round(page.width*scale)), height=Math.max(1,Math.round(page.height*scale));
+  const pixels=clearGround(await renderPixels(pdf,width,height,true),ground);
+  return rasterQuality({width,height,pixels,transparent:true,groundUnclear:false},pdf,'',{width:page.width,height:page.height},
+    applicationType,target,{pathCount,nodeCount:null,vectorizer:null},null,{ground,vectorSource:true});
 }
 
 // One-pixel foreground runs estimate fine raster details; not a production measurement.
@@ -674,6 +696,7 @@ function rasterMinDetail(image, widthMm) {
 // (touches all four edges). Anything else is left exactly as drawn.
 const GROUND_OPS=new Set(['q','Q','cm','w','J','j','M','d','ri','i','gs','g','G','rg','RG','k','K','cs','CS','sc','scn','SC','SCN',
   'm','l','c','v','y','h','re','BMC','BDC','EMC','MP','DP']);
+const PAINT_OPS=new Set(['f','F','f*','S','s','B','B*','b','b*','sh','Do','BI','Tj','TJ',"'",'"']);
 function contentTokens(text) {
   const tokens=[], delimiter=c=>'()<>[]{}/%'.includes(c), space=c=>' \t\r\n\f\0'.includes(c);
   let i=0;
@@ -725,7 +748,8 @@ function findGround(doc, page) {
   if (text==null) return null;
   const box=page.getCropBox(), stack=[];
   let ctm=[1,0,0,1,0,0], fill=[0,0,0], operands=[], path=[];
-  for (const token of contentTokens(text)) {
+  const tokens=contentTokens(text);
+  for (const [index,token] of tokens.entries()) {
     if (token.operand) { operands.push(token.value); continue; }
     const op=token.value, args=operands; operands=[];
     if (['f','F','f*'].includes(op)) {
@@ -736,6 +760,8 @@ function findGround(doc, page) {
       const axisAligned=(Math.abs(ctm[1])<1e-9 && Math.abs(ctm[2])<1e-9) || (Math.abs(ctm[0])<1e-9 && Math.abs(ctm[3])<1e-9);
       if (!axisAligned || Math.min(...xs)>box.x+tol || Math.max(...xs)<box.x+box.width-tol
         || Math.min(...ys)>box.y+tol || Math.max(...ys)<box.y+box.height-tol) return null;
+      // A page that is only this rectangle (a solid patch) has no other artwork: then it is the design.
+      if (!tokens.slice(index+1).some(t=>!t.operand && PAINT_OPS.has(t.value))) return null;
       return {text,start:token.start,end:token.end,color:fill.map(v=>Math.round(Math.max(0,Math.min(1,v))*255))};
     }
     if (!GROUND_OPS.has(op)) return null;
@@ -946,23 +972,32 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
     .concat(rasterDetails.filter(x => x !== null));
   const minLineWidth = minValues.length ? Math.min(...minValues) : null;
   const pathCount = pages.reduce((sum, x) => sum + x.pathCount, 0);
+  let vectorQualityReport;
+  if (kind === 'vector' && target && !qualitySource && pages.length === 1 && !pages[0].imageCount) {
+    vectorQualityReport = await vectorQuality(pdf, pages[0], applicationType, target, grounds[0]?.color, pathCount);
+    reasons.push(...vectorQualityReport.reasons);
+  }
+  // Fill widths have no print size before the application is measured: they wait for the
+  // target (as a raster does) instead of being reported as unmeasurable.
+  const pendingFill = kind === 'vector' && !target && !qualitySource && pathCount > 0 && minLineWidth === null;
   // Both stored dimensions are authoritative; report any aspect change for visual review.
   if (!rasterQualityReport && pathCount > 2000) reasons.push('cok_yol');
   if (!rasterQualityReport && minLineWidth !== null && minLineWidth < 0.2) reasons.push('ince_cizgi');
   if (pages.some(x => x.textCount)) reasons.push('metin');
-  if (!rasterQualityReport && pathCount && minLineWidth === null) reasons.push('dolgu_detay_kalinligi_olculemedi');
+  if (!rasterQualityReport && !vectorQualityReport && !pendingFill && pathCount && minLineWidth === null) reasons.push('dolgu_detay_kalinligi_olculemedi');
   if (inputPages.some(x => !Number.isFinite(x.width / x.height) || x.width / x.height > 20 || x.width / x.height < 0.05)) reasons.push(rasterQualityReport ? 'Desenin en boy oranı olağan sınırların dışında.' : 'supheli_oran');
   if (aspectRatioError > 0.01) reasons.push(rasterQualityReport ? 'Hedef ölçü desenin en boy oranını değiştiriyor.' : 'oran_bozuldu');
   return { pdf, kind, report: { pathCount, colorCount: rasterQualityReport?.metrics.colorCount ?? colors.size, minLineWidth,
     minLineWidthUnit: 'mm', minLineWidthEstimated: true, aspectRatioPreserved: aspectRatioError <= 0.01,
     aspectRatioError, aspectRatioMethod: 'content-boundary-transform',
     rasterQuality: rasterQualityReport?.metrics,
+    ...(vectorQualityReport ? {vectorQuality: vectorQualityReport.metrics} : {}),
     ...(vectorizers.size ? {vectorizer:[...vectorizers].join('+')} : {}),
     ...(designBox?{designBox}:{}),
     ...(grounds.some(Boolean) ? {ground:{removed:true,pages:grounds.flatMap((g,i)=>g?[{page:i+1,color:hexColor(g.color)}]:[]),
       garmentColor:parseHex(garmentColor) ? hexColor(parseHex(garmentColor)) : null}} : {}),
-    quality: manualVector && !qualitySource ? 'iyi' : rasterQualityReport && !target ? 'beklemede' : reasons.length ? 'teyit' : 'iyi',
-    qualityLabel: rasterQualityReport && !target ? 'Kalite ölçüden sonra değerlendirilecek' : undefined,
+    quality: rasterQualityReport && !target ? 'beklemede' : reasons.length ? 'teyit' : pendingFill ? 'beklemede' : 'iyi',
+    qualityLabel: (rasterQualityReport && !target) || (pendingFill && !reasons.length) ? 'Kalite ölçüden sonra değerlendirilecek' : undefined,
     reasons: rasterQualityReport && !target ? [] : [...new Set(reasons)],
     pageCount: pages.length, pages: pages.map(x => ({ pathCount: x.pathCount,
       imageCount: x.imageCount, textCount: x.textCount, widthMm: x.width / PT_PER_MM,

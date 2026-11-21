@@ -336,11 +336,12 @@ test('G14-4 pending preview is reassessed from source at target size and blocks 
   assert.equal((await f.post(`/surumler/${id}/gonder`)).status,409);
   assert.equal((await f.post(`/surumler/${id}/onay`,{fileId:files.find(x=>x.kind==='onay_formu').id},f.managerToken)).status,409);
 });
+// G53: a manual vector is judged like any drawn vector; this one fits the 280 x 120 mm target, so nothing opens.
 test('G14-4 manual vector source replaces traced artwork without an automatic quality confirmation',async t=> {
   const f=await fixture(t), a=await prepared(f,{both:false});
   const oldVector=a.files.find(x=>x.kind==='desen_vektor');
   const oldConfirmation=f.db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('vektor_kalite','files',?,'old source review')").run(oldVector.id).lastInsertRowid;
-  const pdf=await PDFDocument.create();pdf.addPage([300,200]).drawRectangle({x:100,y:75,width:100,height:50});
+  const pdf=await PDFDocument.create();pdf.addPage([300,200]).drawRectangle({x:80,y:70,width:140,height:60});
   const source=ok(await f.upload(a.id,{kind:'desen_kaynak_vektor',name:'vectorizer.pdf',mime:'application/pdf',buffer:Buffer.from(await pdf.save())}),201);
   const app=f.db.prepare('SELECT id FROM applications WHERE line_id=?').get(a.lineId);
   ok(await f.request(`/uygulamalar/${app.id}`,{method:'PATCH',token:f.token,body:{desenDosyaId:source.id}}));

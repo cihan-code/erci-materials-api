@@ -895,14 +895,17 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
           if(file)prev={buffer:readFile(dataDir,file),report};
         }
         const raster=['image/png','image/jpeg','image/jpg'].includes(original.mime);
-        const cached=prev && (!raster || (Number.isFinite(prev.report.rasterQuality?.pathCount) && Number.isFinite(prev.report.rasterQuality?.nodeCount)));
+        // A drawn vector (PDF/SVG) is cheap to read again and is always judged from its own
+        // source, whichever kind uploaded it; only traced previews are reused.
+        const drawn=!raster && input.source && prev?.report?.sourceKind!=='raster';
+        const cached=prev && !drawn && (!raster || (Number.isFinite(prev.report.rasterQuality?.pathCount) && Number.isFinite(prev.report.rasterQuality?.nodeCount)));
         // Legacy previews without complexity metrics are retraced from the original raster.
         // Keep cached vector paths; final raster quality is measured against the original artwork.
         const result=await generateInChild({type:'vector',input:{...(cached
           ? {manualVector:true,buffer:prev.buffer,mime:'application/pdf',targetMm,applicationType:a.kind,
             ...(raster ? {qualitySource:{...original,metrics:prev.report.rasterQuality}} : {})}
           : {...original,targetMm,applicationType:a.kind}),garmentColor:garmentColor(db,line.id)}},signal);
-        const report=prev && !raster && !original.manualVector ? {...result.report,quality:prev.report.quality==='teyit' || result.report.aspectRatioError>0.01 ? 'teyit' : 'iyi',
+        const report=cached && !raster ? {...result.report,quality:prev.report.quality==='teyit' || result.report.aspectRatioError>0.01 ? 'teyit' : 'iyi',
           reasons:[...new Set([...(prev.report.reasons||[]),...(result.report.aspectRatioError>0.01 ? ['oran_bozuldu'] : [])])]} : result.report;
         generated.push({kind:'desen_vektor',buffer:result.pdf,meta:{applicationId:a.id,...(!input.source?{lineId:line.id}:{})},report});
         if (input.source) vectorByApp.set(a.id,{buffer:result.pdf,background:groundOf(report)});
@@ -1057,7 +1060,10 @@ function requalifyVersion(db,dataDir,versionId,user) {
           const prev=source && readyPreview(db,dataDir,v,source);
           if (!prev || prev.report.quality!=='beklemede') return null;
           const original=await vectorInput(dataDir,source);
-          if (!['image/png','image/jpeg','image/jpg'].includes(original.mime)) return null;
+          const garment=garmentColor(db,db.prepare('SELECT line_id FROM document_file_meta WHERE file_id=?').get(source.id)?.line_id);
+          // A drawn vector is judged from its source at the target size, as in prepare.
+          if (!['image/png','image/jpeg','image/jpg'].includes(original.mime))
+            return prev.report.sourceKind==='raster' ? null : generateInChild({type:'vector',input:{...original,targetMm,applicationType:a.kind,garmentColor:garment}},signal);
           return generateInChild({type:'vector',input:{manualVector:true,buffer:prev.buffer,mime:'application/pdf',targetMm,applicationType:a.kind,
             qualitySource:{...original,metrics:prev.report.rasterQuality}}},signal);
         });
@@ -1068,7 +1074,9 @@ function requalifyVersion(db,dataDir,versionId,user) {
           // Skip if the preview, the source link or the size changed while rendering.
           if (!cur || cur.preview_file_id!==row.preview_file_id || qualityOf(cur)!=='beklemede' || !app || app.width_mm!==a.width_mm || app.height_mm!==a.height_mm) return;
           if (db.prepare('SELECT file_id FROM document_application_sources WHERE application_id=?').get(a.id)?.file_id!==a.file_id) return;
-          const report={...result.report,targetMm};
+          // The upload's source kind and content box stay with the preview.
+          const {sourceKind,designBox}=JSON.parse(cur.report_json||'{}');
+          const report={...result.report,targetMm,...(sourceKind?{sourceKind}:{}),...(designBox?{designBox}:{})};
           const open=db.prepare("SELECT id FROM confirmations WHERE kind='vektor_kalite' AND ref_table='files' AND ref_id=? AND status='acik'").get(cur.preview_file_id);
           if (report.quality==='teyit' && !open) db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('vektor_kalite','files',?,?)")
             .run(cur.preview_file_id,`Vektör kalitesi görsel teyit gerektiriyor: ${JSON.stringify(report)}`);

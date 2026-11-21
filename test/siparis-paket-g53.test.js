@@ -117,3 +117,40 @@ test('G53-2 a vector PDF design gets a preview on the print form from its vector
   const draft = (await pdfText(Buffer.from(preview.formlar.find(x => x.kind === 'baski_formu').pdf, 'base64'))).join('\n');
   assert.doesNotMatch(draft, /Desen önizlemesi sağlanmadı/);
 });
+
+test('G53-3 the same PDF behaves the same as desen_kaynak and as desen_kaynak_vektor: judged at the target size, one rule', async t => {
+  const f = await fixture(t), o = await f.order(), id = o.version.id, lineId = o.version.lines[0].id;
+  const { PDFDocument: Doc } = require('pdf-lib');
+  // Invented artwork: a block and a 0.6 pt bar, measured as 280 x 120 mm: the ratio changes and the bar prints ~0.7 mm.
+  const doc = await Doc.create(), page = doc.addPage([300, 200]);
+  page.drawRectangle({ x: 50, y: 50, width: 150, height: 100, color: rgb(0.1, 0.2, 0.6) });
+  page.drawRectangle({ x: 240, y: 50, width: 0.6, height: 100, color: rgb(0.1, 0.2, 0.6) });
+  const buffer = Buffer.from(await doc.save()), apps = {}, sources = {};
+  for (const kind of ['desen_kaynak', 'desen_kaynak_vektor'])
+    sources[kind] = ok(await f.upload(id, { kind, name: `${kind}.pdf`, mime: 'application/pdf', buffer }), 201);
+  await documents.settled();
+  // Before a size is known neither kind opens a confirmation for unmeasurable fill widths.
+  const previews = f.db.prepare("SELECT report_json FROM document_vector_previews").all().map(r => JSON.parse(r.report_json));
+  assert.deepEqual(previews.map(r => r.quality), ['beklemede', 'beklemede']);
+  assert.equal(f.db.prepare("SELECT count(*) n FROM confirmations WHERE kind='vektor_kalite' AND status='acik'").get().n, 0);
+  for (const kind of Object.keys(sources)) {
+    const measured = ok(await f.measure(lineId, { desenDosyaId: sources[kind].id }), 201);
+    apps[kind] = (measured.application || measured).id;
+  }
+  await documents.settled();
+  // Once measured, both previews are judged at the target size the same way.
+  const judged = f.db.prepare("SELECT report_json FROM document_vector_previews").all().map(r => JSON.parse(r.report_json));
+  assert.deepEqual(judged.map(r => r.quality), ['teyit', 'teyit']);
+  ok(await f.post(`/surumler/${id}/hazirla`));
+  const open = f.db.prepare("SELECT c.message,m.application_id FROM confirmations c JOIN document_file_meta m ON m.file_id=c.ref_id WHERE c.kind='vektor_kalite' AND c.status='acik'").all();
+  const byApp = Object.fromEntries(open.map(c => [c.application_id, JSON.parse(c.message.slice(c.message.indexOf('{')))]));
+  for (const kind of Object.keys(apps)) {
+    const report = byApp[apps[kind]];
+    assert.ok(report, `${kind}: vektör kalite teyidi açılmalı`);
+    assert.ok(report.reasons.includes('oran_bozuldu'));
+    assert.ok(report.reasons.some(r => /En ince çizgi 0\.[0-7]\d* mm/.test(r)), JSON.stringify(report.reasons));
+    assert.equal(report.vectorQuality.measurementSize, 'target');
+    assert.equal(report.vectorQuality.iou, null);
+  }
+  assert.deepEqual(byApp[apps.desen_kaynak].reasons, byApp[apps.desen_kaynak_vektor].reasons);
+});
