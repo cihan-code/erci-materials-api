@@ -449,6 +449,8 @@ async function extractPreview(db,dataDir,v,line,app,input,user,signal,retryError
       result=await generateInChild({type:'vector',designBox:true,input:{buffer:artwork.buffer,mime:'image/png'}},signal);
       // A separation warning (small print) needs the same visual check as a vector warning.
       if(artwork.warnings?.length)result.report={...result.report,quality:'teyit',reasons:[...(result.report.reasons||[]),...artwork.warnings]};
+      // Information only (line colour not seen on the garment): no confirmation.
+      if(artwork.notes?.length)result.report={...result.report,notes:artwork.notes};
       status=result.report.quality==='teyit'?'teyit':'hazir';
     }
   } catch(e) {
@@ -629,9 +631,10 @@ function autoInputs(db,v,line,app) {
   const meta=design && db.prepare('SELECT line_id FROM document_file_meta WHERE file_id=?').get(design.id);
   if(meta?.line_id && meta.line_id!==line.id)return {gap:'Desen dosyası başka bir ürün satırına ait; bu satırın desenini bağlayın.'};
   if(gap)return {gap};
-  const {candidates,flat}=flats.selection(db,line,view==='teyit'?image.gorunum:view,flats.list(db));
-  const flatNote=!flat && candidates.length>1 ? 'Bu ürün için birden çok kalıp var; kalıbı seçin' : null;
-  return {image,design,flat,product:line.product_key,position:app.position,...(flatNote?{flatNote}:{}),...(design && linked==null?{linkDesign:true}:{})};
+  const library=flats.list(db),{candidates,flat}=flats.selection(db,line,view==='teyit'?image.gorunum:view,library);
+  const flatNote=!flat && candidates.length>1 ? 'Bu ürün için birden çok kalıp var; kalıbı seçin' : !candidates.length || flat ? flats.missingLNote(db,line,flat,library) : null;
+  // The line colour only adds an information note to the measurement.
+  return {image,design,flat,product:line.product_key,position:app.position,...(line.color_name?{color:line.color_name}:{}),...(flatNote?{flatNote}:{}),...(design && linked==null?{linkDesign:true}:{})};
 }
 function autoFingerprint({desenDosyaId,...app},input) {return JSON.stringify({app,input});}
 // autoMeasure states these two when no single L pattern was passed; a known ambiguity replaces them.

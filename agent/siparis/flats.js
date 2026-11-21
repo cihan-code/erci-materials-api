@@ -46,6 +46,55 @@ function selection(db, line, view, library) {
     : candidates.length===1 ? candidates[0] : defaults.length===1 ? defaults[0] : null;
   return {candidates,flat};
 }
+// Actionable reason when the product has no usable L pattern: the library
+// rows exist but their refBeden/olculerL fields are empty (G47).
+const positive = n => Number.isFinite(n) && n > 0;
+const hasL = f => f.refBeden?.trim().toUpperCase()==='L' && f.olculerL && typeof f.olculerL==='object' && ['omuzdan_boy','etek','gogus','yan_boy','basen'].some(k=>positive(f.olculerL[k]));
+function missingLNote(db, line, flat, library) {
+  if (flat && hasL(flat)) return null;
+  const available = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_flats'").get();
+  const rows = available ? (library ?? list(db)) : [];
+  const own = rows.filter(f=>f.urun===line.product_key);
+  const named = flat ? [flat] : own.length || !Object.hasOwn(FLAT_ALIASES, line.product_key) ? own : rows.filter(f=>f.urun===FLAT_ALIASES[line.product_key]);
+  if (!named.length) return 'Bu ürün için kalıp kütüphanesinde kalıp yok; L ölçüleriyle kalıp ekleyin';
+  const names = [...new Set(named.map(f=>f.ad))];
+  return `${names.join(', ')} ${names.length>1?'kalıplarında':'kalıbında'} L ölçüleri yok; kalıp kütüphanesini güncelleyin`;
+}
+// kalip-l-tamamla: fill only empty refBeden/olculerL fields from an L list
+// kept outside the repository (same shape as duz-cizimler.json). A filled
+// field is never overwritten. refBeden becomes "L" only when the stored
+// reference cm is empty or equal to the list's L value: a different value is
+// probably the old M reference and needs duz-cizim-yukle --guncelle instead.
+const validL = o => o && typeof o==='object' && !Array.isArray(o) && Object.keys(o).length>0 && Object.entries(o).every(([k,v])=>/^[a-z][a-z0-9_]*$/.test(k) && positive(v));
+function fillMissingL(db, records, { dry=false } = {}) {
+  if (!Array.isArray(records)) fail('L listesi bir dizi olmalı');
+  const byName = new Map();
+  for (const r of records) {
+    if (!r || typeof r.ad!=='string' || !r.ad.trim() || byName.has(r.ad.trim())) fail('L listesinde kalıp adları dolu ve tekil olmalı');
+    byName.set(r.ad.trim(), r);
+  }
+  const rows = [], seen = new Set();
+  const run = () => {
+    for (const f of list(db)) {
+      const r = byName.get(f.ad.trim()), row = { id:f.id, ad:f.ad, alanlar:[] };
+      rows.push(row);
+      if (!r) { row.durum='atlandi'; row.neden='L listesinde yok'; continue; }
+      seen.add(f.ad.trim());
+      if (r.urun!=null && r.urun!==f.urun) { row.durum='atlandi'; row.neden=`ürün farklı (${f.urun} ≠ ${r.urun})`; continue; }
+      if (String(r.refBeden??'').trim().toUpperCase()!=='L' || !validL(r.olculerL)) { row.durum='atlandi'; row.neden='listede L beden ve pozitif olculerL yok'; continue; }
+      const beden = f.refBeden?.trim() ? f.refBeden.trim().toUpperCase() : null;
+      if (beden && beden!=='L') { row.durum='atlandi'; row.neden=`kayıtlı referans beden ${f.refBeden}`; continue; }
+      if (!beden && f.refLengthCm!=null && f.refLengthCm!==r.refLengthCm) { row.durum='atlandi'; row.neden=`kayıtlı referans ${f.refLengthCm} cm, L listesi ${r.refLengthCm ?? '?'} cm; duz-cizim-yukle --guncelle kullanın`; continue; }
+      if (!beden) { row.alanlar.push('refBeden'); if (!dry) db.prepare("UPDATE document_flats SET refBeden='L' WHERE id=?").run(f.id); }
+      if (!validL(f.olculerL)) { row.alanlar.push('olculerL'); if (!dry) db.prepare('UPDATE document_flats SET olculerL=? WHERE id=?').run(JSON.stringify(r.olculerL), f.id); }
+      row.durum = row.alanlar.length ? 'dolduruldu' : 'tam';
+      if (row.alanlar.length && !dry) audit(db, null, 'kalip_l_tamamla', f.id, { alanlar:row.alanlar, cli:true });
+    }
+  };
+  dry ? run() : tx(db, run);
+  const unused = [...byName.keys()].filter(ad=>!seen.has(ad));
+  return { rows, unused, filled:rows.filter(r=>r.durum==='dolduruldu').length };
+}
 function lineSelection(db,line) {
   const {candidates,flat}=selection(db,line);
   return {kalipId:flat?.id??null,kalipAdaylari:candidates.map(({id,ad,refBeden})=>({id,ad,refBeden}))};
@@ -88,4 +137,4 @@ function saveReference(db, id, input, user) {
     return get(db, id);
   });
 }
-module.exports = { init, get, list, upload, saveReference, selection, lineSelection };
+module.exports = { init, get, list, upload, saveReference, selection, lineSelection, missingLNote, fillMissingL };

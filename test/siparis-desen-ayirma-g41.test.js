@@ -122,10 +122,13 @@ test('G41 conflicting or missing front evidence leaves a pair unresolved', async
   const conflict=await pairExtract(pairSheet({openingAt:'right'}),'sirt');
   assert.equal(conflict.buffer,undefined);
   assert.match(conflict.reason,/birden çok görünüm/);
-  // Dark cloth without any visible opening: the side mark alone is not enough.
+  // Dark cloth without any visible opening: no shadow is no vote, not a veto.
+  // The side mark alone then decides (Patron, 21.11.2026: the system decides
+  // front/back unless its cues contradict; mockups often show the background
+  // inside a dark collar instead of a shadow, G47).
   const unseen=await pairExtract(pairSheet({openingAt:'none'}),'sirt');
-  assert.equal(unseen.buffer,undefined);
-  assert.match(unseen.reason,/birden çok görünüm/);
+  assert.ok(unseen.buffer,unseen.reason);
+  assert.equal(unseen.placement.view,'arka');
 });
 
 test('G41 a flat stroke attached to the print is still a seam, not a ray', async()=> {

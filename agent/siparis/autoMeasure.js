@@ -148,14 +148,19 @@ function productMask(p) {
 
 function designContent(p,removeMatte=false) {
   const mask=new Uint8Array(p.width*p.height);
-  const transparent=p.data.some((v,i)=>i%4===3 && v<128);
+  let transparent=p.data.some((v,i)=>i%4===3 && v<128);
+  // A vector proof drawn on a filled background rectangle can leave a partly
+  // covered last pixel row at the page edge (G47); that fringe alone does not
+  // make the artwork transparent when the edges form one matte colour.
+  const fringeOnly=transparent&&!p.data.some((v,i)=>{if(i%4!==3||v>=128)return false;const x=(i>>2)%p.width,y=Math.floor((i>>2)/p.width);return x>0&&y>0&&x<p.width-1&&y<p.height-1;});
   const [r,g,b]=p.data,delta=i=>Math.max(Math.abs(p.data[i*4]-r),Math.abs(p.data[i*4+1]-g),Math.abs(p.data[i*4+2]-b));
-  let matte=removeMatte&&!transparent&&Math.min(r,g,b)<240;
+  let matte=removeMatte&&(!transparent||fringeOnly)&&Math.min(r,g,b)<240;
   // A colored proof background is used only when the four edges agree.
   // Leave transparent artwork and existing light-background masks alone.
   if(matte) {
     for(let x=0;x<p.width&&matte;x++)matte=delta(x)<=12&&delta((p.height-1)*p.width+x)<=12;
     for(let y=0;y<p.height&&matte;y++)matte=delta(y*p.width)<=12&&delta((y+1)*p.width-1)<=12;
+    if(matte)transparent=false;
   }
   for(let i=0;i<mask.length;i++)mask[i]=p.data[i*4+3]>32 && (transparent || (matte ? delta(i)>20 : Math.min(p.data[i*4],p.data[i*4+1],p.data[i*4+2])<240)) ? 1:0;
   return {mask,box:bounds(mask,p.width,p.height)};
@@ -310,8 +315,20 @@ function silhouette(p, segmented=null) {
   }
   const occupied=rows.filter(r=>r.width),hemY=occupied.at(-1)?.y;
   if(hemY==null)return null;
-  const band=rows.filter(r=>r.y>=hemY-box.h*.12 && r.y<=hemY-box.h*.075 && r.width>box.w*.2);
+  let band=rows.filter(r=>r.y>=hemY-box.h*.12 && r.y<=hemY-box.h*.075 && r.width>box.w*.2);
   let hemWidthPx=band.length?median(band.map(r=>r.width)):null;
+  // Arms hanging straight down put both cuffs into the hem band (G47b: a
+  // hoodie photographed flat, band = 95% of the silhouette). Below the cuffs
+  // the hem rib is the torso alone: a run of rows of one stable width.
+  if(hemWidthPx&&hemWidthPx>=box.w*.9) {
+    const low=rows.filter(r=>r.y>hemY-box.h*.075&&r.width>0&&r.width<hemWidthPx*.8);
+    let best=[],run=[];
+    for(const r of low) {
+      if(run.length&&(r.y!==run.at(-1).y+1||Math.abs(r.width-run[0].width)>run[0].width*.03))run=[];
+      run.push(r);if(run.length>best.length)best=run.slice();
+    }
+    if(best.length>=Math.max(4,box.h*.03)){band=best;hemWidthPx=median(best.map(r=>r.width));}
+  }
   const bodyColor=dominant(p,Array.from(mask.keys()).filter(i=>mask[i]));
   if(distance(bodyColor,background)>(segmented?.lowContrast?35:18)) {
     // Closing may bridge a cuff-to-body gap. The original foreground evidence
@@ -504,7 +521,8 @@ function hoodView(p,ref) {
   // A raised narrow crown followed by broad shoulders is hood geometry. A
   // broad neckline alone is insufficient evidence for front/back assignment.
   const raised=ref.shoulderY-ref.box.y>ref.bodyHeightPx*.08;
-  const lining=components(ink,w,h,ref.hemWidthPx).filter(c=>c.box.y<ref.shoulderY&&c.box.w>ref.hemWidthPx*.28&&c.box.h>ref.bodyHeightPx*.035&&Math.abs(c.box.x+c.box.w/2-cx)<ref.hemWidthPx*.2);
+  // A lining lies under the hood crown; ink at the silhouette top is a hanger or background (G47).
+  const lining=components(ink,w,h,ref.hemWidthPx).filter(c=>c.box.y<ref.shoulderY&&c.box.y>ref.box.y+ref.bodyHeightPx*.01&&c.box.w>ref.hemWidthPx*.28&&c.box.h>ref.bodyHeightPx*.035&&Math.abs(c.box.x+c.box.w/2-cx)<ref.hemWidthPx*.2);
   const cords=components(ink,w,h,4).filter(c=>c.box.y>=ref.shoulderY-ref.bodyHeightPx*.03&&c.box.y<ref.shoulderY+ref.bodyHeightPx*.25&&c.box.h>ref.bodyHeightPx*.15&&c.box.w<ref.hemWidthPx*.08&&Math.abs(c.box.x+c.box.w/2-cx)<ref.hemWidthPx*.22);
   return {hooded:raised,view:raised&&(lining.length||cords.length>=2)?'on':'teyit',lining:lining.length,cords:cords.length};
 }
@@ -549,24 +567,40 @@ function shirtViews(refs,cues) {
 
 function productViewCues(p,refs,product) {
   const cues=refs.map(ref=>ref.splitMethod?{hooded:false,view:'teyit',lining:0,cords:0}:hoodView(p,ref));
+  // A tee has no hood: the background inside its collar is not a lining (G47).
+  if(product==='tisort')for(const c of cues){c.view='teyit';c.hooded=false;}
   if(product==='tisort')shirtViews(refs,cues);
   // A visible hood opening or cords identify the front of a hooded pair.
   if(refs.length===2 && cues.filter(c=>c.view==='on').length===1) {
     const other=cues.find(c=>c.view!=='on');
     if(other.hooded)other.view='arka';
+    // A back print reaching the collar can pass for a lining (G47: a half-zip
+    // stand collar). On dark cloth the front's opening is shadowed; when the
+    // "back" shows that shadow and the "front" none, both views stay open.
+    const front=cues.findIndex(c=>c.view==='on'),shade=refs.map(ref=>openingShade(p,ref));
+    if(other.view==='arka'&&shade.every(v=>v!=null)&&shade[front]<=.03&&shade[1-front]>=.1&&pairedGarments(...refs))
+      for(const c of cues)c.view='teyit';
   }
   return cues;
 }
 
-function colorDesign(p,ref,tallBack=false) {
+// Content width/height ratios of the linked design pages, for colorDesign.
+const contentRatios=contents=>contents.flatMap(({box})=>box?[box.w/box.h]:[]);
+const ratioMatches=(ratio,ratios)=>ratios.some(r=>Math.max(ratio/r,r/ratio)-1<=COLOR_ASPECT_TOLERANCE);
+// A letter-spaced line of small lettering joins into one box that is too thin
+// and too low for an anonymous print. It is accepted only as the linked
+// design: at least three separate letters whose joined box has the design's
+// width/height ratio.
+function colorDesign(p,ref,tallBack=false,ratios=[]) {
   const w=p.width,h=p.height,cx=ref.bodyCenterX??(ref.box.x+ref.box.w/2),ink=contrastInk(p,ref),clean=new Uint8Array(ink.length);
   // A large back print can extend below the usual print band.
   const top=ref.shoulderY+ref.bodyHeightPx*(tallBack?.11:.14),bottom=ref.shoulderY+ref.bodyHeightPx*(tallBack?.83:.62);
-  for(const c of components(ink,w,h,2)) {
+  const part=new Int32Array(ink.length),parts=components(ink,w,h,2);
+  for(const [k,c] of parts.entries()) {
     const b=c.box,ratio=Math.max(b.w/b.h,b.h/b.w);
     // Reject piping, lining, cords and long seams before joining print letters.
     if(ratio>9 || (b.h>ref.bodyHeightPx*.12&&b.w<ref.hemWidthPx*.055) || b.y<top || b.y+b.h>bottom || b.x<cx-ref.hemWidthPx*.48 || b.x+b.w>cx+ref.hemWidthPx*.48)continue;
-    for(const i of c.pixels)clean[i]=1;
+    for(const i of c.pixels){clean[i]=1;part[i]=k+1;}
   }
   const joined=dilate(clean,w,h,Math.max(2,Math.round(ref.hemWidthPx*.022)),Math.max(2,Math.round(ref.bodyHeightPx*.016)));
   const candidates=[];
@@ -574,12 +608,121 @@ function colorDesign(p,ref,tallBack=false) {
     const pixels=c.pixels.filter(i=>clean[i]);if(!pixels.length)continue;
     let x=w,y=h,r=0,b=0;for(const i of pixels){x=Math.min(x,i%w);r=Math.max(r,i%w);y=Math.min(y,Math.floor(i/w));b=Math.max(b,Math.floor(i/w));}
     const box={x,y,w:r-x+1,h:b-y+1},density=pixels.length/(box.w*box.h);
-    if(box.w<ref.hemWidthPx*.045||box.h<ref.bodyHeightPx*.018||box.w/box.h>8||box.h/box.w>4||density<.035)continue;
+    if(density<.035)continue;
+    if(box.w<ref.hemWidthPx*.045||box.h<ref.bodyHeightPx*.018||box.w/box.h>8||box.h/box.w>4) {
+      const ids=[...new Set(pixels.map(i=>part[i]))],middle=box.y+box.h/2,letters=ids.length;
+      // One row of letters: each crosses the middle line of the joined box.
+      const row=ids.every(k=>{const q=parts[k-1].box;return q.y<=middle&&q.y+q.h>=middle;});
+      if(!(letters>=3&&row&&box.h>=4&&box.w>=ref.hemWidthPx*.1&&box.w>box.h&&ratioMatches(box.w/box.h,ratios)))continue;
+      candidates.push({box,score:pixels.length,confidence:.86,content:{box},method:'otomatik_renk',lettering:letters});
+      continue;
+    }
     candidates.push({box,score:pixels.length,confidence:.86,content:{box},method:'otomatik_renk'});
   }
   candidates.sort((a,b)=>b.score-a.score);
   if(!candidates.length)return {box:null,confidence:0,ambiguous:false,content:{box:null},method:'otomatik_renk'};
   return {...candidates[0],ambiguous:!!candidates[1]&&candidates[1].score>candidates[0].score*.4,others:candidates.slice(1)};
+}
+
+// G47b: thin or multi-part designs (≡ bars, wavy lines, line art) defeat the
+// sliding template. Group the garment's ink at a few join radii, keep groups
+// whose box has the design's width/height ratio, and compare each group with
+// the design's own layout: a coarse occupancy grid plus row and column
+// profiles, each as normalized correlation. Ink is read against the garment
+// colour with a local threshold (half the group's peak contrast), so a
+// blurred mockup print keeps its bars apart. The silhouette's anti-aliased
+// edge is excluded. A second distinct group within 10% leaves it ambiguous.
+const GROUP_RADII=[.01,.02,.04,.08];
+function profileOf(mask,w,box,n,rows) {
+  const out=new Float64Array(n),[a0,len,b0,span]=rows?[box.y,box.h,box.x,box.w]:[box.x,box.w,box.y,box.h];
+  for(let k=0;k<n;k++) {
+    const from=Math.floor(a0+k*len/n),to=Math.max(from+1,Math.floor(a0+(k+1)*len/n));let ink=0;
+    for(let a=from;a<to;a++)for(let b=b0;b<b0+span;b++)ink+=mask[rows?a*w+b:b*w+a]?1:0;
+    out[k]=ink/((to-from)*span);
+  }
+  return out;
+}
+function gridOf(mask,w,box,n) {
+  const out=new Float64Array(n*n);
+  for(let gy=0;gy<n;gy++)for(let gx=0;gx<n;gx++) {
+    const x0=Math.floor(box.x+gx*box.w/n),x1=Math.max(x0+1,Math.floor(box.x+(gx+1)*box.w/n)),y0=Math.floor(box.y+gy*box.h/n),y1=Math.max(y0+1,Math.floor(box.y+(gy+1)*box.h/n));
+    let ink=0;for(let y=y0;y<y1;y++)for(let x=x0;x<x1;x++)ink+=mask[y*w+x]?1:0;
+    out[gy*n+gx]=ink/((x1-x0)*(y1-y0));
+  }
+  return out;
+}
+function correlation(a,b) {
+  // Short profiles are smoothed alike: a blurred bar is wider than its source.
+  if(a.length<=32){const k=Math.max(1,Math.round(a.length/12)),soft=v=>Float64Array.from(v,(_,i)=>{let t=0,n=0;for(let j=i-k;j<=i+k;j++)if(j>=0&&j<v.length){t+=v[j];n++;}return t/n;});a=soft(a);b=soft(b);}
+  const n=a.length,ma=a.reduce((s,v)=>s+v,0)/n,mb=b.reduce((s,v)=>s+v,0)/n;let c=0,va=0,vb=0;
+  for(let i=0;i<n;i++){c+=(a[i]-ma)*(b[i]-mb);va+=(a[i]-ma)**2;vb+=(b[i]-mb)**2;}
+  return va>1e-9&&vb>1e-9?c/Math.sqrt(va*vb):0;
+}
+function layoutScore(mask,w,box,design,content) {
+  const g=Math.max(4,Math.min(12,Math.floor(Math.min(box.w,box.h)/3))),r=Math.max(8,Math.min(32,box.h)),c=Math.max(8,Math.min(32,box.w));
+  const pairs=[[gridOf(mask,w,box,g),gridOf(content.mask,design.width,content.box,g)],
+    [profileOf(mask,w,box,r,true),profileOf(content.mask,design.width,content.box,r,true)],
+    [profileOf(mask,w,box,c,false),profileOf(content.mask,design.width,content.box,c,false)]];
+  // A flat design profile (straight bars seen across) carries no layout; its
+  // correlation would be noise. Only informative comparisons are averaged.
+  const informative=pairs.filter(([,d])=>{const m=d.reduce((s,v)=>s+v,0)/d.length;return m>0&&Math.sqrt(d.reduce((s,v)=>s+(v-m)**2,0)/d.length)/m>.05;});
+  return informative.length?informative.reduce((s,[a,d])=>s+correlation(a,d),0)/informative.length:0;
+}
+// A converted proof can carry a filled rectangle that the source shows as
+// transparent (G47b: svg-to-pdfkit drew OTOKON's SVG on a black box). Its
+// uniform border marks it; the content inside it is the artwork. Used only as
+// a second hypothesis by groupDesign: a real rectangular badge keeps its box.
+function innerMatte(p,content) {
+  if(!content.box)return null;
+  if(content.box.w<p.width*.3||content.box.h<p.height*.3)return null;
+  // Two pixels inside: the rectangle's own edge is anti-aliased.
+  const x=content.box.x+2,y=content.box.y+2,bw=content.box.w-4,bh=content.box.h-4,w=p.width,d=p.data;
+  const ring=[];for(let i=x;i<x+bw;i++)ring.push(y*w+i,(y+bh-1)*w+i);for(let j=y;j<y+bh;j++)ring.push(j*w+x,j*w+x+bw-1);
+  const c=[d[ring[0]*4],d[ring[0]*4+1],d[ring[0]*4+2]];
+  if(ring.some(i=>d[i*4+3]<128||distance([d[i*4],d[i*4+1],d[i*4+2]],c)>12))return null;
+  const mask=new Uint8Array(w*p.height);
+  for(let j=y;j<y+bh;j++)for(let i=x;i<x+bw;i++){const k=j*w+i;mask[k]=d[k*4+3]>32&&distance([d[k*4],d[k*4+1],d[k*4+2]],c)>20?1:0;}
+  const box=bounds(mask,w,p.height);
+  return box?{mask,box}:null;
+}
+function groupDesign(p,ref,design,content) {
+  const inner=innerMatte(design,content);
+  if(inner) {
+    const a=groupDesignWith(p,ref,design,content),b=groupDesignWith(p,ref,design,inner);
+    return b.confidence>a.confidence?b:a;
+  }
+  return groupDesignWith(p,ref,design,content);
+}
+function groupDesignWith(p,ref,design,content) {
+  const none={box:null,confidence:0,ambiguous:false,content,method:'otomatik',group:true};
+  if(!content.box)return none;
+  const w=p.width,h=p.height,ratio=content.box.w/content.box.h,garment=dominant(p,Array.from(ref.mask.keys()).filter(i=>ref.mask[i]));
+  const e=Math.max(3,Math.round(ref.hemWidthPx*.015)),contrast=new Float32Array(w*h),ink=new Uint8Array(w*h);
+  const {x:bx,y:by,w:bw,h:bh}=ref.box;
+  for(let y=Math.max(e,by);y<Math.min(h-e,by+bh);y++)for(let x=Math.max(e,bx);x<Math.min(w-e,bx+bw);x++) {
+    const i=y*w+x;
+    if(!ref.mask[i]||!ref.mask[i-e]||!ref.mask[i+e]||!ref.mask[i-e*w]||!ref.mask[i+e*w])continue;
+    contrast[i]=distance([p.data[i*4],p.data[i*4+1],p.data[i*4+2]],garment);ink[i]=contrast[i]>40?1:0;
+  }
+  const found=[];
+  for(const radius of GROUP_RADII) {
+    const r=Math.max(1,Math.round(ref.hemWidthPx*radius)),joined=dilate(ink,w,h,r,r);
+    for(const c of components(joined,w,h,8)) {
+      const own=c.pixels.filter(i=>ink[i]);if(own.length<6)continue;
+      const values=own.map(i=>contrast[i]).sort((a,b)=>a-b),t=Math.max(40,values[Math.floor(values.length*.95)]*.5);
+      const local=new Uint8Array(w*h);let x0=w,y0=h,x1=-1,y1=-1;
+      for(const i of own)if(contrast[i]>t){local[i]=1;const x=i%w,y=(i-x)/w;x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);}
+      if(x1<0)continue;
+      const box={x:x0,y:y0,w:x1-x0+1,h:y1-y0+1};
+      if(box.w<4||box.h<3||box.w>ref.hemWidthPx*1.1||!ratioMatches(box.w/box.h,[ratio]))continue;
+      if(found.some(f=>f.box.x===box.x&&f.box.y===box.y&&f.box.w===box.w&&f.box.h===box.h))continue;
+      found.push({box,score:layoutScore(local,w,box,design,content)});
+    }
+  }
+  found.sort((a,b)=>b.score-a.score);
+  const best=found[0];if(!best)return none;
+  const rival=found.find(f=>overlapFraction(f.box,best.box)<.5&&overlapFraction(best.box,f.box)<.5);
+  return {...none,box:best.box,confidence:Math.max(0,best.score),ambiguous:!!rival&&rival.score>=best.score*.9,rival:rival?Math.round(rival.score*1000)/1000:null};
 }
 
 function chestLine(p,ref) {
@@ -772,7 +915,71 @@ function sleevePrints(p,sleeve) {
       if(!found.some(f=>f.pixels.length===pixels.length&&f.box.x===box.x&&f.box.y===box.y&&f.box.w===box.w&&f.box.h===box.h))found.push({mask,pixels,box,...extent});
     }
   }
+  // G47d: a blurred, letter-spaced or sheared sleeve print falls apart on the
+  // contrast-90 mask. As in groupDesign, fainter ink away from the silhouette
+  // edge is grouped at wider radii and kept above half its own peak contrast.
+  const garment=dominant(p,Array.from(mask.keys()).filter(i=>mask[i])),contrast=new Float32Array(w*h),faint=new Uint8Array(w*h);
+  const e=Math.max(3,Math.round(sleeve.lengthPx*.02));
+  for(let y=e;y<h-e;y++)for(let x=e;x<w-e;x++) {
+    const i=y*w+x;
+    if(!mask[i]||!mask[i-e]||!mask[i+e]||!mask[i-e*w]||!mask[i+e*w])continue;
+    contrast[i]=distance([p.data[i*4],p.data[i*4+1],p.data[i*4+2]],garment);faint[i]=contrast[i]>40?1:0;
+  }
+  for(const radius of [.02,.05,.1].map(k=>Math.max(1,Math.round(sleeve.lengthPx*k))))
+    for(const c of components(dilate(faint,w,h,radius,radius),w,h,8)) {
+      const own=Array.from(c.pixels).filter(i=>faint[i]);if(own.length<8)continue;
+      const values=own.map(i=>contrast[i]).sort((a,b)=>a-b),t=Math.max(40,values[Math.floor(values.length*.95)]*.5);
+      const pixels=own.filter(i=>contrast[i]>t),extent=sleeve.project(pixels);
+      if(pixels.length<8||extent.alongPx<4||extent.acrossPx<4||extent.alongPx>sleeve.lengthPx*.65)continue;
+      const local=new Uint8Array(w*h);for(const i of pixels)local[i]=1;
+      const box=bounds(local,w,h);
+      if(!found.some(f=>f.grouped&&f.box.x===box.x&&f.box.y===box.y&&f.box.w===box.w&&f.box.h===box.h))found.push({mask:local,pixels,box,...extent,grouped:true,contrast});
+    }
   return found;
+}
+// G47d: a grouped sleeve print read in its own frame. Two axes are tried: the
+// principal axis of its ink (a word) and the stroke direction from the
+// contrast structure tensor (sheared bars). The frame is sampled back from
+// the image, so turning leaves no holes. Below 16 px across, blur shapes the
+// cross profile; only the profile along the long side is compared then. The
+// ratio test uses the 3-97% extents, the measured length the full extent.
+function alignedSleeveMatch(p,sleeve,candidate,design,content) {
+  if(!content.box)return null;
+  const w=p.width,h=p.height,pixels=candidate.pixels,con=candidate.contrast,designRatio=content.box.w/content.box.h;
+  let mx=0,my=0;for(const i of pixels){mx+=i%w;my+=Math.floor(i/w);}mx/=pixels.length;my/=pixels.length;
+  let sxx=0,sxy=0,syy=0;for(const i of pixels){const dx=i%w-mx,dy=Math.floor(i/w)-my;sxx+=dx*dx;sxy+=dx*dy;syy+=dy*dy;}
+  const b=candidate.box;let jxx=0,jxy=0,jyy=0;
+  for(let y=Math.max(1,b.y);y<Math.min(h-1,b.y+b.h);y++)for(let x=Math.max(1,b.x);x<Math.min(w-1,b.x+b.w);x++){const i=y*w+x,gx=(con[i+1]-con[i-1])/2,gy=(con[i+w]-con[i-w])/2;jxx+=gx*gx;jxy+=gx*gy;jyy+=gy*gy;}
+  let best=null;
+  for(const theta of [.5*Math.atan2(2*sxy,sxx-syy),.5*Math.atan2(2*jxy,jxx-jyy)+Math.PI/2]) {
+    const u={x:Math.cos(theta),y:Math.sin(theta)},v={x:-u.y,y:u.x};
+    const along=[],across=[];for(const i of pixels){const dx=i%w-mx,dy=Math.floor(i/w)-my;along.push(dx*u.x+dy*u.y);across.push(dx*v.x+dy*v.y);}
+    along.sort((a,c)=>a-c);across.sort((a,c)=>a-c);
+    const a0=along[0],c0=across[0],W=Math.round(along.at(-1)-a0)+1,H=Math.round(across.at(-1)-c0)+1;
+    const q=(list,f)=>list[Math.floor(list.length*f)],W94=q(along,.97)-q(along,.03),H94=q(across,.97)-q(across,.03);
+    if(!(W94>0&&H94>0))continue;
+    const frame=new Uint8Array(W*H);
+    for(let y=0;y<H;y++)for(let x=0;x<W;x++){const ix=Math.round(mx+(a0+x)*u.x+(c0+y)*v.x),iy=Math.round(my+(a0+x)*u.y+(c0+y)*v.y);if(ix>=0&&iy>=0&&ix<w&&iy<h)frame[y*W+x]=candidate.mask[iy*w+ix];}
+    for(const turn of [0,1,2,3]) {
+      const tw=turn%2?H:W,th=turn%2?W:H,ratio=turn%2?H94/W94:W94/H94;
+      if(!ratioMatches(ratio,[designRatio]))continue;
+      const m=new Uint8Array(tw*th);
+      for(let y=0;y<H;y++)for(let x=0;x<W;x++)if(frame[y*W+x]){const [xx,yy]=turn===0?[x,y]:turn===1?[y,W-1-x]:turn===2?[W-1-x,H-1-y]:[H-1-y,x];m[yy*tw+xx]=1;}
+      const box={x:0,y:0,w:tw,h:th},rows=th>tw,n=Math.max(8,Math.min(32,rows?th:tw));
+      const confidence=Math.max(0,Math.min(tw,th)>=16?layoutScore(m,tw,box,design,content):correlation(profileOf(m,tw,box,n,rows),profileOf(content.mask,design.width,content.box,n,rows)));
+      // Within ±12° of the sleeve axis (or of its right-angle turns) the
+      // established G39c/G39d match decides; this path only covers prints the
+      // classic search cannot reach (EXE: 15° outside it).
+      const offset=Math.abs((theta-Math.atan2(sleeve.u.y,sleeve.u.x))*180/Math.PI)%90;
+      if(Math.min(offset,90-offset)<=12)continue;
+      if(!best||confidence>best.confidence)
+        best={confidence,rotation:turn,measuredAxis:turn%2?'boy':'en',designRatio,axis:u,axisOffsetDegrees:Math.round((theta-Math.atan2(sleeve.u.y,sleeve.u.x))*180/Math.PI),
+          // Length is the full extent; the across side follows the robust
+          // ratio, so a pixel of turning anti-aliasing does not read as shape.
+          projected:{...candidate,alongPx:W,acrossPx:W*H94/W94},aligned:true};
+    }
+  }
+  return best;
 }
 // Split ink into color groups; a single-color mark returns no extra layer.
 function inkLayers(p,ink) {
@@ -800,6 +1007,9 @@ function sleeveMatch(p,sleeve,candidate,design,content) {
   // The artwork may tilt slightly relative to the entire shoulder/cuff axis.
   // Search only a small angle, always measuring the independently observed ink.
   const pixels=candidate.pixels;
+  // Grouped (G47d) candidates go only through the aligned path below; the
+  // established ±12° match keeps its own candidates and decisions.
+  if(candidate.grouped)return alignedSleeveMatch(p,sleeve,candidate,design,content);
   for(const degrees of [-12,-8,-4,0,4,8,12]) {
     const angle=degrees*Math.PI/180,cos=Math.cos(angle),sin=Math.sin(angle);
     const u={x:sleeve.u.x*cos-sleeve.u.y*sin,y:sleeve.u.x*sin+sleeve.u.y*cos},v={x:u.y,y:-u.x};
@@ -941,6 +1151,8 @@ async function autoMeasureSleeve({image,design,flat,product,position}) {
         const measured=measureSleeve({alongPx:candidate.alongPx,acrossPx:candidate.acrossPx,designRatio:match.designRatio,measuredAxis:match.measuredAxis,mmPerPx:source.mmPerPx});
         source.aspectRatioError=measured.aspectRatioError;
         reasons.push(...measured.reasons);width=measured.width_mm;height=measured.height_mm;
+        // The workshop reads a sleeve print's "en" along the sleeve; say which design axis that is.
+        source.enEkseni=match.measuredAxis==='en'?'kol boyunca (desenin eni)':'kola dik (desenin boyu kol boyunca)';
         source.designBoxPx=candidate.box;
       }
       source.summary=width!=null?`Kol boyunca desenin ${match.measuredAxis} ekseni ölçüldü; diğer eksen desen dosyasının oranından hesaplandı. Ölçek: ${source.scaleFrom==='kol_boyu'?'L kol boyu':`aynı görselde L gövde ${pairLabel}`}.`:'Kol deseni değerlendirildi; güvenilir cm ölçüsü oluşmadı. Teyit gerekçelerine bakılmalı.';
@@ -1041,7 +1253,7 @@ async function autoMeasureLeg({image,design,flat,product,position}) {
   return {width_mm:width,height_mm:height,measure_source:source,needs_confirmation:reasons.length>0,reasons,reason:reasons.join(' ')};
 }
 
-async function autoMeasure({image,design,flat,product,position}) {
+async function autoMeasure({image,design,flat,product,position,color}) {
   if(['kol','sol_kol','sag_kol'].includes(position))return autoMeasureSleeve({image,design,flat,product,position});
   if(LEGS.includes(position))return autoMeasureLeg({image,design,flat,product,position});
   const scalePair=scalePairFor(flat,product),pairLabel=scalePair==='boy_gogus'?'boy/göğüs':'boy/etek',horizontalLabel=scalePair==='boy_gogus'?'göğüs':'etek';
@@ -1060,11 +1272,11 @@ async function autoMeasure({image,design,flat,product,position}) {
     const pdf=image.mime==='application/pdf',scanEdge=pdf?320:MAX_EDGE;
     const topEdge=pdf?PDF_THIN_MAX_EDGE:Math.min(MAX_EDGE,Math.max(...Object.values(imageSize(image.buffer,image.mime))));
     const pages=await rasterPages(image,scanEdge),candidates=[],allViews=[],pageEdges=pages.map(()=>scanEdge);
-    const tallBack=position==='sirt'&&!design;
+    const tallBack=position==='sirt'&&!design,upper=['gogus','sol_gogus','sag_gogus','sirt'];
     let designs=[];
     if(design)try {designs=await rasterPages(design,1000,null,{transparent:true});}catch(e){source.designReadError=e.message;}
     const designContents=designs.map(p=>designContent(p,true));
-    const designRatios=designContents.flatMap(({box},i)=>box?[{page:i+1,ratio:box.w/box.h}]:[]);
+    const designRatios=designContents.flatMap(({box},i)=>box?[{page:i+1,ratio:box.w/box.h}]:[]),ratios=contentRatios(designContents);
     if(design && !designRatios.length)reasons.push('Bağlı desen dosyasının okunur içerik kutusu yok; renk adayının en-boy oranı doğrulanamadı.');
     global.gc?.(); // Release full-resolution native decode surfaces before scanning masks.
     source.pageCount=pages.length;source.designPageCount=designs.length;timings.raster=performance.now()-started;
@@ -1078,34 +1290,53 @@ async function autoMeasure({image,design,flat,product,position}) {
         const mapped=refs.map(ref=>{const box={x:ref.box.x*sx,y:ref.box.y*sy,w:ref.box.w*sx,h:ref.box.h*sy};return found.find(r=>overlapFraction(r.box,box)>.5);});
         if(mapped.every(Boolean)&&new Set(mapped).size===mapped.length){pages[i]=p;pageEdges[i]=edge;refs=mapped;}
       }
+      // A pair of one garment is settled by the extraction cues. The linked
+      // design found on exactly one garment adds a vote for the view of its
+      // position; it can confirm or contradict, never decide alone.
+      if(refs.length===2) {
+        const matches=refs.map(ref=>colorDesign(pages[i],ref,tallBack,ratios));
+        const carrying=matches.map(m=>!!m.box&&ratioMatches(m.box.w/m.box.h,ratios));
+        const carrier=upper.includes(position)&&ratios.length&&carrying.filter(Boolean).length===1&&matches.every((m,k)=>carrying[k]||!m.box)?carrying.indexOf(true):-1;
+        pairViews(pages[i],refs,cues,matches,[],carrier<0?null:viewForPosition(position)==='on'?carrier:1-carrier);
+        if(carrier>=0)cues.forEach((c,k)=>{c.designCarrier=k===carrier;});
+      }
       for(let k=0;k<refs.length;k++) {
         const ref=refs[k],cue=cues[k],scale=scaleFor(ref,measurements,scalePair,pages[i],calK);
-        allViews.push({page:i+1,index:k,view:cue.view,hooded:cue.hooded,viewEvidence:{lining:cue.lining,cords:cue.cords,...(cue.neckDepth!==undefined?{neckDepth:cue.neckDepth}:{})},maskMethod:ref.maskMethod,...(ref.splitMethod?{splitMethod:ref.splitMethod}:{}),productBoxPx:ref.box,shoulderY:ref.shoulderY,hemY:ref.hemY,hemWidthPx:ref.hemWidthPx,chestLinePx:ref.chestLine??null,bodyHeightPx:ref.bodyHeightPx,...scale});
+        allViews.push({page:i+1,index:k,view:cue.view,garmentColor:garmentColor(dominant(pages[i],Array.from(ref.mask.keys()).filter(j=>ref.mask[j]))),hooded:cue.hooded,viewEvidence:{lining:cue.lining,cords:cue.cords,...(cue.neckDepth!==undefined?{neckDepth:cue.neckDepth}:{}),...(cue.pairVotes?{pairVotes:cue.pairVotes}:{}),...(cue.viewConflict?{viewConflict:cue.viewConflict}:{}),...(cue.designCarrier!==undefined?{designCarrier:cue.designCarrier}:{})},maskMethod:ref.maskMethod,...(ref.splitMethod?{splitMethod:ref.splitMethod}:{}),productBoxPx:ref.box,shoulderY:ref.shoulderY,hemY:ref.hemY,hemWidthPx:ref.hemWidthPx,chestLinePx:ref.chestLine??null,bodyHeightPx:ref.bodyHeightPx,...scale});
         if(cue.view!=='teyit'&&cue.view!==viewForPosition(position))continue;
         if(refs.length>1&&cue.view==='teyit'&&!designs.length)continue;
         if(designs.length)for(let j=0;j<designs.length;j++) {
           const match=matchDesign(pages[i],designs[j],designContents[j],ref,false);
           if(match.box)candidates.push({p:pages[i],ref,match,page:i+1,designPage:j+1,index:k});
+          const group=groupDesign(pages[i],ref,designs[j],designContents[j]);
+          if(group.box)candidates.push({p:pages[i],ref,match:group,page:i+1,designPage:j+1,index:k});
         }
         // Also retain the color hypothesis: refinement may reject the template.
         // Unknown sheet products need the supplied design. An independently
         // identified front/back view keeps the established color fallback.
-        const match=(!designs.length||refs.length===1||cue.view!=='teyit')&&['gogus','sol_gogus','sag_gogus','sirt'].includes(position)?colorDesign(pages[i],ref,tallBack):{box:null};
+        const match=(!designs.length||refs.length===1||cue.view!=='teyit')&&upper.includes(position)?colorDesign(pages[i],ref,tallBack,ratios):{box:null};
         if(match.box)candidates.push({p:pages[i],ref,match,page:i+1,designPage:null,index:k});
       }
     }
     source.views=allViews;
+    // The line colour does not pick a garment here; a colour no garment shows
+    // is worth knowing (the fabric may be wrong) but does not block the size.
+    const lineColor=named(color,COLOR_WORDS);
+    if(lineColor.length===1&&allViews.length&&!allViews.some(v=>v.garmentColor===lineColor[0]))source.colorNote=colorMismatch(color);
+
     const unknownViews=allViews.filter(v=>allViews.filter(q=>q.page===v.page).length>1&&v.view==='teyit');
-    const unknownViewReason=()=>`Ürün görünümü eşleştirme güveni düşük: ${unknownViews.length} görünüm ayrılamadı; görünüm teyit edilmeli.`;
+    const conflict=unknownViews.find(v=>v.viewEvidence.viewConflict)?.viewEvidence.viewConflict;
+    const unknownViewReason=()=>`Ürün görünümü eşleştirme güveni düşük: ${unknownViews.length} görünüm ayrılamadı; görünüm teyit edilmeli.`+
+      (conflict?` Kanıtlar çelişiyor: ${conflict}.`:' Ön/arka kanıtı (kapüşon, yaka, etiket, ense işareti, desen konumu) bulunamadı.');
     // A strong template takes precedence over the independent color fallback.
     candidates.sort((a,b)=>(!!b.designPage-!!a.designPage)||b.match.confidence-a.match.confidence);
     source.pageCandidates=candidates.slice(0,5).map(c=>({page:c.page,productIndex:c.index,designPage:c.designPage,confidence:Math.round(c.match.confidence*1000)/1000}));
     timings.scan=performance.now()-started-timings.raster;
-    let finalists=[...candidates.filter(c=>c.designPage).slice(0,3),...candidates.filter(c=>!c.designPage).slice(0,3)];
+    let finalists=[...candidates.filter(c=>c.designPage&&!c.match.group).slice(0,3),...candidates.filter(c=>c.match.group).slice(0,3),...candidates.filter(c=>!c.designPage).slice(0,3)];
     // Every product on a sheet needs a refined template hypothesis; otherwise
     // a fourth repeated print could be discarded before the ambiguity check.
     const represented=new Set(finalists.filter(c=>c.designPage).map(c=>`${c.page}:${c.index}`));
-    for(const c of candidates.filter(c=>c.designPage&&allViews.filter(v=>v.page===c.page).length>1)) {
+    for(const c of candidates.filter(c=>c.designPage&&!c.match.group&&allViews.filter(v=>v.page===c.page).length>1)) {
       const key=`${c.page}:${c.index}`;
       if(!represented.has(key)){finalists.push(c);represented.add(key);}
     }
@@ -1133,7 +1364,7 @@ async function autoMeasure({image,design,flat,product,position}) {
         return {...candidate,p,ref,match:{...candidate.match,box:scaled(candidate.match.box)}};
       }).filter(c=>c.ref);
     }
-    const refined=finalists.map(candidate=>({...candidate,match:candidate.designPage?matchDesign(candidate.p,designs[candidate.designPage-1],designContents[candidate.designPage-1],candidate.ref,true,candidate.match):colorDesign(candidate.p,candidate.ref,tallBack)}));
+    const refined=finalists.map(candidate=>({...candidate,match:candidate.match.group?groupDesign(candidate.p,candidate.ref,designs[candidate.designPage-1],designContents[candidate.designPage-1]):candidate.designPage?matchDesign(candidate.p,designs[candidate.designPage-1],designContents[candidate.designPage-1],candidate.ref,true,candidate.match):colorDesign(candidate.p,candidate.ref,tallBack,ratios)}));
     timings.refine=performance.now()-started-timings.raster-timings.scan;
     refined.sort((a,b)=>((!!b.designPage&&b.match.confidence>=.78?1:0)-(!!a.designPage&&a.match.confidence>=.78?1:0))||b.match.confidence-a.match.confidence);
     const chosen=refined[0];
@@ -1149,8 +1380,16 @@ async function autoMeasure({image,design,flat,product,position}) {
       const competing=refined.find(c=>c.page!==page||c.index!==chosen.index);
       const placementAmbiguous=match.ambiguous || !!competing&&Math.abs(match.confidence-competing.match.confidence)<.045;
       const templateSelectsProduct=designPage&&match.confidence>=MIN_MATCH_CONFIDENCE&&!placementAmbiguous;
-      if(unknownViews.some(v=>v.page===page && (v.splitMethod || !templateSelectsProduct)))reasons.push(unknownViewReason());
+      // Conflicting view cues are never overridden by a design match: the
+      // design may sit on the garment the other cues call the back (G47b).
+      const viewConflict=unknownViews.some(v=>v.page===page&&v.viewEvidence.viewConflict);
+      if(unknownViews.some(v=>v.page===page && (v.splitMethod || !templateSelectsProduct || v.viewEvidence.viewConflict)))reasons.push(unknownViewReason());
       source.productSelection=templateSelectsProduct?'desen':'gorunum';
+      // A tee has no collar rising well above the shoulders (mockups: 8-12% of
+      // the body height; a half-zip stand collar 16-17%, hoods more). Its L
+      // table on such a garment sized a chest logo 20% large (G47). Teyit only.
+      if(String(product??'').trim().toLowerCase()==='tisort'&&(ref.shoulderY-ref.box.y)/ref.bodyHeightPx>=.15)
+        reasons.push('Satır ürünü tişört, görseldeki ürünün yakası omuzdan yükseliyor (dik yaka, fermuar veya kapüşon); ürünü ve kalıbı kontrol edin.');
       const pageViews=allViews.filter(v=>v.page===page);
       // Independent products can be drawn at different sizes. Compare scales
       // only for the identified front/back pair, as in the two-view workflow.
@@ -1196,7 +1435,7 @@ async function autoMeasure({image,design,flat,product,position}) {
       source.scale=source.mmPerPx?source.mmPerPx/10:null;
       if(source.aspectRatioError>.01)source.aspectRatioNote=`Desen en-boy oranı farkı %${percent(source.aspectRatioError)}.`;
       if(match.confidence<MIN_MATCH_CONFIDENCE)reasons.push(`Desen eşleştirme güveni %${percent(match.confidence)}; %${percent(MIN_MATCH_CONFIDENCE)} sınırının altında.`);
-      else if(!placementAmbiguous && colorAspectVerified) {
+      else if(!placementAmbiguous && colorAspectVerified && !viewConflict) {
         source.designBoxPx=match.box;
         if(source.mmPerPx) {
           width=Math.round(match.box.w*source.mmPerPx);height=Math.round(match.box.h*source.mmPerPx);
@@ -1309,6 +1548,7 @@ const PRODUCT_WORDS={tshirt:'tisort',shirt:'tisort',tisort:'tisort',sweatshirt:'
   bornoz:'bornoz',bone:'bone',esofman:'esofman',jogger:'esofman'};
 const LINE_PRODUCTS={tisort:'tisort',sweat:'sweat',sweatshirt:'sweat',hoodie:'sweat',kapusonlu:'sweat',polar:'sweat',tam_fermuar:'sweat',sort:'sort',esofman:'esofman'};
 const named=(text,table)=>[...new Set(textWords(text).map(w=>table[w]).filter(Boolean))];
+const colorMismatch=color=>`Satır rengi (${String(color).trim()}) görseldeki ürün rengiyle uyuşmuyor`;
 // Garment colour family from its dominant RGB; null where no family is clear.
 function garmentColor([r,g,b]) {
   const max=Math.max(r,g,b),min=Math.min(r,g,b),v=max/255,s=max?(max-min)/max:0;
@@ -1390,42 +1630,73 @@ function pairedGarments(a,b) {
   if(Math.abs(a.hemWidthPx-b.hemWidthPx)>hem*.12||Math.abs(a.bodyHeightPx-b.bodyHeightPx)>height*.12)return false;
   return comparableShirts(a,b)||Math.abs(a.bodyCenterX-b.bodyCenterX)<=hem*.08;
 }
-// Extraction only: settle front/back of a pair of the same garment. Each cue
-// is independent and any disagreement leaves both views unresolved:
+// A small mark on the centre line just under the collar (a neck label, an
+// "ense" print) is only seen on a back.
+function neckMark(p,ref) {
+  const ink=contrastInk(p,ref),cx=ref.bodyCenterX??(ref.box.x+ref.box.w/2);
+  return components(ink,p.width,p.height,3).some(c=>{
+    const o=(c.box.x+c.box.w/2-cx)/ref.hemWidthPx,y=(c.box.y-ref.shoulderY)/ref.bodyHeightPx;
+    return Math.abs(o)<.05&&y>=-.06&&y<=.05&&c.box.w<ref.hemWidthPx*.1&&c.box.h<ref.bodyHeightPx*.03;
+  });
+}
+// Settle front/back of a pair of the same garment, shared by extraction and
+// measurement (Patron, 21.11.2026: the system decides, the user is not asked).
+// Every cue below is a vote for the front; agreeing votes decide, any
+// disagreement leaves both views open with the conflicting cues named:
+// - hood lining/cords or a deeper front neckline (productViewCues),
 // - a printed label next to a garment ("ÖN", "ARKA"),
 // - on dark cloth, the shadowed neck/hood opening or a mirrored hood lining,
-// - a chest-side print, which only a front carries; the other garment then
-//   has a print on the centre line or none in the print band.
-function pairViews(p,refs,cues,matches,labels=[]) {
-  // A front already found by hood evidence must agree with these cues.
-  const known=cues.findIndex(c=>c.view==='on');
-  // Hood evidence naming both garments a front contradicts itself; the cues
-  // below must then settle the pair on their own.
-  if(refs.length!==2||!pairedGarments(...refs)||cues.some(c=>!['on','teyit'].includes(c.view)))return;
-  const hoodSaysBoth=cues.every(c=>c.view==='on');
+// - a chest-side print, which only a front carries,
+// - a small mark under the back collar (neck label or ense print),
+// - the linked design found on one garment only: its application position
+//   names that garment's side (chest → front, back → back).
+function pairViews(p,refs,cues,matches,labels=[],linkedFront=null) {
+  if(refs.length!==2||!pairedGarments(...refs))return;
   const votes=[];
-  if(labels.includes('celiski'))return;
+  const front=cues.findIndex(c=>c.view==='on'),back=cues.findIndex(c=>c.view==='arka');
+  // Hood evidence naming both garments a front contradicts itself: no vote.
+  if(!cues.every(c=>c.view==='on')&&(front>=0||back>=0))
+    votes.push({front:front>=0?front:1-back,cue:cues.some(c=>c.neckDepth!=null)?'yaka oyuğu':'kapüşon açıklığı/kordon'});
+  if(labels.includes('celiski')){for(const c of cues){c.view='teyit';c.viewConflict='ÖN/ARKA etiketi çelişkili';}return;}
   const labelled=labels.findIndex(l=>l==='on'),labelledBack=labels.findIndex(l=>l==='arka');
   if(labelled>=0||labelledBack>=0) {
     if(labelled>=0&&labelledBack>=0&&labelled===labelledBack)return;
-    votes.push(labelled>=0?labelled:1-labelledBack);
+    votes.push({front:labelled>=0?labelled:1-labelledBack,cue:'ÖN/ARKA etiketi'});
   }
   const shade=refs.map(ref=>openingShade(p,ref));
   if(shade.every(s=>s!=null)) {
     const lining=refs.map(ref=>liningPair(p,ref));
-    const front=refs.map((_,i)=>shade[i]>=.15||lining[i]),back=refs.map((_,i)=>shade[i]<=.03&&!lining[i]);
-    const index=front.findIndex(Boolean);
-    // Dark cloth always shows a front opening; without one, neither is a front.
-    if(index<0||front[1-index]||!back[1-index])return;
-    votes.push(index);
+    const shaded=refs.map((_,i)=>shade[i]>=.15||lining[i]),plain=refs.map((_,i)=>shade[i]<=.03&&!lining[i]);
+    const index=shaded.findIndex(Boolean);
+    if(index>=0&&!shaded[1-index]&&plain[1-index])votes.push({front:index,cue:'yaka içi gölgesi'});
+    // Two closed hood backs: the hoods themselves say neither is a front.
+    if(cues.every((c,i)=>c.hooded&&plain[i]&&!c.lining&&!c.cords)) {
+      for(const c of cues){c.view='teyit';c.viewConflict='iki kapüşon da kapalı arka yüz gösteriyor';}
+      return;
+    }
   }
-  if(matches.every(m=>!m.ambiguous)) {
-    const offset=refs.map((ref,i)=>matches[i].box?Math.abs(matches[i].box.x+matches[i].box.w/2-ref.bodyCenterX)/ref.hemWidthPx:null);
-    const front=offset.findIndex(o=>o!=null&&o>=.15);
-    if(front>=0&&(offset[1-front]==null||offset[1-front]<.08))votes.push(front);
+  {
+    // A lone chest-side logo is a front's. The other garment must not carry
+    // one too; none, a centred print or a composition of several prints (a
+    // back, G47b TAYF) is fine.
+    const lone=refs.map((ref,i)=>{
+      const all=[matches[i],...(matches[i].others||[])].filter(m=>m.box);
+      return !matches[i].ambiguous&&all.length===1&&Math.abs(all[0].box.x+all[0].box.w/2-ref.bodyCenterX)/ref.hemWidthPx>=.15;
+    });
+    const side=lone.indexOf(true);
+    const centred=k=>!matches[k].box||matches[k].ambiguous||Math.abs(matches[k].box.x+matches[k].box.w/2-refs[k].bodyCenterX)/refs[k].hemWidthPx<.08;
+    if(side>=0&&!lone[1-side]&&centred(1-side))votes.push({front:side,cue:'yan göğüs baskısı'});
   }
-  if(!votes.length||votes.some(v=>v!==votes[0])||(!hoodSaysBoth&&known>=0&&votes[0]!==known))return;
-  cues[votes[0]].view='on';cues[1-votes[0]].view='arka';
+  const marks=refs.map(ref=>neckMark(p,ref));
+  if(marks[0]!==marks[1])votes.push({front:marks.indexOf(false),cue:'ense etiketi/baskısı'});
+  if(linkedFront!=null)votes.push({front:linkedFront,cue:'bağlı desenin konumu'});
+  for(const c of cues)c.pairVotes=votes.map(v=>`${v.cue}: ${v.front+1}. ürün ön`);
+  if(!votes.length)return;
+  if(votes.some(v=>v.front!==votes[0].front)) {
+    for(const c of cues){c.view='teyit';c.viewConflict=votes.map(v=>`${v.cue} ${v.front+1}. ürünü`).join(', ')+' ön gösteriyor';}
+    return;
+  }
+  cues[votes[0].front].view='on';cues[1-votes[0].front].view='arka';
 }
 // Re-reading a page at a higher resolution keeps the garment found on the
 // scan raster: its mask is enlarged and its measurements scaled.
@@ -1505,19 +1776,22 @@ async function extractArtwork({image,position,product:productKey,color}) {
   const lineColor=named(color,COLOR_WORDS),wantColor=lineColor.length===1?lineColor[0]:null;
   const wantProduct=LINE_PRODUCTS[String(productKey??'').trim().toLowerCase()]??null;
   let hasProduct=false, ambiguousView=false, wrongSide=false;
-  const sheets=[];
+  const scanned=[],notes=[];
   for(const [i,p] of pages.entries()) {
-    // A catalogue page titled with another product or colour is not this line's garment.
-    const title=texts?.[i]?.text,products=named(title,PRODUCT_WORDS),colors=named(title,COLOR_WORDS);
+    // A catalogue page titled with another product is not this line's garment.
+    const title=texts?.[i]?.text,products=named(title,PRODUCT_WORDS),titleColors=named(title,COLOR_WORDS);
     if(wantProduct&&products.length===1&&products[0]!==wantProduct)continue;
-    if(wantColor&&colors.length===1&&colors[0]!==wantColor)continue;
     const refs=silhouettes(p,productKey);
     hasProduct||=refs.length>0;
-    sheets.push({i,p,refs,colors:refs.map(ref=>garmentColor(dominant(p,Array.from(ref.mask.keys()).filter(k=>ref.mask[k])))),captions:captionViews(texts?.[i]?.items,refs)});
+    scanned.push({i,p,refs,titleColor:titleColors.length===1?titleColors[0]:null,colors:refs.map(ref=>garmentColor(dominant(p,Array.from(ref.mask.keys()).filter(k=>ref.mask[k])))),captions:captionViews(texts?.[i]?.items,refs)});
   }
-  // Colour variants repeat one design on garments of different colours. With
-  // the line colour known, only garments of that colour are considered, when
-  // the sheet shows any.
+  // Colour variants repeat one design on garments of different colours. The
+  // line colour picks among them only when the sheet shows several colours
+  // and that one among them; a colour no garment or page title shows leaves
+  // every garment in play, with a note (the fabric may be the wrong one).
+  const seen=new Set(scanned.flatMap(sheet=>[...sheet.colors,sheet.titleColor].filter(Boolean)));
+  if(wantColor&&seen.size&&!seen.has(wantColor))notes.push(colorMismatch(color));
+  const sheets=wantColor&&seen.has(wantColor)&&seen.size>1?scanned.filter(sheet=>!sheet.titleColor||sheet.titleColor===wantColor):scanned;
   const byColor=wantColor&&sheets.some(sheet=>sheet.colors.includes(wantColor));
   for(const {i,p,refs:all,colors,captions} of sheets) {
     const kept=all.map((_,k)=>!byColor||colors[k]===wantColor);
@@ -1754,7 +2028,7 @@ async function extractArtwork({image,position,product:productKey,color}) {
     // The source has no more pixels for a small print: thin strokes and small
     // lettering may be missing, so its outline and proportions need a look.
     const warnings=Math.min(box.w,box.h)<SMALL_PRINT_PX?[`Küçük baskı ${box.w}×${box.h} pikselden ayrıldı; ince uçlar ve küçük yazılar eksik olabilir, en-boy oranını kaynakla teyit edin.`]:[];
-    return {buffer:canvas.toBuffer('image/png'),placement:{page,view,rasterWidth:w,rasterHeight:h,designBoxPx:{...box,x:x+box.x,y:y+box.y}},warnings};
+    return {buffer:canvas.toBuffer('image/png'),placement:{page,view,rasterWidth:w,rasterHeight:h,designBoxPx:{...box,x:x+box.x,y:y+box.y}},warnings,notes};
   } finally {canvas.width=canvas.height=0;}
 }
 module.exports={autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette,silhouettes,extractArtwork};
