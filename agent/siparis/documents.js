@@ -12,6 +12,9 @@ const { reasonTexts } = require('./vectorReasons');
 const childProcess = require('node:child_process');
 const { buildWorkshopMessage, createWorkshopHandler } = require('./workshop');
 const { registerHandler } = require('./outbox');
+const RECIPE_PRODUCTS = require('../operations/recipes.json').products;
+// Forms print the recipe label ("Tişört"), not the product key ("tisort"); an unknown key prints as stored.
+const productLabel = key => RECIPE_PRODUCTS[key]?.label || key;
 const UPLOAD_KINDS = ['urun_gorsel','desen_kaynak','desen_kaynak_vektor'];
 const POSITIONS = ['gogus','sol_gogus','sag_gogus','kol','sol_kol','sag_kol','sirt','ense','kapusan','kapuson','bacak','sol_bacak','sag_bacak'];
 const SOURCE_KINDS = ['desen_kaynak','desen_kaynak_vektor'];
@@ -532,7 +535,7 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPendi
       const sizes=JSON.parse(l.sizes_json);
       if (!omitQuantities && Object.keys(sizes).length && Object.values(sizes).reduce((a,b)=>a+b,0)!==l.quantity) fail(`Satır ${l.id}: PDF için adetlere eşit beden dağılımı gerekli`,409);
       const item=l.fabric_item_id ? db.prepare('SELECT name,color_name,color_no FROM stock_items WHERE id=?').get(l.fabric_item_id) : null;
-      return {id:lineId,product:l.product_key,color:l.color_name ? require('./pdf').stockColorLabel(l.color_name,item) : 'Renk belirtilmedi',fabric:item ? item.name : 'Kumaş belirtilmedi',sizes,quantity:l.quantity,images,...(l.numune?{numune:true}:{}),...(l.note?{note:l.note}:{})};
+      return {id:lineId,product:productLabel(l.product_key),color:l.color_name ? require('./pdf').stockColorLabel(l.color_name,item) : 'Renk belirtilmedi',fabric:item ? item.name : 'Kumaş belirtilmedi',sizes,quantity:l.quantity,images,...(l.numune?{numune:true}:{}),...(l.note?{note:l.note}:{})};
     }),
     applications,
   };

@@ -154,3 +154,15 @@ test('G53-3 the same PDF behaves the same as desen_kaynak and as desen_kaynak_ve
   }
   assert.deepEqual(byApp[apps.desen_kaynak].reasons, byApp[apps.desen_kaynak_vektor].reasons);
 });
+
+test('G53-4 all three forms print the recipe label of the product, not its key', async t => {
+  const f = await fixture(t), o = await f.order(), id = o.version.id, lineId = o.version.lines[0].id;
+  const source = ok(await f.upload(id), 201);
+  ok(await f.measure(lineId, { desenDosyaId: source.id }), 201);
+  const files = ok(await f.post(`/surumler/${id}/hazirla`));
+  for (const kind of ['onay_formu', 'uretim_formu', 'baski_formu']) {
+    const text = (await pdfText(await formOf(f, files, kind))).join('\n');
+    assert.match(text, /Tişört/, kind);
+    assert.doesNotMatch(text, /\btisort\b/, kind);
+  }
+});
