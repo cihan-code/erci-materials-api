@@ -1341,7 +1341,40 @@ async function autoMeasureLeg({image,design,flat,product,position}) {
   return {width_mm:width,height_mm:height,measure_source:source,needs_confirmation:reasons.length>0,reasons,reason:reasons.join(' ')};
 }
 
-async function autoMeasure({image,design,flat,product,position,color,viewHint=null,viewDefault=false}) {
+// G61: the eye says where the whole print is; the edges come from the ink inside
+// that box. Pixels off the garment colour within the box (grown by 4%) bound the
+// print; a fit that keeps less than 60% or grows past 110% of the eye's box on
+// either axis is not trusted and the eye's box stays.
+const GOZ_INK=60, GOZ_PAD=.04;
+function fitInk(p,ref,box) {
+  const garment=dominant(p,Array.from(ref.mask.keys()).filter(i=>ref.mask[i]));
+  const px=Math.max(2,box.w*GOZ_PAD),py=Math.max(2,box.h*GOZ_PAD);
+  const x0=Math.max(0,Math.floor(box.x-px)),y0=Math.max(0,Math.floor(box.y-py)),x1=Math.min(p.width,Math.ceil(box.x+box.w+px)),y1=Math.min(p.height,Math.ceil(box.y+box.h+py));
+  let minX=Infinity,minY=Infinity,maxX=-1,maxY=-1,n=0;
+  for(let y=y0;y<y1;y++)for(let x=x0;x<x1;x++) {
+    const i=(y*p.width+x)*4;
+    if(p.data[i+3]<64||distance([p.data[i],p.data[i+1],p.data[i+2]],garment)<=GOZ_INK)continue;
+    n++;if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;
+  }
+  const fitted=n?{x:minX,y:minY,w:maxX-minX+1,h:maxY-minY+1}:null;
+  const kept=fitted&&[fitted.w/box.w,fitted.h/box.h].every(k=>k>=.6&&k<=1.1)&&n>=box.w*box.h*.005;
+  return kept?{...fitted,fit:'murekkep'}:{x:box.x,y:box.y,w:box.w,h:box.h,fit:'goz'};
+}
+// goz: {print:{box (0..1 of the picture)}, product:{box}|null} chosen by the parent for this print.
+function gozMeasure(p,refs,goz,measurements,scalePair,calK) {
+  const px=b=>({x:b.x*p.width,y:b.y*p.height,w:b.w*p.width,h:b.h*p.height});
+  const box=px(goz.print.box),product=goz.product?.box?px(goz.product.box):null;
+  const centre={x:box.x+box.w/2,y:box.y+box.h/2},inside=r=>centre.x>=r.box.x&&centre.x<=r.box.x+r.box.w&&centre.y>=r.box.y&&centre.y<=r.box.y+r.box.h;
+  const ranked=refs.slice().sort((a,b)=>(product?overlapFraction(b.box,product)-overlapFraction(a.box,product):0)||(inside(b)-inside(a)));
+  const ref=ranked.find(r=>product?overlapFraction(r.box,product)>.3:inside(r));
+  const out={gozBoxPx:box,rasterWidth:p.width,rasterHeight:p.height,confidence:goz.print.confidence??null};
+  if(!ref)return {...out,boxPx:box,reason:'Gözün gösterdiği ürün piksel maskesinde bulunamadı; ölçek için ürün eni bilinmiyor.'};
+  const fitted=fitInk(p,ref,box),scale=scaleFor(ref,measurements,scalePair,p,calK);
+  out.boxPx=fitted;out.productIndex=refs.indexOf(ref);
+  if(!(scale.mean>0))return {...out,reason:'Göz kutusu var, ama ürünün L ölçeği doğrulanamadı; ölçek yok.'};
+  return {...out,mmPerPx:scale.mean,width_mm:Math.round(fitted.w*scale.mean),height_mm:Math.round(fitted.h*scale.mean)};
+}
+async function autoMeasure({image,design,flat,product,position,color,viewHint=null,viewDefault=false,goz=null}) {
   if(['kol','sol_kol','sag_kol'].includes(position))return autoMeasureSleeve({image,design,flat,product,position});
   if(LEGS.includes(position))return autoMeasureLeg({image,design,flat,product,position});
   const scalePair=scalePairFor(flat,product),pairLabel=scalePair==='boy_gogus'?'boy/göğüs':'boy/etek',horizontalLabel=scalePair==='boy_gogus'?'göğüs':'etek';
@@ -1362,7 +1395,7 @@ async function autoMeasure({image,design,flat,product,position,color,viewHint=nu
     const topEdge=pdf?PDF_THIN_MAX_EDGE:Math.min(MAX_EDGE,Math.max(...Object.values(imageSize(image.buffer,image.mime))));
     const pages=await rasterPages(image,scanEdge),candidates=[],allViews=[],pageEdges=pages.map(()=>scanEdge);
     const tallBack=position==='sirt'&&!design,upper=['gogus','sol_gogus','sag_gogus','sirt'];
-    let designs=[];
+    let designs=[];const pageRefs=[];
     if(design)try {designs=await rasterPages(design,1000,null,{transparent:true});}catch(e){source.designReadError=e.message;}
     const designContents=designs.map(p=>designContent(p,true));
     const designRatios=designContents.flatMap(({box},i)=>box?[{page:i+1,ratio:box.w/box.h}]:[]),ratios=contentRatios(designContents);
@@ -1391,6 +1424,7 @@ async function autoMeasure({image,design,flat,product,position,color,viewHint=nu
         if(i===0)applyViewHint(refs,cues,viewHint);
         if(viewDefault)applyViewHint(refs,cues,defaultViewHint(refs));
       }
+      pageRefs[i]=refs;
       for(let k=0;k<refs.length;k++) {
         const ref=refs[k],cue=cues[k],scale=scaleFor(ref,measurements,scalePair,pages[i],calK);
         allViews.push({page:i+1,index:k,view:cue.view,garmentColor:garmentColor(dominant(pages[i],Array.from(ref.mask.keys()).filter(j=>ref.mask[j]))),hooded:cue.hooded,viewEvidence:{lining:cue.lining,cords:cue.cords,...(cue.neckDepth!==undefined?{neckDepth:cue.neckDepth}:{}),...(cue.pairVotes?{pairVotes:cue.pairVotes}:{}),...(cue.viewConflict?{viewConflict:cue.viewConflict}:{}),...(cue.viewSource?{viewSource:cue.viewSource}:{}),...(cue.designCarrier!==undefined?{designCarrier:cue.designCarrier}:{})},maskMethod:ref.maskMethod,...(ref.splitMethod?{splitMethod:ref.splitMethod}:{}),productBoxPx:ref.box,shoulderY:ref.shoulderY,hemY:ref.hemY,hemWidthPx:ref.hemWidthPx,chestLinePx:ref.chestLine??null,bodyHeightPx:ref.bodyHeightPx,...scale});
@@ -1411,6 +1445,8 @@ async function autoMeasure({image,design,flat,product,position,color,viewHint=nu
     }
     source.views=allViews;
     if(designRatios.length)source.designContentRatio=designRatios[0].ratio;
+    if(goz?.print?.box&&pages[0]&&pageRefs[0])source.goz=gozMeasure(pages[0],pageRefs[0],goz,measurements,scalePair,calK);
+    else if(goz?.baskiYok||goz?.urunYok||goz?.reason)source.goz={...(goz.baskiYok?{baskiYok:goz.baskiYok}:{}),...(goz.urunYok?{urunYok:goz.urunYok}:{}),...(goz.reason?{reason:goz.reason}:{})};
     // The line colour does not pick a garment here; a colour no garment shows
     // is worth knowing (the fabric may be wrong) but does not block the size.
     const lineColor=named(color,COLOR_WORDS);
@@ -1824,7 +1860,7 @@ function applyViewHint(refs,cues,hint) {
   }
   if(hint.source!=='baska_baski') {
     cues[front].view='on';cues[1-front].view='arka';
-    for(const c of cues){delete c.viewConflict;c.viewSource=hint.source;c.pairVotes=[...(c.pairVotes||[]),`${hint.source==='kullanici'?'kullanıcı teyidi':'ölçümün görünümü'}: ${label}`];}
+    for(const c of cues){delete c.viewConflict;c.viewSource=hint.source;c.pairVotes=[...(c.pairVotes||[]),`${hint.source==='kullanici'?'kullanıcı teyidi':hint.source==='goz'?'göz':'ölçümün görünümü'}: ${label}`];}
     return;
   }
   const decided=cues.findIndex(c=>c.view==='on');
@@ -2169,4 +2205,4 @@ async function extractArtwork({image,position,product:productKey,color,viewHint=
     return {buffer:canvas.toBuffer('image/png'),placement:{page,view,rasterWidth:w,rasterHeight:h,designBoxPx:{...box,x:x+box.x,y:y+box.y}},warnings,notes};
   } finally {canvas.width=canvas.height=0;}
 }
-module.exports={defaultViewHint,paleGroundReason,applyViewHint,autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette,silhouettes,extractArtwork};
+module.exports={defaultViewHint,fitInk,paleGroundReason,applyViewHint,autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette,silhouettes,extractArtwork};

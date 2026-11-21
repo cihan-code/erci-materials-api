@@ -12,6 +12,7 @@ const { reasonTexts } = require('./vectorReasons');
 const childProcess = require('node:child_process');
 const { buildWorkshopMessage, createWorkshopHandler } = require('./workshop');
 const { registerHandler } = require('./outbox');
+const goz = require('./goz');
 const { decide, formNote } = require('./olcuKarar');
 const positionStandards = require('./konumStandartlari');
 const RECIPE_PRODUCTS = require('../operations/recipes.json').products;
@@ -86,6 +87,7 @@ function init(db) {
   `);
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS document_file_path ON files(version_id,path)');
   flats.init(db);
+  goz.init(db);
 }
 function fileMetaTable(name,ifMissing=false) {
   return `CREATE TABLE ${ifMissing?'IF NOT EXISTS ':''}${name} (
@@ -787,8 +789,38 @@ function autoInputs(db,v,line,app) {
   const flatNote=!flat && candidates.length>1 ? 'Bu ürün için birden çok kalıp var; kalıbı seçin' : !candidates.length || flat ? flats.missingLNote(db,line,flat,library) : null;
   // The line colour only adds an information note to the measurement.
   const sleeve=SLEEVES.includes(app.position);
-  const viewHint=sleeve ? null : imageViewHint(db,v,image,app.id);
-  return {image,design,flat,product:line.product_key,position:app.position,...(line.color_name?{color:line.color_name}:{}),...(viewHint?{viewHint}:{}),...(sleeve?{}:{viewDefault:true}),...(flatNote?{flatNote}:{}),...(design && linked==null?{linkDesign:true}:{})};
+  let viewHint=sleeve ? null : imageViewHint(db,v,image,app.id),gozConflict=null;
+  // G61: the eye's front/back answer is used unless the user answered for this picture.
+  const eye=sleeve ? null : gozFor(db,v,line,app,image);
+  if(eye?.front) {
+    if(viewHint?.source==='kullanici') {
+      if(viewHint.front!==eye.front)gozConflict=`Göz önü "${eye.front}" tarafta gördü, kullanıcı cevabı "${viewHint.front}"; kullanıcı cevabı kullanıldı.`;
+    } else viewHint={front:eye.front,source:'goz'};
+  }
+  const gozInput=eye && (eye.print||eye.baskiYok||eye.urunYok||eye.reason) ? {goz:{...(eye.print?{print:eye.print,product:eye.product}:{}),...(eye.baskiYok?{baskiYok:eye.baskiYok}:{}),...(eye.urunYok?{urunYok:eye.urunYok}:{}),...(eye.reason?{reason:eye.reason}:{})}} : {};
+  return {image,design,flat,product:line.product_key,position:app.position,...(line.color_name?{color:line.color_name}:{}),...(viewHint?{viewHint}:{}),...(sleeve?{}:{viewDefault:true}),...gozInput,...(gozConflict?{gozConflict}:{}),...(flatNote?{flatNote}:{}),...(design && linked==null?{linkDesign:true}:{})};
+}
+// G61: one eye request per picture and order line (all its positions at once).
+function gozRequest(line,image) {
+  return goz.request({sha256:image.sha256,product:line.product_key,color:line.color_name,positions:line.applications.map(a=>a.position)});
+}
+// The cached eye answer for this print (never calls the model; ensureGoz does).
+function gozFor(db,v,line,app,image) {
+  if(!goz.provider() || !image)return null;
+  const req=gozRequest(line,image),answer=goz.cached(db,req);
+  if(!answer) {
+    const failed=goz.lastFailure(req);
+    return failed ? {reason:failed} : null;
+  }
+  return goz.forPrint(answer,app.position,line.applications.filter(a=>a.position===app.position).length);
+}
+async function ensureGoz(db,dataDir,line,image,signal) {
+  if(!goz.provider() || !image)return null;
+  return goz.ensure(db,gozRequest(line,image),async()=> {
+    const source=await vectorInput(dataDir,image);
+    const shot=await generateInChild({type:'gozGorsel',input:{buffer:source.buffer,mime:source.mime,edge:goz.EDGE}},signal,{timeoutMs:30000});
+    return {buffer:Buffer.from(shot.buffer),mime:shot.mime,width:shot.width,height:shot.height};
+  },{signal});
 }
 function autoFingerprint({desenDosyaId,...app},input) {return JSON.stringify({app,input});}
 // autoMeasure states these two when no single L pattern was passed; a known ambiguity replaces them.
@@ -843,7 +875,10 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
       const app=db.prepare('SELECT * FROM applications WHERE id=?').get(original.id);
       if(!app || (!regenerate && manuallyMeasured(app)))return;
       // A fresh snapshot: a print measured just before may have settled this picture's views.
-      const fresh=draft(db,versionId),input=autoInputs(db,fresh,fresh.lines.find(l=>l.id===line.id),app);
+      let fresh=draft(db,versionId);
+      const freshLine=fresh.lines.find(l=>l.id===line.id),eyeImage=productImageFor(fresh,freshLine,app).image;
+      if(eyeImage && !SLEEVES.includes(app.position) && await ensureGoz(db,dataDir,freshLine,eyeImage,signal))fresh=draft(db,versionId);
+      const input=autoInputs(db,fresh,fresh.lines.find(l=>l.id===line.id),app);
       if(input.gap) {
         tx(db,()=> {
           draft(db,versionId);unlocked(db,versionId);
@@ -863,7 +898,7 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
       try {
         const image={...input.image,...await vectorInput(dataDir,input.image)};
         const design=input.design?{...input.design,...await vectorInput(dataDir,input.design)}:null;
-        const {flatNote,linkDesign,...job}=input;
+        const {flatNote,linkDesign,gozConflict,...job}=input;
         const calibration=flatCalibrationInput(input.flat,['bacak','sol_bacak','sag_bacak'].includes(input.position));
         result=await generateInChild({type:'autoMeasure',input:{...job,image,design,flat:calibration.flat}},signal,{timeoutMs:MEASURE_TIMEOUT_MS});
         if(calibration.key && result?.measure_source && Object.hasOwn(result.measure_source,'kalibrasyon'))
@@ -874,7 +909,7 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
           measure_source:{method:'otomatik',flatId:input.flat?.id??null,flatAd:input.flat?.ad??null,refBeden:input.flat?.refBeden??null,refCm:input.flat?.refLengthCm??null,chestPx:null,designBoxPx:null,scale:null,confidence:0,gorselFileId:input.image.id,desenFileId:(input.design?.id??null)}};
       }
       result=decide(explain(result,input),{position:input.position,product:input.product,standards:positionStandards.load(dataDir),
-        designRatio:input.design ? result.measure_source?.designContentRatio ?? null : null});
+        designRatio:input.design ? result.measure_source?.designContentRatio ?? null : null,gozConflict:input.gozConflict});
       signal.throwIfAborted();
       tx(db,()=> {
         const current=draft(db,versionId);unlocked(db,versionId);
@@ -1339,7 +1374,13 @@ if (require.main===module && process.argv[2]==='--vector-worker') {
   process.once('message',async job=> {
     try {
       let result;
-      if(job.type==='raster') {
+      if(job.type==='gozGorsel') {
+        const [p]=await require('./autoMeasure').rasterPages(job.input,job.input.edge,job.input.mime==='application/pdf'?[1]:null);
+        const canvasLib=require('@napi-rs/canvas'),canvas=canvasLib.createCanvas(p.width,p.height);
+        canvas.getContext('2d').putImageData(p,0,0);
+        result={buffer:canvas.toBuffer('image/jpeg',90),mime:'image/jpeg',width:p.width,height:p.height};
+      }
+      else if(job.type==='raster') {
         const canvasLib=require('@napi-rs/canvas'),image=await canvasLib.loadImage(job.input.buffer);
         const scale=Math.min(1,job.input.edge/Math.max(image.width,image.height));
         const canvas=canvasLib.createCanvas(Math.max(1,Math.round(image.width*scale)),Math.max(1,Math.round(image.height*scale)));

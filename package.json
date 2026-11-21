@@ -22,6 +22,7 @@
     "siparis:ornek-pdf": "node agent/siparis/pdf/example.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "1.6.0",
     "@napi-rs/canvas": "^1.1.1",
     "@neplex/vectorizer": "^0.1.0",
     "better-sqlite3": "^12.11.1",
