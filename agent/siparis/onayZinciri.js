@@ -10,7 +10,8 @@ const { snapshot } = require('./orders');
 const { fabricName } = require('./kartela');
 const { normArea } = require('../productionForm');
 // G5's own record lookup, so its later cost update lands on the very record the chain opened.
-const { resolveJob } = require('./costTransfer');
+const { resolveJob, linePrice } = require('./costTransfer');
+const sizes = require('./boyutEsleme');
 const recipeReader = require('../operations/recipes');
 const { URETIM_STATUSES } = require('../lib/enums');
 const { nextId, istanbulDay } = require('../lib/util');
@@ -100,14 +101,18 @@ function fabricOf(db, line) {
   }
   return line.fabric_type && !line.fabric_type.startsWith('legacy:') ? fabricName(line.fabric_type) : null;
 }
-// Measurements the team typed or the measurer settled are exact; anything else (no source, a pending check, or a
-// method this module does not know, e.g. a standard/approximate size) is marked "ölçü yaklaşık".
+// "Ölçü yaklaşık": a missing measure or a pending check always; else the measurer's durum if given, else any method
+// other than a typed or settled measure. Change the two lists below to change the rule.
+// The measurer's own verdict wins when it gives one (G61: measure_source.durum); without it, the method rule above.
+const APPROX_DURUM = ['yaklasik', 'standart'];
+const EXACT_METHODS = ['elle', 'otomatik'];
 function approximate(app) {
   if (app.width_mm == null || app.height_mm == null) return true;
   if (app.needs_confirmation) return true;
-  let method = null;
-  try { method = JSON.parse(app.measure_source || 'null')?.method ?? null; } catch { method = null; }
-  return !['elle', 'otomatik'].includes(method);
+  let source = null;
+  try { source = JSON.parse(app.measure_source || 'null'); } catch { source = null; }
+  if (source?.durum != null) return APPROX_DURUM.includes(source.durum);
+  return !EXACT_METHODS.includes(source?.method ?? null);
 }
 const SAME = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 
@@ -138,12 +143,11 @@ function orderFacts(db, v, { recipes = recipeReader.load(), customers = [] } = {
   const warnings = [];
   let unitPrice;
   const g5 = hasTable(db, 'cost_transfers') ? db.prepare('SELECT unit_price FROM cost_transfers WHERE version_id=?').get(v.id)?.unit_price : null;
+  // Same rule G5 uses for its price, so both write the same number.
+  const fromLines = linePrice(lines);
   if (g5 != null) unitPrice = g5;
-  else if (counted.length && counted.every(l => l.unit_price_kurus != null)) {
-    const prices = new Set(counted.map(l => l.unit_price_kurus));
-    if (prices.size === 1) unitPrice = [...prices][0] / 100;
-    else warnings.push('Satırların birim fiyatları farklı; İşler tek birim fiyat tutar, fiyat boş bırakıldı');
-  } else if (counted.some(l => l.unit_price_kurus != null)) warnings.push('Birim fiyatı yalnız bazı satırlarda var; İşler fiyatı boş bırakıldı');
+  else if (fromLines.unitPrice != null) unitPrice = fromLines.unitPrice;
+  else if (fromLines.reason) warnings.push(fromLines.reason);
   const productLabel = products.map(label).join(', ');
   const title = colors.length ? `${productLabel} (${colors.join(', ')})` : productLabel;
   const name = (v.customer_name || '').trim();
@@ -252,7 +256,9 @@ function plan(db, versionId, { panel, recipes } = {}) {
         note: `[Sipariş ${v.order_no} v${v.version_no}] onayda otomatik açıldı${approxNote}`,
         ...Object.fromEntries(Object.entries(desiredCard).filter(([, val]) => val !== undefined)), kaynak: SOURCE }, last: m.nextLast };
   }
-  return { ...base, orderId: v.order_id, isler, takip, uyarilar: warnings, jobLast: jobMerge.nextLast };
+  // Dry-run view only: the size G5 will take from the size table for each application, and from which measure and rule.
+  const boyutlar = sizes.derive(sizes.rules(db), snapshot(db, v.id).lines, data.costTemplates).apps;
+  return { ...base, orderId: v.order_id, boyutlar, isler, takip, uyarilar: warnings, jobLast: jobMerge.nextLast };
 }
 
 function checkDataDir(store, dataDir) {
@@ -324,7 +330,7 @@ function dryRun(db, versionId, { panel, recipes } = {}) {
   if (p.skip) return { kuru: true, surumId: p.versionId, siparisNo: p.orderNo, atlandi: p.reason };
   return { kuru: true, surumId: p.versionId, siparisNo: p.orderNo, surum: p.versionNo, isler: p.isler,
     takip: { islem: p.takip.islem, id: p.takip.id, alanlar: p.takip.alanlar || {}, korunan: p.takip.korunan || {}, ...(p.takip.neden ? { neden: p.takip.neden } : {}) },
-    uyarilar: p.uyarilar };
+    boyutlar: p.boyutlar, uyarilar: p.uyarilar };
 }
 
 // Called once by routes.js. With the flag off the marker is cleared and nothing is queued or registered.
@@ -339,4 +345,4 @@ function mount(db, { dataDir, recipes, worker = true, intervalMs = 1000, onError
   return () => { clearInterval(timer); unregister(); };
 }
 
-module.exports = { KIND, STALE_REF, DELETED_REF, ensureSchema, setEnabled, enqueue, orderFacts, plan, run, dryRun, mount, enabled };
+module.exports = { approximate, APPROX_DURUM, KIND, STALE_REF, DELETED_REF, ensureSchema, setEnabled, enqueue, orderFacts, plan, run, dryRun, mount, enabled };
