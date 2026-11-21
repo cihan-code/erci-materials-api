@@ -140,7 +140,7 @@ test('özet ucu yalnız beyaz listedeki alanları döner; fiyat, stok, iç not, 
   assert.deepEqual(Object.keys(u).sort(), ['adet', 'ad', 'bedenler', 'gorseller', 'kumas', 'numune', 'renk', 'uygulamalar'].sort());
   assert.deepEqual(Object.keys(u.uygulamalar[0]).sort(), ['boyMm', 'enMm', 'konum', 'olcu', 'tur']);
   assert.deepEqual(u.bedenler, { M: 2, L: 2 });
-  assert.equal(u.uygulamalar[0].olcu, 'standart');
+  assert.equal(u.uygulamalar[0].olcu, null); // no explicit status field in measure_source: no label
   assert.equal(r.data.durum, 'bekliyor');
   const text = JSON.stringify({ ...r.data, sartlar: undefined }); // the generic terms text legitimately says "masraf/maliyet"
   for (const secret of ['IC-NOT-GIZLI', 'TEYIT-GEREKCE-GIZLI', 'GIZLI-GEREKCE', 'Örnek Yetkili', 'Örnek Ekip', 'fiyat', 'maliyet', 'price', 'cost', 'stok', 'fabric_item_id', 'password', f.dir])
@@ -261,4 +261,37 @@ test('eski veritabanındaki teyit tablosu musteri_notu türünü kabul edecek bi
   db = openDb(file); t.after(() => db.close());
   assert.equal(db.prepare('SELECT count(*) n FROM confirmations').get().n, 1);
   db.prepare("INSERT INTO confirmations(kind,ref_table,ref_id,message) VALUES('musteri_notu','order_versions',1,'x')").run();
+});
+
+test('ölçü durumu yalnız measure_source içindeki açık alandan gelir; scaleMode tahmini yok', async t => {
+  const f = await setup(t); const x = f.make();
+  const set = (id, src) => f.db.prepare('UPDATE applications SET measure_source=? WHERE id=?').run(JSON.stringify(src), id);
+  const ids = f.db.prepare('SELECT id FROM applications WHERE line_id=?').all(x.lineId).map(r => r.id);
+  set(ids[0], { scaleMode: 'geo_ortalama', scaleNote: 'iki ölçeğin ortalaması' });
+  const token = f.tokenOf(await f.mint(x.versionId));
+  assert.equal((await call(f.base, `/musteri/${token}`)).data.urunler[0].uygulamalar[0].olcu, null);
+  for (const durum of ['yaklasik', 'standart', 'otomatik']) {
+    set(ids[0], { durum });
+    assert.equal((await call(f.base, `/musteri/${token}`)).data.urunler[0].uygulamalar[0].olcu, durum);
+  }
+  set(ids[0], { durum: 'uydurma' });
+  assert.equal((await call(f.base, `/musteri/${token}`)).data.urunler[0].uygulamalar[0].olcu, null);
+});
+
+test('PANEL_ORIGIN yoksa tek köken içeren CORS_ORIGIN kullanılır; liste, * ya da boşsa 503', async t => {
+  const f = await setup(t); const x = f.make();
+  const saved = { p: process.env.PANEL_ORIGIN, c: process.env.CORS_ORIGIN };
+  t.after(() => { for (const [k, v] of [['PANEL_ORIGIN', saved.p], ['CORS_ORIGIN', saved.c]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
+  delete process.env.PANEL_ORIGIN;
+  process.env.CORS_ORIGIN = 'https://cors.example.test/';
+  const ok = await f.mint(x.versionId);
+  assert.equal(ok.status, 201); assert.match(ok.data.link, /^https:\/\/cors\.example\.test\/onay\.html\?t=/);
+  for (const bad of ['https://a.example.test,https://b.example.test', '*', '']) {
+    process.env.CORS_ORIGIN = bad;
+    const r = await f.mint(x.versionId);
+    assert.equal(r.status, 503, bad);
+    assert.match(r.data.error, bad.includes(',') ? /birden çok köken/ : /PANEL_ORIGIN/);
+  }
+  process.env.PANEL_ORIGIN = ORIGIN; // PANEL_ORIGIN still wins over a list
+  assert.equal((await f.mint(x.versionId)).status, 201);
 });

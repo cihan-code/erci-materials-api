@@ -27,9 +27,21 @@ function ensureCustomerUser(db) {
   return Number(db.prepare("INSERT INTO users(name,password_hash,role,onay_yetkisi) VALUES(?,?,'ekip',1)").run(CUSTOMER_USER, hash).lastInsertRowid);
 }
 
-function createLink(db, versionId, user, { panelOrigin = process.env.PANEL_ORIGIN, now = Date.now() } = {}) {
-  const origin = String(panelOrigin || '').replace(/\/+$/, '');
-  if (!/^https?:\/\/[^\s/]+$/.test(origin)) fail('PANEL_ORIGIN ayarlı değil; link üretilemez', 503);
+const ORIGIN_RE = /^https?:\/\/[^\s/,]+$/;
+// PANEL_ORIGIN wins; otherwise CORS_ORIGIN is used only when it names exactly one origin (never "*", never a list).
+function panelOriginFrom(env = process.env) {
+  const own = String(env.PANEL_ORIGIN ?? '').trim().replace(/\/+$/, '');
+  if (own) return ORIGIN_RE.test(own) ? { origin: own } : { error: 'PANEL_ORIGIN geçerli bir adres değil (https://alan-adi biçiminde olmalı)' };
+  const cors = String(env.CORS_ORIGIN ?? '').trim().replace(/\/+$/, '');
+  if (ORIGIN_RE.test(cors)) return { origin: cors };
+  if (cors.includes(',') || /\s/.test(cors)) return { error: 'PANEL_ORIGIN ayarlı değil ve CORS_ORIGIN birden çok köken içeriyor; PANEL_ORIGIN belirleyin' };
+  return { error: 'PANEL_ORIGIN ayarlı değil (CORS_ORIGIN da tek bir köken değil); link üretilemez' };
+}
+
+function createLink(db, versionId, user, { panelOrigin, now = Date.now() } = {}) {
+  const found = panelOrigin ? (ORIGIN_RE.test(panelOrigin) ? { origin: panelOrigin } : { error: 'Geçersiz panel adresi' }) : panelOriginFrom();
+  if (found.error) fail(found.error, 503);
+  const origin = found.origin;
   return tx(db, () => {
     const userId = typeof user === 'object' ? user.id : user;
     const v = orders.snapshot(db, versionId);
@@ -99,10 +111,12 @@ function summary(db, token, opts) {
         uygulamalar: l.applications.map(a => {
           let src = {};
           try { src = JSON.parse(a.measure_source) || {}; } catch { /* free text source */ }
-          const approx = src.scaleMode === 'geo_ortalama' && !!src.scaleNote;
           const pending = !(a.width_mm > 0 && a.height_mm > 0);
+          // Status label only from an explicit field in measure_source (G61); otherwise none is shown.
+          const flag = [src.durum, src.olcuDurumu].find(x => typeof x === 'string');
+          const label = ['otomatik', 'yaklasik', 'standart'].includes(flag) ? flag : (src.yaklasik === true ? 'yaklasik' : src.standart === true ? 'standart' : null);
           return { tur: a.kind, konum: a.position, enMm: pending ? null : a.width_mm, boyMm: pending ? null : a.height_mm,
-            olcu: pending ? 'bekliyor' : approx ? 'yaklasik' : 'standart' };
+            olcu: pending ? 'bekliyor' : label };
         }),
       };
     }),
@@ -189,4 +203,4 @@ function notesOf(db, versionId) {
   return db.prepare('SELECT id,full_name AS adSoyad,note AS metin,created_at AS tarih FROM customer_notes WHERE version_id=? ORDER BY id').all(versionId);
 }
 
-module.exports = { createLink, summary, file, approve, requestChange, notesOf, ensureCustomerUser, resolve, CUSTOMER_USER, TTL_MS };
+module.exports = { panelOriginFrom, createLink, summary, file, approve, requestChange, notesOf, ensureCustomerUser, resolve, CUSTOMER_USER, TTL_MS };

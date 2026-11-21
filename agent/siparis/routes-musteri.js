@@ -24,16 +24,16 @@ function limiter({ perTokenMax, perIpMax, windowMs, now = () => Date.now() }) {
   };
 }
 
-module.exports = function mountCustomer(router, { db, dataDir, requireUser, recipes, panelOrigin = process.env.PANEL_ORIGIN, limits = {} }) {
+module.exports = function mountCustomer(router, { db, dataDir, requireUser, recipes, panelOrigin, limits = {} }) {
   musteri.ensureCustomerUser(db);
   const allow = limiter({ perTokenMax: 30, perIpMax: 120, windowMs: 60 * 1000, ...limits });
   const wrap = fn => (req, res, next) => Promise.resolve().then(() => fn(req, res)).catch(next);
   const ctx = req => ({ ip: req.ip || req.socket?.remoteAddress || '', userAgent: req.get('user-agent') || '' });
-  const origin = () => String(panelOrigin ?? process.env.PANEL_ORIGIN ?? '').replace(/\/+$/, '');
+  const origin = () => (panelOrigin ? String(panelOrigin).replace(/\/+$/, '') : musteri.panelOriginFrom().origin || '');
 
   // Staff: mint a link. Re-requesting revokes the previous one.
   router.post('/surumler/:id/musteri-link', requireUser(), wrap((req, res) => {
-    res.status(201).json(musteri.createLink(db, Number(req.params.id), req.user, { panelOrigin: origin() }));
+    res.status(201).json(musteri.createLink(db, Number(req.params.id), req.user, panelOrigin ? { panelOrigin: origin() } : {}));
   }));
   router.get('/surumler/:id/musteri-notlari', requireUser(), wrap((req, res) => res.json(musteri.notesOf(db, Number(req.params.id)))));
 
