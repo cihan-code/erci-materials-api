@@ -15,9 +15,6 @@ const WIDTH_STEP = 5; // mm; the workshop sets widths in half centimetres
 const AGREE = .10; // eye and pixel widths within 10% confirm each other
 const RATIO_NOTE = .05, RATIO_APPROX = .10;
 const SLEEVE_VERTICAL = 2.5; // along/across of a text running down the sleeve
-// An upright box around a slanted text understates its length (G61: a script along the sleeve
-// gave 2.25 in the eye's box); set on one example, adjust with more.
-const SLEEVE_VERTICAL_BOX = 2.0;
 const SUGGESTION = 'Sistem önerisi';
 
 const pct = n => `%${Math.round(n * 1000) / 10}`.replace('.', ',');
@@ -111,7 +108,7 @@ function decide(result, ctx = {}) {
   }
 
   const along = shape?.ratio ?? (raw && positive(raw.h) ? raw.w / raw.h : null);
-  const vertical = sleeve && along >= (shape?.from === 'goz_kutusu' ? SLEEVE_VERTICAL_BOX : SLEEVE_VERTICAL);
+  const vertical = sleeve && along >= SLEEVE_VERTICAL;
   const std = ctx.standards ? standardFor(ctx.standards, ctx.product, ctx.position, { dikey: vertical }) : null;
   if (std) s.konumStandardi = std;
   const band = std && `${cm(std.min)}–${cm(std.max)} cm`;
