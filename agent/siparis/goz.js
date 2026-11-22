@@ -236,7 +236,10 @@ function forPrint(answer, ordered, sameCount) {
   if (products.size > 1) return { reason: `Göz ${position} konumunda ${products.size} farklı üründe baskı gösterdi; hangisi olduğu ayrılamadı.`, ...side };
   const box = prints.length === 1 ? prints[0].box : union(prints.map(p => p.box));
   const product = prints[0].product == null ? null : answer.urunler[prints[0].product];
-  return { print: { box, confidence: prints.length === 1 ? prints[0].confidence : 'orta' }, product: product ? { box: product.box, view: product.view } : null, ...side };
+  // Pixel proportion of the box (the answer's boxes are fractions of its picture).
+  const aspect = answer.width && answer.height ? (box.w * answer.width) / (box.h * answer.height) : null;
+  return { print: { box, confidence: prints.length === 1 ? prints[0].confidence : 'orta', ...(aspect ? { aspect } : {}) },
+    product: product ? { box: product.box, view: product.view } : null, ...side };
 }
 function setTestProvider(fn) { testProvider = fn; failures.clear(); }
 module.exports = { POSITIONS, provider, model, init, request, key, cached, ensure, lastFailure, forPrint, frontSide, normalize, setTestProvider, cliBin, SCHEMA, EDGE, REVISION, prompt };

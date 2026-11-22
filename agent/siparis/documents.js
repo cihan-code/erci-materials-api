@@ -840,14 +840,16 @@ function autoInputs(db,v,line,app) {
   const sleeve=SLEEVES.includes(app.position);
   let viewHint=sleeve ? null : imageViewHint(db,v,image,app.id),gozConflict=null;
   // G61: the eye's front/back answer is used unless the user answered for this picture.
-  const eye=sleeve ? null : gozFor(db,v,line,app,image);
+  const found=gozFor(db,v,line,app,image),eye=sleeve ? null : found;
+  // A sleeve is measured on its own path; the eye only says whether a print is there and its shape.
+  const sleeveEye=sleeve && found && (found.print?.aspect || found.baskiYok) ? {gozKol:{...(found.print?.aspect?{aspect:found.print.aspect}:{}),...(found.baskiYok?{baskiYok:found.baskiYok}:{})}} : {};
   if(eye?.front) {
     if(viewHint?.source==='kullanici') {
       if(viewHint.front!==eye.front)gozConflict=`Göz önü "${eye.front}" tarafta gördü, kullanıcı cevabı "${viewHint.front}"; kullanıcı cevabı kullanıldı.`;
     } else viewHint={front:eye.front,source:'goz'};
   }
   const gozInput=eye && (eye.print||eye.baskiYok||eye.urunYok||eye.reason) ? {goz:{...(eye.print?{print:eye.print,product:eye.product}:{}),...(eye.baskiYok?{baskiYok:eye.baskiYok}:{}),...(eye.urunYok?{urunYok:eye.urunYok}:{}),...(eye.reason?{reason:eye.reason}:{})}} : {};
-  return {image,design,flat,product:line.product_key,position:app.position,...(line.color_name?{color:line.color_name}:{}),...(viewHint?{viewHint}:{}),...(sleeve?{}:{viewDefault:true}),...gozInput,...(gozConflict?{gozConflict}:{}),...(flatNote?{flatNote}:{}),...(design && linked==null?{linkDesign:true}:{})};
+  return {image,design,flat,product:line.product_key,position:app.position,...(line.color_name?{color:line.color_name}:{}),...(viewHint?{viewHint}:{}),...(sleeve?{}:{viewDefault:true}),...gozInput,...sleeveEye,...(gozConflict?{gozConflict}:{}),...(flatNote?{flatNote}:{}),...(design && linked==null?{linkDesign:true}:{})};
 }
 // G61: one eye request per picture, product and colour; every position is asked at once.
 function gozRequest(line,image) {
@@ -926,7 +928,7 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
       // A fresh snapshot: a print measured just before may have settled this picture's views.
       let fresh=draft(db,versionId);
       const freshLine=fresh.lines.find(l=>l.id===line.id),eyeImage=productImageFor(fresh,freshLine,app).image;
-      if(eyeImage && !SLEEVES.includes(app.position) && await ensureGoz(db,dataDir,freshLine,eyeImage,signal))fresh=draft(db,versionId);
+      if(eyeImage && await ensureGoz(db,dataDir,freshLine,eyeImage,signal))fresh=draft(db,versionId);
       const input=autoInputs(db,fresh,fresh.lines.find(l=>l.id===line.id),app);
       if(input.gap) {
         tx(db,()=> {
@@ -947,7 +949,7 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
       try {
         const image={...input.image,...await vectorInput(dataDir,input.image)};
         const design=input.design?{...input.design,...await vectorInput(dataDir,input.design)}:null;
-        const {flatNote,linkDesign,gozConflict,...job}=input;
+        const {flatNote,linkDesign,gozConflict,gozKol,...job}=input;
         const calibration=flatCalibrationInput(input.flat,['bacak','sol_bacak','sag_bacak'].includes(input.position));
         result=await generateInChild({type:'autoMeasure',input:{...job,image,design,flat:withPatternPoints(db,calibration.flat)}},signal,{timeoutMs:MEASURE_TIMEOUT_MS});
         if(calibration.key && result?.measure_source && Object.hasOwn(result.measure_source,'kalibrasyon'))
@@ -958,7 +960,7 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
           measure_source:{method:'otomatik',flatId:input.flat?.id??null,flatAd:input.flat?.ad??null,refBeden:input.flat?.refBeden??null,refCm:input.flat?.refLengthCm??null,chestPx:null,designBoxPx:null,scale:null,confidence:0,gorselFileId:input.image.id,desenFileId:(input.design?.id??null)}};
       }
       result=decide(explain(result,input),{position:input.position,product:input.product,standards:positionStandards.load(dataDir),
-        designRatio:input.design ? result.measure_source?.designContentRatio ?? null : null,gozConflict:input.gozConflict});
+        designRatio:input.design ? result.measure_source?.designContentRatio ?? null : null,gozConflict:input.gozConflict,gozKol:input.gozKol});
       signal.throwIfAborted();
       tx(db,()=> {
         const current=draft(db,versionId);unlocked(db,versionId);

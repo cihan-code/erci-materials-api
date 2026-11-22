@@ -95,3 +95,15 @@ test('G61 only an unclear print presence opens a confirmation', () => {
   assert.deepEqual([d.width_mm, d.height_mm, d.needs_confirmation, d.measure_source.olcuDurumu, d.measure_source.oneri], [100, 50, false, 'yaklasik', undefined]);
   assert.ok(d.measure_source.notlar.every(n => !n.startsWith('Sistem önerisi')));
 });
+
+test('G61 a sleeve without a design is not "no print": the standard width, along-the-arm text by the eye\'s box', () => {
+  const noDesign = { width_mm: null, height_mm: null, needs_confirmation: true, measure_source: { method: 'otomatik' },
+    reasons: ['Kol konumu ön görselde ölçülemedi: Kol desen dosyası yok veya boş; en-boy oranı ve desen eşleşmesi doğrulanamadı. Kol üzerinde desen adayı bulunamadı (0 eşleşme); yerleşim teyit edilmeli.'] };
+  const badge = run(noDesign, 'sol_kol');
+  assert.deepEqual([badge.width_mm, badge.height_mm, badge.needs_confirmation, badge.measure_source.durum], [90, null, false, 'standart']);
+  // The eye saw a slanted script 4 times longer than wide: the sleeve text band (150 mm).
+  const script = run(noDesign, 'sag_kol', { gozKol: { aspect: 1 / 4 } });
+  assert.deepEqual([script.width_mm, script.height_mm, script.measure_source.konumStandardi.dikey], [150, 38, true]);
+  const missing = run(noDesign, 'sag_kol', { gozKol: { baskiYok: 'sag_kol konumunda baskı yok' } });
+  assert.deepEqual([missing.width_mm, missing.needs_confirmation], [null, true]);
+});

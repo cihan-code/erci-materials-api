@@ -29,12 +29,14 @@ function candidateSize(s) {
   return { w: b.w * k, h: b.h * k };
 }
 // Width/height ratio usable for the height when the width is the only measured edge.
-function shapeRatio(s, designRatio, sleeve) {
+function shapeRatio(s, designRatio, sleeve, eyeAspect) {
   if (!sleeve && positive(designRatio)) return { ratio: designRatio, from: 'desen' };
   const g = s?.goz?.boxPx;
   if (!sleeve && g && positive(g.w) && positive(g.h)) return { ratio: g.w / g.h, from: 'goz_kutusu' };
   if (sleeve && positive(s?.observedAlongPx) && positive(s?.observedAcrossPx))
     return { ratio: s.observedAlongPx / s.observedAcrossPx, from: 'aday_kutu' };
+  // The eye's box on a sleeve: its long side runs along the arm (a slanted script stays long).
+  if (sleeve && positive(eyeAspect)) return { ratio: Math.max(eyeAspect, 1 / eyeAspect), from: 'goz_kutusu' };
   const b = s?.candidateBoxPx;
   if (!sleeve && b && positive(b.w) && positive(b.h)) return { ratio: b.w / b.h, from: 'aday_kutu' };
   return null;
@@ -42,7 +44,8 @@ function shapeRatio(s, designRatio, sleeve) {
 
 /**
  * result: autoMeasure output after documents.explain (reasons, measure_source).
- * ctx: {position, product, standards (konumStandartlari table), designRatio, gozConflict}.
+ * ctx: {position, product, standards (konumStandartlari table), designRatio, gozConflict,
+ *   gozKol: the eye on a sleeve, {aspect} of its print box or {baskiYok}}.
  */
 function decide(result, ctx = {}) {
   const s = { ...(result.measure_source || {}) }, sleeve = SLEEVES.includes(ctx.position);
@@ -58,8 +61,10 @@ function decide(result, ctx = {}) {
   // Torso: garments were found and searched, no print. Sleeve/leg: the linked design was searched
   // on a found sleeve/leg without a hit (autoMeasureSleeve/Leg state exactly this).
   const products = Array.isArray(s.views) ? s.views.length : 0;
-  const limbSearched = pixelNotes.some(r => /(Kol|Bacak) üzerinde desen adayı bulunamadı/.test(r));
-  const unclear = s.goz?.baskiYok ? `Göz bu konumda baskı görmedi: ${s.goz.baskiYok}`
+  // Without a design file the limb search has nothing to look for: that is no evidence of absence.
+  const limbSearched = pixelNotes.some(r => /(Kol|Bacak) üzerinde desen adayı bulunamadı/.test(r)) && !pixelNotes.some(r => /desen dosyası yok/.test(r));
+  const eyeMiss = s.goz?.baskiYok || (sleeve && ctx.gozKol?.baskiYok);
+  const unclear = eyeMiss ? `Göz bu konumda baskı görmedi: ${eyeMiss}`
     : s.goz?.urunYok ? `Göz görselde ürün görmedi: ${s.goz.urunYok}`
       : !eye && !pixel && !s.candidateBoxPx && (products > 0 || limbSearched)
         ? `Görselde ürün var, ama bu konumda baskı bulunamadı; konumda baskı olup olmadığı teyit edilmeli.` : null;
@@ -89,7 +94,7 @@ function decide(result, ctx = {}) {
     notes.push('Ön/arka: varsayılan dizilim (yan yanaysa soldaki, üst üsteyse üstteki ürün ön).');
   }
 
-  const shape = shapeRatio(s, ctx.designRatio, sleeve);
+  const shape = shapeRatio(s, ctx.designRatio, sleeve, ctx.gozKol?.aspect);
   if (raw) s.hamOlcu = { width_mm: Math.round(raw.w), height_mm: Math.round(raw.h) };
   // Only the width is measured: the height follows the design's own proportion.
   if (raw && !sleeve && positive(ctx.designRatio)) {
