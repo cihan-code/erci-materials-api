@@ -8,7 +8,7 @@ const { tx, audit, fail } = require('./db');
 const { assertUser } = require('./auth');
 const outbox = require('./outbox');
 const { snapshot } = require('./orders');
-const { normArea } = require('../productionForm');
+const { areaKey } = require('./areas');
 const recipeReader = require('../operations/recipes');
 const sizes = require('./boyutEsleme');
 
@@ -36,7 +36,7 @@ const techLabel = type => type === 'baski' ? 'Baskı' : 'Nakış';
 // Display labels only; application keys and costing inputs keep their existing values.
 const AREA_LABELS = { 'göğüs': 'Göğüs', 'sırt': 'Sırt', kol: 'Kol', ense: 'Ense', 'kapüşon': 'Kapüşon',
   'sol göğüs': 'Sol göğüs', 'sağ göğüs': 'Sağ göğüs', 'sol kol': 'Sol kol', 'sağ kol': 'Sağ kol', yaka: 'Yaka', 'ön': 'Ön' };
-const areaLabel = area => AREA_LABELS[normArea(area)] || area;
+const areaLabel = area => AREA_LABELS[areaKey(area)] || area;
 function missingLabel(message) {
   return String(message).replace(/((?:Baskı|Nakış) boyutu seçilmeli: ")([^"]+)(")/g,
     (_, prefix, area, suffix) => prefix + areaLabel(area) + suffix).trim().replace(/[.,;:!?]+$/, '');
@@ -89,7 +89,8 @@ function applicationUnits(lines) {
   for (const line of lines) {
     const seen = new Set();
     for (const a of line.applications || []) {
-      const area = normArea(a.position), key = `${a.kind}:${area}`;
+      // Order keys (sol_gogus) become the flow's area names (sol göğüs), as İşler holds them.
+      const area = areaKey(a.position), key = `${a.kind}:${area}`;
       if (!map.has(key)) map.set(key, { type: a.kind, area, lineQty: 0, units: 0, dimensionsMm: [] });
       const e = map.get(key);
       e.units += line.quantity;
@@ -144,7 +145,7 @@ function validBnItems(items, apps) {
     if (typeof it.area !== 'string' || !it.area.trim() || typeof it.size !== 'string' || !it.size.trim()) fail('bnItems: bölge ve boyut gerekli');
     if (it.qty != null && (!Number.isSafeInteger(it.qty) || it.qty <= 0)) fail('bnItems.qty: pozitif tam sayı olmalı');
     if (it.label != null && typeof it.label !== 'string') fail('bnItems.label: metin olmalı');
-    if (!apps.some(a => a.type === it.type && a.area === normArea(it.area))) fail(`Bu sürümde ${techLabel(it.type).toLocaleLowerCase('tr')} bölgesi yok: ${areaLabel(it.area)}`);
+    if (!apps.some(a => a.type === it.type && a.area === areaKey(it.area))) fail(`Bu sürümde ${techLabel(it.type).toLocaleLowerCase('tr')} bölgesi yok: ${areaLabel(it.area)}`);
     return { type: it.type, area: it.area.trim(), size: it.size.trim(),
       ...(it.qty != null ? { qty: it.qty } : {}), ...(it.label?.trim() ? { label: it.label.trim().slice(0, 80) } : {}) };
   });
@@ -249,7 +250,8 @@ async function transfer(payload, context, { dataDir, recipes } = {}) {
   const manual = row?.unit_price != null;
   const price = manual ? row.unit_price : linePrice(lines).unitPrice;
   const derived = row?.bn_items_json ? null : sizes.derive(sizes.rules(db), lines, L.store.readPanelRaw()?.data?.costTemplates);
-  const bnItems = row?.bn_items_json ? JSON.parse(row.bn_items_json) : derived.bnItems;
+  // Typed lists keep the order keys the panel sent; the flow compares area names, so they are read the same way.
+  const bnItems = row?.bn_items_json ? JSON.parse(row.bn_items_json).map(it => ({ ...it, area: areaKey(it.area) })) : derived.bnItems;
   const { form } = facts;
   const rec = L.document.recomputeProdForm(doc.id, { order_no: form.order_no, product_type: form.product_type,
     product_description: form.product_description, total_quantity: form.total_quantity, size_breakdown: form.size_breakdown,

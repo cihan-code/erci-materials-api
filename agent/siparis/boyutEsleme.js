@@ -3,7 +3,7 @@
 // Cost itself stays in productionForm/pricingEngine: this only chooses the costTemplates size name they already price by.
 // An empty table means no size is ever chosen here (G5 waits for a person, as before).
 const { tx, audit, fail } = require('./db');
-const { normArea } = require('../productionForm');
+const { areaKey } = require('./areas');
 
 const TYPES = ['baski', 'nakis'];
 const SCHEMA = `CREATE TABLE IF NOT EXISTS boyut_esleme (
@@ -85,7 +85,7 @@ function sizeFor(table, app, costTemplates) {
 function derive(table, lines, costTemplates) {
   const apps = [];
   for (const l of lines) for (const a of l.applications || [])
-    apps.push({ tur: a.kind, konum: normArea(a.position), en_mm: a.width_mm ?? null, boy_mm: a.height_mm ?? null, adet: l.quantity, ...sizeFor(table, a, costTemplates) });
+    apps.push({ tur: a.kind, konum: areaKey(a.position), en_mm: a.width_mm ?? null, boy_mm: a.height_mm ?? null, adet: l.quantity, ...sizeFor(table, a, costTemplates) });
   const counted = apps.filter(a => a.adet > 0);
   if (!table.length || !counted.length || counted.some(a => !a.boyut)) return { apps, bnItems: null };
   const merged = new Map();

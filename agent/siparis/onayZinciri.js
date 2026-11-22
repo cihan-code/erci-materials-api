@@ -8,7 +8,7 @@ const { tx, audit, fail } = require('./db');
 const outbox = require('./outbox');
 const { snapshot } = require('./orders');
 const { fabricName } = require('./kartela');
-const { normArea } = require('../productionForm');
+const { areaKey } = require('./areas');
 // G5's own record lookup, so its later cost update lands on the very record the chain opened.
 const { resolveJob, linePrice } = require('./costTransfer');
 const sizes = require('./boyutEsleme');
@@ -136,7 +136,7 @@ function orderFacts(db, v, { recipes = recipeReader.load(), customers = [] } = {
     adet: l.quantity, bedenler: JSON.parse(l.sizes_json), astar: l.lining ? 'var' : 'yok', numune: !!l.numune,
     birim_fiyat_kurus: l.unit_price_kurus ?? null }));
   const uygulamalar = lines.flatMap(l => (l.applications || []).map(a => ({ urun: label(l.product_key), renk: l.color_name || null,
-    tur: a.kind, konum: normArea(a.position), en_mm: a.width_mm ?? null, boy_mm: a.height_mm ?? null, adet: l.quantity,
+    tur: a.kind, konum: areaKey(a.position), en_mm: a.width_mm ?? null, boy_mm: a.height_mm ?? null, adet: l.quantity,
     olcu_yaklasik: approximate(a) })));
   const areas = kind => [...new Set(uygulamalar.filter(a => a.tur === kind && a.adet > 0).map(a => a.konum))];
   const kinds = new Set(uygulamalar.map(a => a.tur));
