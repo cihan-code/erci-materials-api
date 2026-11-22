@@ -721,6 +721,18 @@ function flatCalibrationInput(flat,leg) {
   if(!mime)return {flat,key:null};
   try {return {flat:{...flat,cizim:{buffer:fs.readFileSync(flat.dosya),mime}},key};} catch {return {flat,key:null};}
 }
+// G61/G66: the L measurement points of the pattern tables (flats.kalipOlculeri, mm) go to the
+// worker with the flat. The flat's own L list (the loader already fills it Excel-first) keeps the
+// points the scale has always used; the table adds the others (kol_boyu, pazu, ...).
+function withPatternPoints(db,flat) {
+  if(!flat?.id || typeof flats.kalipOlculeri!=='function')return flat;
+  let found=null;
+  try {found=flats.kalipOlculeri(db,flat.id,'L');} catch {return flat;}
+  if(!found?.olculerMm)return flat;
+  const list=Object.fromEntries(Object.entries(flat.refBeden==='L' && flat.olculerL && typeof flat.olculerL==='object' ? flat.olculerL : {})
+    .filter(([,v])=>Number.isFinite(v)&&v>0).map(([k,v])=>[k,Math.round(v*10)]));
+  return {...flat,olcuNoktalari:{beden:'L',olculerMm:{...found.olculerMm,...list},kaynak:found.kaynak??null,kaynakTuru:found.kaynakTuru??null,gogusTuru:found.gogusTuru??null}};
+}
 // The line's fabric colour, when the stock item states one under the same colour name.
 // A proof ground in this colour is the garment itself (vector.js findGround).
 function garmentColor(db,lineId) {
@@ -937,7 +949,7 @@ async function automaticMeasure(db,dataDir,versionId,user,regenerate=false,chang
         const design=input.design?{...input.design,...await vectorInput(dataDir,input.design)}:null;
         const {flatNote,linkDesign,gozConflict,...job}=input;
         const calibration=flatCalibrationInput(input.flat,['bacak','sol_bacak','sag_bacak'].includes(input.position));
-        result=await generateInChild({type:'autoMeasure',input:{...job,image,design,flat:calibration.flat}},signal,{timeoutMs:MEASURE_TIMEOUT_MS});
+        result=await generateInChild({type:'autoMeasure',input:{...job,image,design,flat:withPatternPoints(db,calibration.flat)}},signal,{timeoutMs:MEASURE_TIMEOUT_MS});
         if(calibration.key && result?.measure_source && Object.hasOwn(result.measure_source,'kalibrasyon'))
           FLAT_CALIBRATIONS.set(calibration.key,result.measure_source.kalibrasyon);
       } catch(e) {
@@ -1393,7 +1405,7 @@ function registerWorkshop(boundDb,dataDir) {
     return {providerRef:result.providerRef};
   });
 }
-module.exports={acceptSuggestion,confirmationDetails,SUGGESTION_SOURCE,explain,measureSuggestion,answerView,garmentCrop,frontSide,imageViewHint,flatCalibrationInput,FLAT_CALIBRATIONS,editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,previewForms,pendingApplications,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+module.exports={withPatternPoints,acceptSuggestion,confirmationDetails,SUGGESTION_SOURCE,explain,measureSuggestion,answerView,garmentCrop,frontSide,imageViewHint,flatCalibrationInput,FLAT_CALIBRATIONS,editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,previewForms,pendingApplications,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
 function vectorModule() {
   // Native tracer/canvas binaries come from npm; a platform without them must say so, not fail anonymously.
   try { return require('./vector'); }
