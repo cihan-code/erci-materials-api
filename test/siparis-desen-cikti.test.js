@@ -351,3 +351,21 @@ test('G74b a prepared draft is not re-extracted in the background; a preview sto
   const text = await pdfText(Buffer.from(pv.formlar.find(x => x.kind === 'baski_formu').pdf, 'base64'));
   assert.doesNotMatch(text, /Önizleme yok/);
 });
+
+test('G74 N1 a prepared draft whose product picture changed is no longer settled: its old print is not shown as ready, it is extracted again', async t => {
+  useEnv(t, {});
+  const f = await fixture(t, [{ position: 'sol_kol', method: 'otomatik', box: { x: 232, y: 258, w: 136, h: 82 }, w: 90, h: 55 }]);
+  ok(await f.prepare());
+  const rows = async () => { const d = ok(await f.request(`/surumler/${f.v}/vektor-durum`, { token: f.token })); return (Array.isArray(d) ? d : d.satirlar || d.durum || []).filter(r => r.extracted); };
+  assert.equal((await rows())[0].status, 'hazir');
+  await documents.settled();
+  const keys = () => f.db.prepare('SELECT input_json FROM document_extracted_previews').all().map(r => r.input_json);
+  const before = keys();
+  // unchanged picture: no new extraction
+  await rows(); await documents.settled();
+  assert.deepEqual(keys(), before);
+  // a new product picture uploaded for the same line
+  ok(await f.upload(f.v, { kind: 'urun_gorsel', lineId: f.line, gorunum: 'on', buffer: mockup().image }), 201);
+  const after = await rows();
+  assert.equal(after[0].status, 'hazirlaniyor');
+});

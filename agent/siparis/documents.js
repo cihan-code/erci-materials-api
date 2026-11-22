@@ -619,7 +619,12 @@ function extractedRecord(db,appId,{key},includeArtwork=false,anyKey=false) {
     WHERE application_id=? AND input_json=? AND (artwork IS NULL OR preview_file_id IS NOT NULL)`).get(appId,key)
     ?? (anyKey ? db.prepare(`SELECT ${cols} FROM document_extracted_previews WHERE application_id=? AND (artwork IS NULL OR preview_file_id IS NOT NULL) ORDER BY rowid DESC LIMIT 1`).get(appId) : undefined);
 }
-const settledVersion=(db,v)=>v.status!=='taslak' || !!db.prepare('SELECT ready FROM document_preparations WHERE version_id=?').get(v.id)?.ready;
+// A prepared draft only counts as settled while its inputs are those it was prepared from (same test as assertFresh).
+const settledVersion=(db,v)=> {
+  if(v.status!=='taslak')return true;
+  const state=db.prepare('SELECT ready,source_json FROM document_preparations WHERE version_id=?').get(v.id);
+  return !!state?.ready && state.source_json===inputFingerprint(db,v);
+};
 
 async function extractPreview(db,dataDir,v,line,app,input,user,signal,retryError=false) {
   if(input.gap)return {message:input.gap};
@@ -1245,7 +1250,9 @@ async function shrinkRaster(source,edge,signal,always=false) {
 // picture is left out (hata). An unclear ground (ZEMIN_BELIRSIZ) is not retried.
 async function designOutput(original,pdf,targetMm,signal) {
   const guard={memoryMb:childMemoryMb(),timeoutCode:'COCUK_ZAMAN_ASIMI'},size={widthMm:targetMm.w,heightMm:targetMm.h};
-  const source=await shrinkRaster(original,2048,signal);
+  let source=original;
+  try {source=await shrinkRaster(original,2048,signal);}
+  catch(e) {if(signal.aborted)throw e;}
   let kapi;
   try {return await generateInChild({type:'desenCikti',input:{source,pdf,...size}},signal,{...guard,timeoutMs:240000});}
   catch(e) {if(signal.aborted)throw e;kapi={gecti:false,olcum:{},neden:`kapı tamamlanamadı: ${e.message}`.slice(0,200),...(e.code?{kod:e.code}:{})};}
