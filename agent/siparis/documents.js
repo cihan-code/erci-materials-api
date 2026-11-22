@@ -835,9 +835,9 @@ function autoInputs(db,v,line,app) {
   const gozInput=eye && (eye.print||eye.baskiYok||eye.urunYok||eye.reason) ? {goz:{...(eye.print?{print:eye.print,product:eye.product}:{}),...(eye.baskiYok?{baskiYok:eye.baskiYok}:{}),...(eye.urunYok?{urunYok:eye.urunYok}:{}),...(eye.reason?{reason:eye.reason}:{})}} : {};
   return {image,design,flat,product:line.product_key,position:app.position,...(line.color_name?{color:line.color_name}:{}),...(viewHint?{viewHint}:{}),...(sleeve?{}:{viewDefault:true}),...gozInput,...(gozConflict?{gozConflict}:{}),...(flatNote?{flatNote}:{}),...(design && linked==null?{linkDesign:true}:{})};
 }
-// G61: one eye request per picture and order line (all its positions at once).
+// G61: one eye request per picture, product and colour; every position is asked at once.
 function gozRequest(line,image) {
-  return goz.request({sha256:image.sha256,product:line.product_key,color:line.color_name,positions:line.applications.map(a=>a.position)});
+  return goz.request({sha256:image.sha256,product:line.product_key,color:line.color_name,positions:goz.POSITIONS});
 }
 // The cached eye answer for this print (never calls the model; ensureGoz does).
 function gozFor(db,v,line,app,image) {

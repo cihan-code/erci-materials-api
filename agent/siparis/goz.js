@@ -22,6 +22,9 @@ const POSITION_TEXT = {
   sol_kol: "wearer's left sleeve", sag_kol: "wearer's right sleeve", bacak: 'a trouser/short leg',
   sol_bacak: "wearer's left leg", sag_bacak: "wearer's right leg",
 };
+// Every position is asked at once, whatever the line orders: one call per picture, even as
+// applications are added one by one ('kapusan' is the stored alias of 'kapuson').
+const POSITIONS = Object.keys(POSITION_TEXT).filter(p => p !== 'kapusan');
 const BOX = { type: 'object', additionalProperties: false, required: ['x', 'y', 'w', 'h'],
   properties: { x: { type: 'number' }, y: { type: 'number' }, w: { type: 'number' }, h: { type: 'number' } } };
 const SCHEMA = {
@@ -221,7 +224,8 @@ const union = boxes => {
  * order fills once are one print (their union); several applications with several prints
  * cannot be paired on this evidence, so the eye stays out of them.
  */
-function forPrint(answer, position, sameCount) {
+function forPrint(answer, ordered, sameCount) {
+  const position = ordered === 'kapusan' ? 'kapuson' : ordered;
   if (!answer.urunler.length) return { urunYok: 'görselde giysi yok' };
   // The front/back answer belongs to the picture, whatever this print's outcome.
   const front = frontSide(answer), side = front ? { front } : {};
@@ -235,4 +239,4 @@ function forPrint(answer, position, sameCount) {
   return { print: { box, confidence: prints.length === 1 ? prints[0].confidence : 'orta' }, product: product ? { box: product.box, view: product.view } : null, ...side };
 }
 function setTestProvider(fn) { testProvider = fn; failures.clear(); }
-module.exports = { provider, model, init, request, key, cached, ensure, lastFailure, forPrint, frontSide, normalize, setTestProvider, cliBin, SCHEMA, EDGE, REVISION, prompt };
+module.exports = { POSITIONS, provider, model, init, request, key, cached, ensure, lastFailure, forPrint, frontSide, normalize, setTestProvider, cliBin, SCHEMA, EDGE, REVISION, prompt };

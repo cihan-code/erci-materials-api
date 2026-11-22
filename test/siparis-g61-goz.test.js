@@ -56,15 +56,16 @@ test('G61 the eye locates the whole print, the ink fixes its edges, the code siz
   const app = ok(await f.post(`/satirlar/${line}/uygulamalar`, { kind: 'baski', position: 'gogus' }), 201);
   const s = JSON.parse(app.measure_source);
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].req.positions, ['gogus']);
+  assert.deepEqual(calls[0].req.positions, [...goz.POSITIONS].sort());
   assert.deepEqual([calls[0].img.width, calls[0].img.height, calls[0].img.mime], [600, 650, 'image/jpeg']);
   // The loose 136 x 82 px box snapped to the ink: 120 px wide -> 240 mm, as the pixel path.
   assert.equal(s.goz.boxPx.fit, 'murekkep');
   assert.ok(Math.abs(s.goz.boxPx.w - 120) <= 2, JSON.stringify(s.goz));
   assert.deepEqual([app.width_mm, app.needs_confirmation, s.olcuDurumu, s.olcuKaynagi], [240, 0, 'otomatik', 'görselden (göz)']);
   assert.ok(s.gozPikselFarki <= .1);
-  // Measuring again (and a second print on the same line asking the same) makes no second call.
+  // Measuring again, and a print added later on the same picture, make no second call.
   ok(await f.post(`/surumler/${v}/otomatik-olc?yeniden=1`, {}));
+  ok(await f.post(`/satirlar/${line}/uygulamalar`, { kind: 'baski', position: 'sirt' }), 201);
   assert.equal(calls.length, 1);
   assert.equal(f.db.prepare('SELECT count(*) n FROM goz_cache').get().n, 1);
 });
