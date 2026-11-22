@@ -13,6 +13,7 @@ const childProcess = require('node:child_process');
 const { buildWorkshopMessage, createWorkshopHandler } = require('./workshop');
 const { registerHandler } = require('./outbox');
 const goz = require('./goz');
+const desenCizim = require('./desenCizim');
 const { decide, formNote } = require('./olcuKarar');
 const { labelRawKeys } = require('./areas');
 const positionStandards = require('./konumStandartlari');
@@ -416,7 +417,8 @@ function artworkFor(db,v,line,app) {
   const viewHint=own ? {front:own,source:'olcum'} : imageViewHint(db,v,image,app.id);
   // G61b: the eye's print box on this picture is the cut-out of last resort for the design.
   const eye=image && measured.gorselFileId===image.id ? gozCutBox(measured.goz) : null;
-  const key=JSON.stringify([ARTWORK_EXTRACTION_REVISION,line.product_key,line.color_name??null,app.position,app.kind,image?.id,image?.sha256,image?.gorunum,gap,...(viewHint?[viewHint]:[]),...(eye?[eye]:[])]);
+  const redrawTag=desenCizim.keyTag();
+  const key=JSON.stringify([ARTWORK_EXTRACTION_REVISION,line.product_key,line.color_name??null,app.position,app.kind,image?.id,image?.sha256,image?.gorunum,gap,...(viewHint?[viewHint]:[]),...(eye?[eye]:[]),...(redrawTag?[redrawTag]:[])]);
   return {image,key,gap,...(viewHint?{viewHint}:{}),...(eye?{gozBox:eye}:{})};
 }
 // The eye's print box as fractions of the measured raster (fitted to the ink when it could be).
@@ -601,11 +603,25 @@ async function extractPreview(db,dataDir,v,line,app,input,user,signal,retryError
     artwork=await generateInChild({type:'extractArtwork',input:{image:original,position:app.position,product:line.product_key,color:line.color_name,viewHint:input.viewHint??null,...(input.gozBox?{gozBox:input.gozBox}:{})}},signal,{timeoutMs:30000});
     if(artwork.reason) {message=artwork.reason;status='teyit';}
     else {
+      // G69 (off by default): a clean redraw of the print replaces the cut-out before tracing; any failure keeps the cut-out.
+      let redraw=null;
+      if(desenCizim.enabled()) {
+        const raster=['image/png','image/jpeg','image/jpg'].includes(original.mime);
+        redraw=await desenCizim.apply({crop:artwork.buffer,image:raster?original.buffer:null,position:app.position,
+          prints:line.applications.map(a=>({position:a.position})),
+          cacheDir:path.join(dataDir,'siparis','desen-cizim'),signal});
+        if(redraw.used)artwork={...artwork,buffer:redraw.buffer};
+      }
       result=await generateInChild({type:'vector',designBox:true,input:{buffer:artwork.buffer,mime:'image/png'}},signal);
       // A separation warning (small print) needs the same visual check as a vector warning.
       if(artwork.warnings?.length)result.report={...result.report,quality:'teyit',reasons:[...(result.report.reasons||[]),...artwork.warnings]};
       // Information only (line colour not seen on the garment): no confirmation.
       if(artwork.notes?.length)result.report={...result.report,notes:artwork.notes};
+      if(redraw&&!redraw.off) {
+        result.report={...result.report,desenYolu:redraw.report.yol,desenCizim:redraw.report};
+        // A redraw that was refused needs the usual visual check: the old trace of a poor crop is not trusted silently.
+        if(redraw.report.elleKontrol)result.report={...result.report,quality:'teyit',reasons:[...(result.report.reasons||[]),`Yeniden çizim kullanılmadı, elle kontrol: ${redraw.report.neden}`]};
+      }
       status=result.report.quality==='teyit'?'teyit':'hazir';
     }
   } catch(e) {
@@ -655,7 +671,7 @@ function assertExtractedMeasurement(app,image,placement) {
 // allowPending prints unmeasured applications as "Ölçü teyit bekliyor"; omitQuantities leaves every quantity field empty.
 // vectorByApp: application id -> {buffer, background} of its vector PDF, the preview of a PDF/SVG design.
 // missingDesign: application id -> why its design could not be separated; it prints as "Desen dosyası bekleniyor".
-function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPending=false,omitQuantities=false,vectorByApp=new Map(),missingDesign=new Map()}={}) {
+function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPending=false,omitQuantities=false,vectorByApp=new Map(),missingDesign=new Map(),wayByApp=new Map()}={}) {
   if (!allowPending) assertMeasurements(db,v);
   const pending=allowPending ? pendingApplications(db,v) : new Map();
   const order=db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id);
@@ -699,7 +715,7 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPendi
         const source=provenance(app);
         const image=Object.values(images).find(image=>image.fileId===source.gorselFileId);
         applications.push({type:app.kind,position:app.position,width_mm:app.width_mm,height_mm:app.height_mm,lineIds:[lineId],
-          preview:preview(design)||extractedByApp.get(app.id),previewVector:previewVector(app,design),placement:formPlacement(app,source,image,design),
+          preview:preview(design)||extractedByApp.get(app.id),...(wayByApp.get(app.id)?{previewWay:wayByApp.get(app.id)}:{}),previewVector:previewVector(app,design),placement:formPlacement(app,source,image,design),
           ...(source.method==='elle' && typeof source.kaynak==='string' && source.kaynak ? {measureNote:source.kaynak} : {}),
           ...measureNotes(source)});
       }
@@ -1138,7 +1154,7 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
   try {
     const {v}=start;
     const generated=await renderQueue(async signal=> {
-      const sourceByApp=new Map(), extractedByApp=new Map(), vectorByApp=new Map(), missingDesign=new Map(), generated=[];
+      const sourceByApp=new Map(), extractedByApp=new Map(), vectorByApp=new Map(), missingDesign=new Map(), wayByApp=new Map(), generated=[];
       const applications=v.lines.flatMap(line=>line.applications.map(app=>({line,app})));
       for (const source of v.files.filter(f=>SOURCE_KINDS.includes(f.kind)))
         if (!applications.length) fail(`Desen ${source.id}: ölçülü uygulama bağlantısı gerekli`,409);
@@ -1161,6 +1177,7 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
           catch(e) {if(e.status!==409)throw e;missingDesign.set(a.id,e.message);continue;}
           original={buffer:row.artwork,mime:'image/png'};
           extractedByApp.set(a.id,row.artwork);
+          if(report.desenYolu)wayByApp.set(a.id,report.desenYolu);
           const file=db.prepare('SELECT * FROM files WHERE id=? AND version_id=? AND kind=?').get(row.preview_file_id,v.id,PREVIEW);
           if(file)prev={buffer:readFile(dataDir,file),report};
         }
@@ -1182,7 +1199,7 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
         // fitted to the measured box; that box can differ from the design's ratio (sırt %14,5).
         if (input.source && prev) vectorByApp.set(a.id,{buffer:prev.buffer,background:groundOf(prev.report)});
       }
-      const model=formOrder(db,dataDir,v,sourceByApp,extractedByApp,{allowPending:true,vectorByApp,missingDesign});
+      const model=formOrder(db,dataDir,v,sourceByApp,extractedByApp,{allowPending:true,vectorByApp,missingDesign,wayByApp});
       generated.push(...await generateInChild({type:'forms',model},signal));
       if(missingDesign.size)generated.missingDesign=[...missingDesign].map(([applicationId,message])=>({applicationId,message}));
       return generated;
@@ -1226,7 +1243,7 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
 async function previewForms(db,dataDir,versionId,user,{omitQuantities=false}={}) {
   assertUser(db,user.id);
   const v=orders.snapshot(db,integer(versionId,'versionId',1));
-  const sourceByApp=new Map(),extractedByApp=new Map(),vectorByApp=new Map(),pending=pendingApplications(db,v);
+  const sourceByApp=new Map(),extractedByApp=new Map(),vectorByApp=new Map(),wayByApp=new Map(),pending=pendingApplications(db,v);
   for (const line of v.lines) for (const app of line.applications) {
     if (pending.has(app.id)) continue;
     const input=artworkFor(db,v,line,app);
@@ -1238,10 +1255,13 @@ async function previewForms(db,dataDir,versionId,user,{omitQuantities=false}={})
     }
     else if (!input.gap) {
       const row=extractedRecord(db,app.id,input,true);
-      if (row?.artwork) extractedByApp.set(app.id,row.artwork);
+      if (row?.artwork) {
+        extractedByApp.set(app.id,row.artwork);
+        try {const way=JSON.parse(row.report_json||'null')?.desenYolu; if(way)wayByApp.set(app.id,way);} catch {}
+      }
     }
   }
-  const model=formOrder(db,dataDir,v,sourceByApp,extractedByApp,{allowPending:true,omitQuantities,vectorByApp});
+  const model=formOrder(db,dataDir,v,sourceByApp,extractedByApp,{allowPending:true,omitQuantities,vectorByApp,wayByApp});
   const forms=await renderQueue(signal=>generateInChild({type:'forms',model},signal));
   const missing=[];
   for (const line of v.lines) for (const app of line.applications) if (pending.has(app.id))

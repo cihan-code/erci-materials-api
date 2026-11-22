@@ -407,6 +407,8 @@ const CARD_GAP = 10;
 const cardNote = app => !app.pending && typeof app.measureNote === 'string' && app.measureNote.trim() ? app.measureNote.trim() : null;
 const cardHeight = (cw, notes) => 20 + Math.round(cw * 0.5) + 6 + 15 + (notes ? 12 : 0);
 const hexColor = value => /^#[0-9a-f]{6}$/i.test(value ?? '') ? value : null;
+// G69: which way the design was made (only set while the redraw layer is on).
+const WAY_LABEL = { 'yeniden-cizim': 'yeniden çizim', 'dogrudan-izleme': 'doğrudan izleme' };
 function cardColor(line, app) { return hexColor(line?.colorHex) ?? hexColor(app.previewBackground) ?? '#eeeeee'; }
 const isDark = hex => [1, 3, 5].reduce((sum, i, k) => sum + parseInt(hex.slice(i, i + 2), 16) * [0.299, 0.587, 0.114][k], 0) < 140;
 function sizeLine(app) {
@@ -428,6 +430,7 @@ function applicationCard(doc, line, app, x, y, cw, notes) {
   if (Buffer.isBuffer(app.preview)) doc.image(app.preview, x + PREVIEW_MARGIN, py + PREVIEW_MARGIN, { fit: [cw - 2 * PREVIEW_MARGIN, ph - 2 * PREVIEW_MARGIN], align: 'center', valign: 'center' });
   else lineText(doc, 'Önizleme yok', x, py + ph / 2 - 6, cw, 9, false, isDark(color) ? '#ffffff' : '#666666');
   if (Buffer.isBuffer(app.preview) && app.previewCropped) lineText(doc, 'görselden kırpıldı', x, py + ph - 10, cw, 6.5, false, isDark(color) ? '#dddddd' : '#555555');
+  if (Buffer.isBuffer(app.preview) && !app.previewCropped && WAY_LABEL[app.previewWay]) lineText(doc, WAY_LABEL[app.previewWay], x, py + ph - 10, cw, 6.5, false, isDark(color) ? '#dddddd' : '#555555');
   lineText(doc, sizeLine(app), x, py + ph + 6, cw, 10, true);
   const note = cardNote(app);
   if (notes && note) lineText(doc, note, x, py + ph + 21, cw, 8, false, '#555555');
@@ -817,6 +820,7 @@ function renderWorkshop(input, options, type) {
       else image(doc, app.preview, 175, y + 85, 460, 230, 'Desen önizlemesi sağlanmadı');
       text(doc, dimensions(app), 45, y + 335, 720, 26, true, { align: 'center' });
       scaleFootnote(doc, [app], 45, y + 368, 720);
+      if (!app.previewCropped && WAY_LABEL[app.previewWay]) text(doc, WAY_LABEL[app.previewWay], 175, y + 318, 460, 11, false, { align: 'center', color: '#666666' });
       if (app.previewCropped) text(doc, 'Ürün görselinden kırpıldı', 175, y + 318, 460, 11, false, { align: 'center', color: '#666666' });
       y += 420;
     }
