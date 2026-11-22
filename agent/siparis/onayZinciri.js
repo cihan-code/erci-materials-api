@@ -178,6 +178,13 @@ function orderFacts(db, v, { recipes = recipeReader.load(), customers = [] } = {
   return { job, card, warnings, approx, total };
 }
 
+// The record's customer, by registered id or free name, is the order's customer (case-insensitive, as the panel matches).
+function sameCustomer(record, orderName, customers) {
+  const name = trLower(orderName);
+  if (!name) return false;
+  const registered = record.customer_id != null ? customers.find(c => String(c.id) === String(record.customer_id))?.name : null;
+  return [registered, record.customer_name_free].some(n => n != null && trLower(n) === name);
+}
 // Order fields go in only where the record still holds what the chain wrote last (or, on a record the chain did not
 // write, where it is empty). A value somebody changed in the panel is left alone and reported.
 const EMPTY_ZERO = new Set(['quantity', 'unit_price']);
@@ -223,17 +230,31 @@ function plan(db, versionId, { panel, recipes } = {}) {
   const ours = !!(target && map?.panel_job_id && String(map.panel_job_id) === String(target.id));
   const key = target ? String(target.job_no).trim() : (v.job_no?.trim() || v.order_no);
   const warnings = [...facts.warnings];
-  const jobMerge = merge(target, facts.job, ours ? JSON.parse(map.job_fields_json) : {}, JOB_LABELS, `İşler ${key}`);
+  // A record the chain did not write yet (G5 may open it first, or the team did): the customer counts as untouched when it
+  // names the order's customer in either form (registered id or free name), so no false "changed by hand" is reported.
+  const adoptLast = {};
+  if (target && !ours && sameCustomer(target, v.customer_name, data.customers || []))
+    Object.assign(adoptLast, { customer_id: target.customer_id ?? null, customer_name_free: target.customer_name_free ?? null });
+  const jobMerge = merge(target, facts.job, ours ? JSON.parse(map.job_fields_json) : adoptLast, JOB_LABELS, `İşler ${key}`);
   warnings.push(...jobMerge.conflicts);
   const approxNote = facts.approx.length
     ? ` · Ölçü yaklaşık: ${facts.approx.map(a => `${a.tur === 'baski' ? 'baskı' : 'nakış'} ${a.konum}`).join(', ')}` : '';
+  const chainNote = `[Sipariş ${v.order_no} v${v.version_no}] onayda otomatik açıldı · Fiyat KDV hariç${facts.job.unit_price == null ? ' · fiyat bekliyor' : ''} · termin bekliyor · maliyet G5 aktarımında${approxNote}`;
+  if (target && !ours) {
+    // Same note whichever job ran first: the chain's note leads and G5's follows ("A | B"), as when the chain opens the
+    // record and G5 later appends. On a record the team opened the chain's note goes last. Never twice.
+    const cur = String(target.note || '');
+    if (!cur.includes(`[Sipariş ${v.order_no} v`))
+      jobMerge.set.note = !cur ? chainNote : g5 != null && String(g5) === String(target.id) ? `${chainNote} | ${cur}` : `${cur} | ${chainNote}`;
+    if (!target.kaynak) jobMerge.set.kaynak = SOURCE;
+  }
   const isler = target
     ? { islem: Object.keys(jobMerge.set).length ? 'guncelle' : 'degisiklik_yok', id: target.id, job_no: key, alanlar: jobMerge.set, korunan: jobMerge.kept }
     : { islem: 'ac', id: null, job_no: key, alanlar: {
       job_no: key, order_date: istanbulDay(v.order_created_at), status: 'Onaylandı', delivery_date: null,
       ...Object.fromEntries(Object.entries(facts.job).filter(([, val]) => val !== undefined)),
       unit_price: facts.job.unit_price ?? null, cost_items: [], manual_total_cost: 0, deposit_received: 0, baski_nakis_secim: null,
-      problem_note: null, note: `[Sipariş ${v.order_no} v${v.version_no}] onayda otomatik açıldı · Fiyat KDV hariç${facts.job.unit_price == null ? ' · fiyat bekliyor' : ''} · termin bekliyor · maliyet G5 aktarımında${approxNote}`,
+      problem_note: null, note: chainNote,
       kaynak: SOURCE } };
 
   // Card: linked to the job by job_id; never two cards for one job.

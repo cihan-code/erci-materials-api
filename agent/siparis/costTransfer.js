@@ -9,6 +9,8 @@ const { assertUser } = require('./auth');
 const outbox = require('./outbox');
 const { snapshot } = require('./orders');
 const { areaKey } = require('./areas');
+// Istanbul calendar day, the same order date the approval chain writes, whichever of the two opens the record.
+const { istanbulDay } = require('../lib/util');
 const recipeReader = require('../operations/recipes');
 const sizes = require('./boyutEsleme');
 
@@ -283,7 +285,7 @@ async function transfer(payload, context, { dataDir, recipes } = {}) {
   const target = resolveJob(raw.data.jobs || [], { orderNo: v.order_no, jobNo: v.job_no?.trim() || null, storedId: prior?.panel_job_id });
   const key = target ? String(target.job_no).trim() : v.order_no;
   const fields = {
-    finalType: 'production_form', order_no: key, order_date: String(v.order_created_at).slice(0, 10),
+    finalType: 'production_form', order_no: key, order_date: istanbulDay(v.order_created_at),
     // Fields the order does not know keep the İşler record's values on update.
     order_title: target ? target.title : null, delivery_date: target ? target.delivery_date : null,
     baski_nakis_secim: target ? target.baski_nakis_secim : null,
