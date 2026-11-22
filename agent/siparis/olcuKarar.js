@@ -5,6 +5,8 @@
 //   otomatik  - measured on the picture and consistent;
 //   yaklasik  - measured, but a check disagreed (≈ on the form, with the reason);
 //   standart  - not measurable, the usual width of the position (≈, "standart ölçü").
+// measure_source.durum carries the state for the customer page and the approval chain (G63/G64);
+// olcuDurumu is the same value under its first name.
 // Pure function: no database, no files. Sizes are integer millimetres.
 const { standardFor } = require('./konumStandartlari');
 
@@ -144,7 +146,7 @@ function decide(result, ctx = {}) {
   const lead = [...notes.filter(n => !/^Ön\/arka: varsayılan/.test(n)), ...pixelNotes][0];
   if (state !== 'otomatik' && lead) s.olcuNotu = lead.length > 160 ? `${lead.slice(0, 157)}…` : lead;
   return { ...result, width_mm: width, height_mm: height, needs_confirmation: false, reasons: [], reason: '',
-    measure_source: { ...s, olcuDurumu: state, olcuKaynagi: from, notlar: all } };
+    measure_source: { ...s, durum: state, olcuDurumu: state, olcuKaynagi: from, notlar: all } };
 }
 // Text for the forms' "≈" line: an approximate or standard size says so and why (first reason).
 function formNote(source) {

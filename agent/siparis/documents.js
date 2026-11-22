@@ -676,7 +676,9 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPendi
       for (const app of l.applications) {
         if (pending.has(app.id) || missingDesign.has(app.id)) {
           const sized=[app.width_mm,app.height_mm].every(n=>Number.isSafeInteger(n) && n>0);
-          const pendingLabel=pending.has(app.id) ? (sized || pending.get(app.id)!=='Geçerli ölçü yok' ? null : 'Ölçü bekleniyor') : 'Desen dosyası bekleniyor';
+          // A measured print waiting only for its design keeps its size on the forms.
+          const size=sized ? `${String(app.width_mm/10).replace('.',',')} × ${String(app.height_mm/10).replace('.',',')} cm · ` : '';
+          const pendingLabel=pending.has(app.id) ? (sized || pending.get(app.id)!=='Geçerli ölçü yok' ? null : 'Ölçü bekleniyor') : `${size}Desen dosyası bekleniyor`;
           applications.push({type:app.kind,position:app.position,width_mm:0,height_mm:0,lineIds:[lineId],pending:true,reason:pending.get(app.id)??missingDesign.get(app.id),...(pendingLabel?{pendingLabel}:{})});
           continue;
         }

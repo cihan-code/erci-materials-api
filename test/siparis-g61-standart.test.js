@@ -46,11 +46,12 @@ test('G61 a broken table is refused; the CLI installs a valid one in DATA_DIR an
 test('G61 in band stays automatic, out of band is approximate, beyond twice the band takes the default', () => {
   const inBand = run(measured(100, 50), 'sol_gogus');
   assert.deepEqual([inBand.width_mm, inBand.height_mm, inBand.needs_confirmation, inBand.measure_source.olcuDurumu], [100, 50, false, 'otomatik']);
+  assert.equal(inBand.measure_source.durum, 'otomatik');
   const wide = run(measured(150, 50), 'sol_gogus');
   assert.deepEqual([wide.width_mm, wide.measure_source.olcuDurumu], [150, 'yaklasik']);
   assert.match(wide.measure_source.olcuNotu, /olağan aralığın \(7–12 cm\) dışında/);
   const absurd = run(measured(260, 130), 'sol_gogus');
-  assert.deepEqual([absurd.width_mm, absurd.height_mm, absurd.measure_source.olcuDurumu], [100, 50, 'standart']);
+  assert.deepEqual([absurd.width_mm, absurd.height_mm, absurd.measure_source.olcuDurumu, absurd.measure_source.durum], [100, 50, 'standart', 'standart']);
   assert.deepEqual(absurd.measure_source.hamOlcu, { width_mm: 260, height_mm: 130 });
   const tiny = run(measured(30, 30), 'sol_gogus');
   assert.equal(tiny.measure_source.olcuDurumu, 'standart');

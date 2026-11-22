@@ -43,9 +43,9 @@ test('G61 a print waiting for its design leaves the forms and the other prints g
   const vectors = files.filter(x => x.kind === 'desen_vektor');
   assert.equal(vectors.length, 1);
   assert.equal(f.db.prepare('SELECT application_id FROM document_file_meta WHERE file_id=?').get(vectors[0].id).application_id, chest.id);
-  assert.match(await text(f, files, 'onay_formu'), /Desen dosyası bekleniyor/);
+  assert.match(await text(f, files, 'onay_formu'), /28 × 23 cm · Desen dosyası bekleniyor/);
   const workshop = await text(f, files, 'baski_formu');
-  assert.match(workshop, /Sırt baskı uygulaması için desen dosyası bekleniyor; forma alınmadı/);
+  assert.match(workshop, /Sırt baskı uygulaması için 28 × 23 cm · desen dosyası bekleniyor; forma alınmadı/);
   // Approval is not blocked by the missing design, but the workshop jobs are parked for a person.
   await settleQuality(f);
   ok(await f.post(`/surumler/${v}/gonder`));
