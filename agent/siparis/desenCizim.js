@@ -4,7 +4,7 @@
 // normal vector.js path. Off unless DESEN_CIZIM=1 and a provider is available; any failure, timeout or a
 // redraw that does not look like the source leaves the old path (direct tracing) and records why.
 //   DESEN_CIZIM_SAGLAYICI = openai (OPENAI_API_KEY) | codex (development only: local Codex CLI) | kayit (replay folder)
-//   DESEN_CIZIM_KIP       = kirpik (the cut-out print) | tam (the whole product picture, every print at once)
+//   DESEN_CIZIM_KIP       = tam (default: the whole product picture, every print at once) | kirpik (the cut-out print alone)
 // Only the print / product picture leaves the server: no customer name, order number, price or e-mail.
 // Results are cached on disk per input bytes + request: the same print is never charged twice.
 const crypto = require('crypto');
@@ -46,7 +46,7 @@ function provider(env = process.env) {
   if (name === 'kayit') return env.DESEN_CIZIM_KAYIT_DIZIN ? 'kayit' : null;
   return null;
 }
-const mode = (env = process.env) => (env.DESEN_CIZIM_KIP || 'kirpik') === 'tam' ? 'tam' : 'kirpik';
+const mode = (env = process.env) => (env.DESEN_CIZIM_KIP || 'tam') === 'kirpik' ? 'kirpik' : 'tam';
 const model = (env = process.env) => env.DESEN_CIZIM_MODEL || ((env.DESEN_CIZIM_SAGLAYICI || 'openai') === 'codex' ? 'gpt-6-astra' : 'gpt-image-1');
 // Part of the artwork cache key of documents.js while the layer is on (off: the old key, untouched).
 const keyTag = (env = process.env) => provider(env) ? [REVISION, provider(env), mode(env), model(env)].join(':') : null;
@@ -153,9 +153,21 @@ async function upscale(buffer) {
   return { buffer: c.toBuffer('image/png'), width: w, height: h, enlarged: true };
 }
 
+// The flat ground of the redraw becomes transparent (the tracer and the workshop PDF must not carry a coloured box).
+async function groundToAlpha(buffer) {
+  const p = await pixels(buffer), ink = inkOf(p), g = ink.ground, d = p.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const dist = Math.hypot(d[i] - g[0], d[i + 1] - g[1], d[i + 2] - g[2]);
+    d[i + 3] = dist <= 35 ? 0 : dist >= 90 ? 255 : Math.round((dist - 35) / 55 * 255);
+  }
+  const c = canvasLib().createCanvas(p.width, p.height);
+  c.getContext('2d').putImageData(new (require('@napi-rs/canvas').ImageData)(d, p.width, p.height), 0, 0);
+  return c.toBuffer('image/png');
+}
+
 // ---- fidelity check ------------------------------------------------------------------------------------
 const GRID = 32;
-const LIMITS = { aspect: 0.25, color: 110, overlap: 0.6 };
+const LIMITS = { aspect: 0.25, color: 110, overlap: 0.5 };
 // Ink mask: transparent pixels are ground; otherwise ground = median colour of the border, ink = clearly different.
 function inkOf(p) {
   const { width: W, height: H, data } = p;
@@ -219,7 +231,17 @@ function overlapOf(ga, gb) {
 async function fidelity(source, redrawn, limits = LIMITS) {
   const a = inkOf(await pixels(source, 256)), b = inkOf(await pixels(redrawn, 256));
   const reasons = [];
+  // The prompt asks for a flat white or black ground; garment fabric left behind (any other ground) means no real redraw.
+  const g = b.ground;
+  if (!(g.every(v => v <= 40) || g.every(v => v >= 215))) return { ok: false, metrics: { zemin: g }, reasons: ['Zemin düz beyaz ya da siyah değil; kumaş kalmış olabilir'] };
   if (a.count < 20 || b.count < 20) return { ok: false, metrics: {}, reasons: ['Baskı mürekkebi ayırt edilemedi'] };
+  // The model sometimes hands the cut-out back untouched (fabric still there): nothing was redrawn.
+  const sa = await pixels(source, 48), sb = await pixels(redrawn, 48);
+  if (sa.width === sb.width && sa.height === sb.height) {
+    let diff = 0;
+    for (let i = 0; i < sa.data.length; i += 4) diff += Math.abs(sa.data[i] - sb.data[i]) + Math.abs(sa.data[i + 1] - sb.data[i + 1]) + Math.abs(sa.data[i + 2] - sb.data[i + 2]);
+    if (diff / (sa.data.length / 4 * 3) < 6) return { ok: false, metrics: {}, reasons: ['Çıktı girdinin kopyası; yeniden çizilmemiş'] };
+  }
   const A = boxAndGrid(points(a));
   let best = null;
   for (let deg = -90; deg <= 90; deg += 5) {
@@ -302,7 +324,7 @@ async function apply({ crop, image, position, prints, cacheDir, env = process.en
     const check = await fidelity(crop, drawn.buffer);
     Object.assign(report, { sadakat: check.metrics, onbellek: drawn.cached, sureMs: drawn.ms });
     if (!check.ok) throw Object.assign(new Error(`Yeniden çizim kaynağa benzemiyor: ${check.reasons.join('; ')}`), { sadakat: check });
-    const big = await upscale(drawn.buffer);
+    const big = await upscale(await groundToAlpha(drawn.buffer));
     Object.assign(report, { yol: 'yeniden-cizim', cozunurluk: [big.width, big.height], buyutuldu: big.enlarged });
     return { used: true, buffer: big.buffer, report };
   } catch (e) {
@@ -314,5 +336,5 @@ async function apply({ crop, image, position, prints, cacheDir, env = process.en
   }
 }
 
-module.exports = { enabled, provider, mode, model, keyTag, apply, redrawCrop, redrawFull, fidelity, upscale, setTestProvider,
+module.exports = { enabled, provider, mode, model, keyTag, apply, redrawCrop, redrawFull, fidelity, upscale, groundToAlpha, setTestProvider,
   promptCrop, promptFull, LIMITS, POSITION_TEXT };

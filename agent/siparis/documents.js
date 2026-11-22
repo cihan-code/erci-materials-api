@@ -618,7 +618,8 @@ async function extractPreview(db,dataDir,v,line,app,input,user,signal,retryError
       // Information only (line colour not seen on the garment): no confirmation.
       if(artwork.notes?.length)result.report={...result.report,notes:artwork.notes};
       if(redraw&&!redraw.off) {
-        result.report={...result.report,desenYolu:redraw.report.yol,desenCizim:redraw.report};
+        result.report={...result.report,desenYolu:redraw.report.yol,desenCizim:redraw.report,
+          ...(redraw.used?{notes:[...(result.report.notes||[]),'Yeniden çizim: yazı ve ince ayrıntılar kaynakla gözle karşılaştırılmalı (model harf ya da desen uydurabilir).']}:{})};
         // A redraw that was refused needs the usual visual check: the old trace of a poor crop is not trusted silently.
         if(redraw.report.elleKontrol)result.report={...result.report,quality:'teyit',reasons:[...(result.report.reasons||[]),`Yeniden çizim kullanılmadı, elle kontrol: ${redraw.report.neden}`]};
       }

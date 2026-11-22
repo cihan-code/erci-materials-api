@@ -66,6 +66,10 @@ test('G69 fidelity: same drawing on another ground passes; other shape, ratio or
   assert.ok(!ratio.ok, JSON.stringify(ratio)); // stretched: ratio and/or shape refuse it
   const colour = await dc.fidelity(mark({ bold: 16 }), mark({ ground: '#ffffff', ink: '#206030', bold: 16 }));
   assert.ok(!colour.ok && colour.reasons.some(r => /renk/i.test(r)), JSON.stringify(colour));
+  const dark = mark({ ground: '#000000' }), copy = await dc.fidelity(dark, dark);
+  assert.ok(!copy.ok && /kopyası/.test(copy.reasons[0]), JSON.stringify(copy)); // handed back untouched
+  const fabric = await dc.fidelity(src, mark()); // a redraw that still has the garment colour as its ground
+  assert.ok(!fabric.ok && /Zemin/.test(fabric.reasons[0]), JSON.stringify(fabric));
   const empty = await dc.fidelity(src, png(Object.assign(createCanvas(100, 100), {})));
   assert.equal(empty.ok, false);
 });
@@ -160,8 +164,8 @@ test('G69 in the document flow: flag off keeps the old path; flag on records the
   ok(await f.post(`/surumler/${v}/hazirla`));
   assert.ok(reports().length && reports().every(r => r.desenYolu === undefined)); // off: nothing new in the record
   // On, with a provider that returns a clean redraw of the extracted print.
-  const before = process.env.DESEN_CIZIM; process.env.DESEN_CIZIM = '1';
-  t.after(() => { if (before === undefined) delete process.env.DESEN_CIZIM; else process.env.DESEN_CIZIM = before; });
+  const before = process.env.DESEN_CIZIM; process.env.DESEN_CIZIM = '1'; process.env.DESEN_CIZIM_KIP = 'kirpik';
+  t.after(() => { delete process.env.DESEN_CIZIM_KIP; if (before === undefined) delete process.env.DESEN_CIZIM; else process.env.DESEN_CIZIM = before; });
   let calls = 0;
   dc.setTestProvider(async req => { calls++; const src = await loadImage(req.files[0].buffer), c = createCanvas(src.width * 2, src.height * 2), x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height); x.drawImage(src, 0, 0, c.width, c.height); return new Map([['print', png(c)]]); });
   t.after(() => dc.setTestProvider(null));
