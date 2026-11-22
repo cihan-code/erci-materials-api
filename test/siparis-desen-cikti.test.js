@@ -191,6 +191,10 @@ test('G74 high resolution PNG: >= 600 dpi and >= 6000 px, transparent, only the 
   const back = cikti.pngSize(1600, 1100, 475, 329);
   assert.ok(back.W >= Math.ceil(475 / 25.4 * 600) && back.dpi >= 600, JSON.stringify(back));
   assert.deepEqual([cikti.pngSize(100, 200, 50, 50).H, cikti.pngSize(100, 200, 50, 50).dpi >= 600], [6000, true]);
+  // Pixel budget (DESEN_PNG_MP): the back print at 40 MP stays within it, keeps 6000 px and says its lower dpi.
+  const capped = cikti.pngSize(1600, 1100, 475, 329, { DESEN_PNG_MP: '40' });
+  assert.ok(capped.W * capped.H <= 40e6 && Math.max(capped.W, capped.H) >= 6000 && capped.dpi < 600, JSON.stringify(capped));
+  assert.deepEqual(cikti.pngSize(1600, 1100, 475, 329), back); // default 100 MP: 600 dpi
 });
 
 // ---- 4. choice rule ------------------------------------------------------------------------------------

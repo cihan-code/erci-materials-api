@@ -631,7 +631,12 @@ async function extractPreview(db,dataDir,v,line,app,input,user,signal,retryError
           // G74: a print with its own design file is never drawn by the model (it stays in the list: the job key does not change when a file arrives later).
           prints:line.applications.map(a=>({position:a.position,...(a.id!==app.id&&artworkFor(db,v,line,a).source?{kaynak:true}:{})})),
           cacheDir:desenIsci.cacheDir(dataDir),signal});
-        if(redraw.used)artwork={...artwork,buffer:redraw.buffer};
+        if(redraw.used) {
+          // G74: the tracer and the workshop PNG get the clean drawing: every pixel one of its inks or transparent.
+          const clean=await generateInChild({type:'temizCizim',input:{source:{buffer:redraw.buffer,mime:'image/png'}}},signal);
+          artwork={...artwork,buffer:clean?Buffer.from(clean.buffer):redraw.buffer};
+          if(clean)redraw.report.murekkep=clean.inks;
+        }
       }
       result=await generateInChild({type:'vector',designBox:true,input:{buffer:artwork.buffer,mime:'image/png'}},signal);
       // A separation warning (small print) needs the same visual check as a vector warning.
@@ -1119,7 +1124,7 @@ async function generateInChild(input,signal,{timeoutMs=120000}={}) {
     const result=await run({type:'raster',input:{buffer:source.buffer,edge}});
     return {...source,buffer:result.buffer,mime:'image/png',rasterSource:size};
   }
-  if(['desenCikti','vektorKapisi'].includes(input.type)) input={...input,input:{...input.input,source:await shrink(input.input.source,2048)}};
+  if(['desenPng','vektorKapisi','temizCizim'].includes(input.type)) input={...input,input:{...input.input,source:await shrink(input.input.source,2048)}};
   else if(input.type==='vector') {
     const source=await shrink(input.input,800);
     const qualitySource=await shrink(source.qualitySource,800);
@@ -1230,7 +1235,11 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
         const meta={applicationId:a.id,...(!input.source?{lineId:line.id}:{})};
         let out=null;
         if(raster) {
-          try {out=await generateInChild({type:'desenCikti',input:{source:original,pdf:result.pdf,widthMm:a.width_mm,heightMm:a.height_mm}},signal,{timeoutMs:180000});}
+          // Two one-shot children in turn (renderQueue runs one job at a time): the gate and the picture never share a heap.
+          try {
+            const kapi=await generateInChild({type:'vektorKapisi',input:{source:original,pdf:result.pdf}},signal);
+            out={kapi,...await generateInChild({type:'desenPng',input:{source:original,widthMm:a.width_mm,heightMm:a.height_mm}},signal,{timeoutMs:180000})};
+          }
           catch(e) {if(signal.aborted||e.code==='PREPARE_TIMEOUT')throw e;out={hata:String(e.message||e).slice(0,200)};}
         }
         // A faithful trace refused only because the measured box stretches it: the vector is made again at the design's own
@@ -1551,13 +1560,9 @@ if (require.main===module && process.argv[2]==='--vector-worker') {
       }
       else if (job.type==='extractArtwork') result=await require('./autoMeasure').extractArtwork(job.input);
       else if (job.type==='vektorKapisi') result=await require('./desenCikti').vectorGate({source:Buffer.from(job.input.source.buffer),pdf:Buffer.from(job.input.pdf)});
-      else if (job.type==='desenCikti') {
-        // G74: the gate first, then the picture (its rows are compressed in bands; see desenCikti.js).
-        const desenCikti=require('./desenCikti'),{source,pdf,widthMm,heightMm}=job.input;
-        const kapi=await desenCikti.vectorGate({source:Buffer.from(source.buffer),pdf:Buffer.from(pdf)});
-        global.gc?.();
-        result={kapi,...await desenCikti.highResPng({source:Buffer.from(source.buffer),widthMm,heightMm})};
-      }
+      // G74: the picture's rows are compressed in bands (desenCikti.js); the clean drawing is made here, off the server's event loop.
+      else if (job.type==='desenPng') result=await require('./desenCikti').highResPng({source:Buffer.from(job.input.source.buffer),widthMm:job.input.widthMm,heightMm:job.input.heightMm});
+      else if (job.type==='temizCizim') result=await require('./desenCikti').cleanPng(Buffer.from(job.input.source.buffer));
       else if (job.type==='vector') {
         const input=await normalizeVectorInput(job.input);
         result=await vectorModule().vectorize(input);

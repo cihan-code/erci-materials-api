@@ -369,10 +369,8 @@ async function apply({ crop, image, position, prints, cacheDir, env = process.en
     Object.assign(report, { sadakat: check.metrics, onbellek: drawn.cached, sureMs: drawn.ms });
     if (!check.ok) throw Object.assign(new Error(`Yeniden çizim kaynağa benzemiyor: ${check.reasons.join('; ')}`), { sadakat: check });
     const big = await upscale(await groundToAlpha(drawn.buffer));
-    // G74: the tracer and the workshop PNG get the clean drawing: every pixel one of its inks or transparent.
-    const clean = await require('./desenCikti').cleanPng(big.buffer);
-    Object.assign(report, { yol: 'yeniden-cizim', cozunurluk: [big.width, big.height], buyutuldu: big.enlarged, ...(clean ? { murekkep: clean.inks } : {}) });
-    return { used: true, buffer: clean ? clean.buffer : big.buffer, report };
+    Object.assign(report, { yol: 'yeniden-cizim', cozunurluk: [big.width, big.height], buyutuldu: big.enlarged });
+    return { used: true, buffer: big.buffer, report };
   } catch (e) {
     report.neden = String(e.message || e).slice(0, 300);
     if (e.bekliyor) { report.durum = 'bekliyor'; report.sureMs = Date.now() - t0; return { used: false, report }; } // queued, not a failure

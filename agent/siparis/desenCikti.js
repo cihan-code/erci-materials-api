@@ -100,7 +100,8 @@ function structure(a, b, GW, GH) {
 async function vectorGate({ source, pdf, limits = GATE }) {
   const src = await decode(source, FRAME), ground = groundOf(src);
   const ms = inkMask(src, ground), bs = inkBox(ms, src.width, src.height);
-  const page = await decode(await require('./vector').renderFirstPage(pdf, FRAME * 1.5));
+  // Rendered at the source frame's size (not larger): this child runs on a 512 MB server (G74 measurement: 1.5x cost ~90 MB more).
+  const page = await decode(await require('./vector').renderFirstPage(pdf, Math.max(src.width, src.height)));
   const mv = inkMask(page, ground), bv = inkBox(mv, page.width, page.height);
   if (!bs || !bv) return { gecti: false, olcum: {}, esik: limits, neden: bs ? 'Vektörde mürekkep yok' : 'Kaynakta mürekkep yok' };
   const GW = bs.w, GH = bs.h;
@@ -237,10 +238,16 @@ async function cleanPng(buffer) {
 
 // ---- very high resolution PNG ------------------------------------------------------------------------------
 // Physical size of the design inside the print box at its own ratio (contain), and the pixels for PNG_DPI / PNG_MIN_EDGE.
-function pngSize(boxW, boxH, widthMm, heightMm) {
+// Pixel budget (DESEN_PNG_MP, million pixels, default 100): rows are made in bands so memory hardly grows with size, but
+// time does; a print so large that 600 dpi passes the budget is made at the budget (never under PNG_MIN_EDGE px) and its
+// dpi in the report says so. A 47.5 x 33 cm back print at 600 dpi is about 82 MP.
+const budget = (env = process.env) => { const n = Number(env.DESEN_PNG_MP); return (Number.isFinite(n) && n > 0 ? n : 100) * 1e6; };
+function pngSize(boxW, boxH, widthMm, heightMm, env = process.env) {
   const ratio = boxW / boxH;
   const mmW = ratio >= widthMm / heightMm ? widthMm : heightMm * ratio, mmH = ratio >= widthMm / heightMm ? widthMm / ratio : heightMm;
-  const longMm = Math.max(mmW, mmH), longPx = Math.max(PNG_MIN_EDGE, Math.ceil(longMm / 25.4 * PNG_DPI));
+  const longMm = Math.max(mmW, mmH), shortOf = long => long * Math.min(ratio, 1 / ratio);
+  let longPx = Math.max(PNG_MIN_EDGE, Math.ceil(longMm / 25.4 * PNG_DPI));
+  if (longPx * shortOf(longPx) > budget(env)) longPx = Math.max(PNG_MIN_EDGE, Math.floor(Math.sqrt(budget(env) / Math.min(ratio, 1 / ratio))));
   const W = ratio >= 1 ? longPx : Math.max(1, Math.ceil(longPx * ratio)), H = ratio >= 1 ? Math.max(1, Math.ceil(longPx / ratio)) : longPx; // ceil: the short side keeps the dpi too
   return { W, H, mmW, mmH, dpi: Math.floor(Math.min(W / (mmW / 25.4), H / (mmH / 25.4))) };
 }
@@ -257,7 +264,8 @@ async function highResPng({ source, widthMm, heightMm }) {
   const pad = 1, sw = box.w + 2 * pad, sh = box.h + 2 * pad;
   const srcCanvas = canvasLib().createCanvas(sw, sh);
   { const full = canvasLib().createCanvas(clean.width, clean.height); full.getContext('2d').putImageData(new (canvasLib().ImageData)(clean.data, clean.width, clean.height), 0, 0);
-    srcCanvas.getContext('2d').drawImage(full, box.x - pad, box.y - pad, sw, sh, 0, 0, sw, sh); }
+    srcCanvas.getContext('2d').drawImage(full, box.x - pad, box.y - pad, sw, sh, 0, 0, sw, sh); full.width = full.height = 0; }
+  clean.data = null; // the full-size clean picture is no longer needed (memory: see vectorGate)
   const k = Math.max(1, Math.min(INTER / Math.max(sw, sh), Math.max(size.W, size.H) / Math.max(sw, sh)));
   const iw = Math.max(sw, Math.round(sw * k)), ih = Math.max(sh, Math.round(sh * k));
   const inter = canvasLib().createCanvas(iw, ih), ictx = inter.getContext('2d');
@@ -265,6 +273,8 @@ async function highResPng({ source, widthMm, heightMm }) {
   ictx.drawImage(srcCanvas, 0, 0, iw, ih);
   const id = ictx.getImageData(0, 0, iw, ih).data, alpha = new Uint8Array(iw * ih), ink = new Uint8Array(iw * ih);
   for (let q = 0, i = 0; q < iw * ih; q++, i += 4) { alpha[q] = id[i + 3]; if (id[i + 3]) ink[q] = nearest(inks, id[i], id[i + 1], id[i + 2]); }
+  inter.width = inter.height = 0; srcCanvas.width = srcCanvas.height = 0; // native canvas memory back before the rows are made
+  global.gc?.();
   // The design's box inside the intermediate (the 1 px margin scaled).
   const ox = pad * iw / sw, oy = pad * ih / sh, bw = box.w * iw / sw, bh = box.h * ih / sh;
   const { W, H } = size, vote = new Float32Array(inks.length);
