@@ -46,7 +46,8 @@ function provider(env = process.env) {
   if (name === 'kayit') return env.DESEN_CIZIM_KAYIT_DIZIN ? 'kayit' : null;
   return null;
 }
-const mode = (env = process.env) => (env.DESEN_CIZIM_KIP || 'tam') === 'kirpik' ? 'kirpik' : 'tam';
+// The OpenAI edit endpoint returns ONE image per request, so there it is always one request per print (kirpik).
+const mode = (env = process.env) => (env.DESEN_CIZIM_SAGLAYICI || 'openai') === 'openai' || env.DESEN_CIZIM_KIP === 'kirpik' ? 'kirpik' : 'tam';
 const model = (env = process.env) => env.DESEN_CIZIM_MODEL || ((env.DESEN_CIZIM_SAGLAYICI || 'openai') === 'codex' ? 'gpt-6-astra' : 'gpt-image-1');
 // Part of the artwork cache key of documents.js while the layer is on (off: the old key, untouched).
 const keyTag = (env = process.env) => provider(env) ? [REVISION, provider(env), mode(env), model(env)].join(':') : null;

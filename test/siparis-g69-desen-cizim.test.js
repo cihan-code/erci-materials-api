@@ -49,6 +49,8 @@ test('G69 off by default: no provider, no key tag, no call', async t => {
   const r = await dc.apply({ crop: mark(), position: 'sirt', env: {} });
   assert.deepEqual([r.used, r.off], [false, true]);
   assert.equal(calls.length, 0);
+  assert.equal(dc.mode({ DESEN_CIZIM_KIP: 'tam' }), 'kirpik'); // openai: one image per request
+  assert.equal(dc.mode({ DESEN_CIZIM_SAGLAYICI: 'codex' }), 'tam');
   dc.setTestProvider(null);
   assert.equal(dc.provider(ENV), null); // flag on but no key: still the old path
   assert.equal(dc.provider({ ...ENV, OPENAI_API_KEY: 'x' }), 'openai');
@@ -111,7 +113,7 @@ test('G69 a failing provider, a timeout or a dissimilar redraw never throws: old
 
 test('G69 whole-picture mode: one request for every print; a print that did not come back falls to the old path', async t => {
   const calls = fake(t, req => new Map(req.outputs.filter(n => n !== 'sag_kol').map(n => [n, mark({ ground: '#000000', w: 640, h: 430 })])));
-  const dir = tmp(t), env = { ...ENV, DESEN_CIZIM_KIP: 'tam' }, image = mockup().image;
+  const dir = tmp(t), env = { ...ENV, DESEN_CIZIM_SAGLAYICI: 'codex', DESEN_CIZIM_KIP: 'tam' }, image = mockup().image;
   const prints = [{ position: 'sirt' }, { position: 'sol_gogus' }, { position: 'sag_kol' }];
   const crop = mark();
   const [a, b, c] = await Promise.all(prints.map(p => dc.apply({ crop, image, position: p.position, prints, cacheDir: dir, env })));
