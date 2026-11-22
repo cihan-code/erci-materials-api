@@ -26,6 +26,15 @@ function panelData(db) {
         JOIN orders o ON o.id=v.order_id WHERE x.kind='maliyet_aktarim' AND x.status='fiyat_bekliyor' ORDER BY x.id`),
       basarisiz: outboxCount('maliyet_aktarim', 'basarisiz'),
     },
+    // G63: approval chain; failures and the last run's warnings (a field kept because it was changed by hand).
+    onay_zinciri: {
+      basarisiz: outboxCount('onay_zinciri', 'basarisiz'),
+      bekleyen: outboxCount('onay_zinciri', 'bekliyor'),
+      uyarilar: db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='onay_zinciri'").get()
+        ? rows(`SELECT o.order_no AS siparis_no,z.warnings_json FROM onay_zinciri z JOIN orders o ON o.id=z.order_id
+            WHERE z.warnings_json<>'[]' ORDER BY z.updated_at DESC LIMIT 50`).flatMap(r => JSON.parse(r.warnings_json).map(mesaj => ({ siparis_no: r.siparis_no, mesaj })))
+        : [],
+    },
     stok_ozet: {
       kalem_sayisi: stok.length,
       kullanilabilir_kg_toplam: stok.filter(i => i.unit === 'kg').reduce((s, i) => s + (i.total - i.reserved), 0) / 1000,

@@ -10,11 +10,13 @@ const { approveVersion } = require('./approval');
 const stock = require('./stock');
 const { kartelaView, fabricTypeList } = require('./kartela');
 const outbox = require('./outbox');
-module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, recipes } = {}) {
+module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, recipes, customerLimits } = {}) {
   const db = suppliedDb || openDb(path.join(dataDir, 'siparis.sqlite'));
   const router = express.Router();
   const requireUser = authFor(db);
   const wrap = fn => (req,res,next) => Promise.resolve().then(() => fn(req,res)).catch(next);
+  // G64: customer link (own body limit, no login); the staff link-minting route inside needs requireUser.
+  require('./routes-musteri')(router, { db, dataDir, requireUser, recipes, ...(customerLimits ? { limits: customerLimits } : {}) });
   router.use(express.json({limit:'2mb'}));
   router.post('/giris', wrap(async (req,res) => res.json(await login(db, { name:req.body.name ?? req.body.ad, password:req.body.password ?? req.body.sifre }))));
   require('./routes-fatura')(router, { db, requireUser }); // before the user gate: intake also takes the service key
@@ -101,12 +103,15 @@ module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, r
   router.post('/outbox/:id/manuel', requireUser('onay'), wrap((req,res) => res.json(outbox.setManual(db,Number(req.params.id),req.user))));
   router.post('/outbox/:id/elle-gonderildi', requireUser('onay'), wrap((req,res) => res.json(outbox.markManualSent(db,Number(req.params.id),req.user,req.body.providerRef))));
   require('./routes-maliyet')(router, { db, dataDir, worker });
+  // G63: approval chain (İşler + Üretim Takip); does nothing unless ONAY_ZINCIRI=1.
+  const stopChain = require('./onayZinciri').mount(db, { dataDir, recipes, worker });
   router.use((err,req,res,next) => {
     if (res.headersSent) return next(err);
     const status = err.status || (err.code?.startsWith('SQLITE_CONSTRAINT') ? 409 : 500);
     res.status(status).json({error:status===500 ? 'Sipariş işlemi tamamlanamadı' : err.message});
   });
   app.use('/api/siparis',router); // Parent app already applies CORS_ORIGIN before this router.
-  const stop = worker ? outbox.startWorker(db) : () => {};
+  const stopWorker = worker ? outbox.startWorker(db) : () => {};
+  const stop = () => { stopWorker(); stopChain(); };
   return { db, stop, close() { stop(); if (!suppliedDb) db.close(); } };
 };

@@ -10,6 +10,7 @@ const outbox = require('./outbox');
 const { snapshot } = require('./orders');
 const { normArea } = require('../productionForm');
 const recipeReader = require('../operations/recipes');
+const sizes = require('./boyutEsleme');
 
 const KIND = 'maliyet_aktarim';
 const STALE_REF = 'atlandi:eski_surum';
@@ -39,6 +40,17 @@ const areaLabel = area => AREA_LABELS[normArea(area)] || area;
 function missingLabel(message) {
   return String(message).replace(/((?:Baskı|Nakış) boyutu seçilmeli: ")([^"]+)(")/g,
     (_, prefix, area, suffix) => prefix + areaLabel(area) + suffix).trim().replace(/[.,;:!?]+$/, '');
+}
+// G63: the order lines' own sale price (excl. VAT, whole kuruş) as a TL unit price, only when every counted line has the
+// same one. Differing or partial prices are never averaged: the price stays unknown and the reason is returned.
+function linePrice(lines) {
+  const counted = (lines || []).filter(l => l.quantity > 0);
+  const priced = counted.filter(l => l.unit_price_kurus != null);
+  if (!counted.length || !priced.length) return { unitPrice: null, reason: null };
+  if (priced.length < counted.length) return { unitPrice: null, reason: 'Birim fiyatı yalnız bazı satırlarda var; İşler fiyatı boş bırakıldı' };
+  const set = new Set(priced.map(l => l.unit_price_kurus));
+  if (set.size > 1) return { unitPrice: null, reason: 'Satırların birim fiyatları farklı; İşler tek birim fiyat tutar, fiyat boş bırakıldı' };
+  return { unitPrice: [...set][0] / 100, reason: null };
 }
 // Bad or ambiguous data fails the same way on every attempt; the core parks it as basarisiz with an eksik_alan teyit.
 function dataError(message) { const err = new Error(message); err.permanent = true; return err; }
@@ -232,7 +244,12 @@ async function transfer(payload, context, { dataDir, recipes } = {}) {
 
   // 3. yeniden hesapla: quantities and template cost/price from panel costTemplates.
   const row = getRow(db, v.id);
-  const bnItems = row?.bn_items_json ? JSON.parse(row.bn_items_json) : null;
+  const lines = snapshot(db, v.id).lines;
+  // A price or size list typed in the fiyat form wins; otherwise the order's own line price and the size table (G63).
+  const manual = row?.unit_price != null;
+  const price = manual ? row.unit_price : linePrice(lines).unitPrice;
+  const derived = row?.bn_items_json ? null : sizes.derive(sizes.rules(db), lines, L.store.readPanelRaw()?.data?.costTemplates);
+  const bnItems = row?.bn_items_json ? JSON.parse(row.bn_items_json) : derived.bnItems;
   const { form } = facts;
   const rec = L.document.recomputeProdForm(doc.id, { order_no: form.order_no, product_type: form.product_type,
     product_description: form.product_description, total_quantity: form.total_quantity, size_breakdown: form.size_breakdown,
@@ -241,14 +258,20 @@ async function transfer(payload, context, { dataDir, recipes } = {}) {
   const { quantities: q, costMatch: cm } = rec.prodComputation;
   const computation = { productType: facts.label, totalQty: q.totalQty, template: cm.templateMatch, costItems: cm.costItems,
     costTotal: cm.costTotal, suggestedUnitPrice: cm.suggestedUnitPrice, priceTierAvailable: cm.priceTierAvailable,
-    baskiNakisItems: cm.baskiNakisItems, applications: facts.apps, notes: cm.notes, warnings: q.warnings };
-  const missing = missingInputs(cm, facts.apps, !!bnItems, row?.unit_price ?? null);
+    baskiNakisItems: cm.baskiNakisItems, applications: facts.apps, notes: cm.notes, warnings: q.warnings,
+    // G63: per application, the size the table chose and from which measure and rule (null when typed by hand).
+    sizeSources: derived ? derived.apps : null, priceSource: manual ? 'elle' : price != null ? 'satir' : null };
+  // Why the size table found no size for an application: shown with the other missing inputs, never guessed.
+  const sizeGaps = derived && sizes.rules(db).length ? derived.apps.filter(a => a.adet > 0 && !a.boyut)
+    .map(a => `${techLabel(a.tur)} boyutu bulunamadı: "${areaLabel(a.konum)}" (${a.kaynak})`) : [];
+  const missing = [...new Set([...missingInputs(cm, facts.apps, !!bnItems, price), ...sizeGaps])];
   tx(db, () => upsert(db, v.id, v.order_id, { computation_json: JSON.stringify(computation), missing_json: JSON.stringify(missing) }));
-  // Without a price the job parks until the fiyat endpoint requeues it; with a price, anything still missing is a data error.
+  // Without a typed price the job parks until the fiyat endpoint requeues it, also when only the line price is known but
+  // something else (a size) is still missing. With a typed price, anything still missing is a data error (as before).
   // The queue re-tests the wait inside its parking transaction, so a price saved meanwhile requeues the job instead.
-  if (row?.unit_price == null) return { status: 'fiyat_bekliyor', stillWaiting: d => getRow(d, v.id)?.unit_price == null };
+  if (!manual && (price == null || missing.length)) return { status: 'fiyat_bekliyor', stillWaiting: d => getRow(d, v.id)?.unit_price == null };
   if (missing.length) throw dataError(`Maliyet aktarımı için eksik alanlar:\n${missing.map(message => `• ${message}`).join('\n')}`);
-  if (row.kdv_dahil === 1) throw dataError('Birim fiyat KDV dahil kaydedilmiş; fiyat KDV hariç yeniden girilmeli');
+  if (manual && row.kdv_dahil === 1) throw dataError('Birim fiyat KDV dahil kaydedilmiş; fiyat KDV hariç yeniden girilmeli');
 
   // 4. işle: commitDocument, using its "update" choice whenever an İşler record already exists.
   const raw = L.store.readPanelRaw();
@@ -266,8 +289,8 @@ async function transfer(payload, context, { dataDir, recipes } = {}) {
     product_type: form.product_type, product_description: form.product_description, color: form.color,
     total_quantity: q.totalQty, size_breakdown: facts.sizes, print_areas: form.print_areas,
     embroidery_areas: form.embroidery_areas, special_instructions: form.special_instructions,
-    unit_price: row.unit_price, cost_items: cm.costItems,
-    notes: `Sipariş ${v.order_no} v${v.version_no} · Birim fiyat: ${KDV_NOTE}`,
+    unit_price: price, cost_items: cm.costItems,
+    notes: `Sipariş ${v.order_no} v${v.version_no} · Birim fiyat: ${KDV_NOTE}${manual ? '' : ' (sipariş satırından)'}${derived?.bnItems ? ' · Baskı/nakış boyutu ölçüden (boyut eşleme tablosu)' : ''}`,
   };
   const out = L.commit.commitDocument(doc.id, { confirm: true, fields, links: { customer_id: target ? target.customer_id ?? null : null },
     ...(target ? { existingJobAction: 'update' } : {}) });
@@ -295,6 +318,8 @@ function costStatus(db, orderId) {
     outboxId: job?.id ?? null, status: job?.status ?? null, priceWaiting: job?.status === 'fiyat_bekliyor',
     lastError: job?.last_error ?? null, jobId: row?.panel_job_id ?? prior?.panel_job_id ?? null,
     unitPrice: row?.unit_price ?? null, kdvDahil: row?.unit_price == null ? null : false,
+    // G63: the order's own line price (used when no price is typed); the typed price above wins.
+    linePrice: job ? linePrice(snapshot(db, job.version_id).lines).unitPrice : null,
     priceSetBy: row?.price_by ?? null, priceSetAt: row?.price_at ?? null,
     bnItems: row?.bn_items_json ? JSON.parse(row.bn_items_json) : null,
     missing: JSON.parse(row?.missing_json || '[]'), skippedReason: row?.skipped_reason ?? null,
@@ -335,4 +360,4 @@ function setPrice(db, orderId, body, user) {
   });
 }
 
-module.exports = { KIND, STALE_REF, ensureSchema, register, transfer, costStatus, setPrice, resolveJob, applicationUnits, orderFacts };
+module.exports = { KIND, STALE_REF, ensureSchema, register, transfer, costStatus, setPrice, resolveJob, applicationUnits, orderFacts, linePrice };

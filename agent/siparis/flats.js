@@ -4,7 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { tx, audit, fail } = require('./db');
 const { assertUser } = require('./auth');
-const { validSizeChart } = require('./sizeChart');
+const { validSizeChart, sourceRank, chartMeasurements } = require('./sizeChart');
 
 function init(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS document_flats (
@@ -128,6 +128,61 @@ function fillMissingSizeCharts(db, records, { dry=false } = {}) {
   dry ? run() : tx(db, run);
   return { rows, unused:[...names].filter(ad => !seen.has(ad)), filled:rows.filter(r => r.durum==='dolduruldu').length };
 }
+// G66: one record of the measurement file (whole mm, source cell per value) -> stored chart (cm).
+function chartFromMeasurementRecord(r) {
+  const bad = () => fail(`Geçersiz kalıp ölçü kaydı: ${r?.ad}`);
+  if (!r || typeof r.ad !== 'string' || !r.ad.trim() || !['excel','resim'].includes(r.kaynakTuru) || typeof r.dosya !== 'string' || !r.dosya.trim() ||
+      !r.bedenler || typeof r.bedenler !== 'object' || (r.kalipAdlari != null && !Array.isArray(r.kalipAdlari))) bad();
+  const bedenler = {};
+  for (const [size, values] of Object.entries(r.bedenler)) {
+    if (!values || typeof values !== 'object' || Array.isArray(values)) bad();
+    bedenler[size] = {};
+    for (const [key, mm] of Object.entries(values)) {
+      if (!Number.isInteger(mm) || mm <= 0) bad();
+      bedenler[size][key] = mm / 10;
+    }
+  }
+  const chart = { birim:'cm', kaynak:r.sayfa ? `${r.dosya} / ${r.sayfa}` : r.dosya, kaynakTuru:r.kaynakTuru, gogusTuru:r.gogusTuru ?? 'belirsiz', bedenler,
+    ...(r.hucreler ? { hucreler:r.hucreler } : {}), ...(r.etiketler ? { etiketler:r.etiketler } : {}) };
+  if (!validSizeChart(chart)) bad();
+  return chart;
+}
+// kalip-olcu-yukle: loads kalip-olculeri.json. Fills empty charts and upgrades picture
+// charts with Excel ones; hand-entered and equal-or-better charts stay untouched.
+function loadMeasurementFile(db, file, { dry=false } = {}) {
+  if (!file || !Array.isArray(file.kaliplar)) fail('kaliplar listesi olan ölçü dosyası gerekli');
+  const records = file.kaliplar.map(r => ({ r, chart:chartFromMeasurementRecord(r), names:(r.kalipAdlari ?? []).map(a => a.trim()) }));
+  const rows = [], seen = new Set();
+  const run = () => {
+    for (const f of list(db)) {
+      const hit = records.filter(x => x.names.includes(f.ad.trim()));
+      const row = { id:f.id, ad:f.ad, alanlar:[] };
+      rows.push(row);
+      if (!hit.length) { row.durum='atlandi'; row.neden='kaynak listesinde yok'; continue; }
+      // Several records for one library name: the best source wins, then the first listed.
+      const best = hit.reduce((a, b) => sourceRank(b.chart) > sourceRank(a.chart) ? b : a);
+      seen.add(best.r.ad);
+      if (best.r.urun != null && best.r.urun !== f.urun) { row.durum='atlandi'; row.neden='ürün farklı'; continue; }
+      const raw = db.prepare('SELECT bedenTablosu FROM document_flats WHERE id=?').get(f.id).bedenTablosu;
+      const stored = raw != null && raw.trim() && raw !== 'null' && raw !== '{}' ? f.bedenTablosu : null;
+      if (stored && !(sourceRank(best.chart) > sourceRank(stored) && sourceRank(stored) < 4)) { row.durum='tam'; continue; }
+      row.alanlar.push('bedenTablosu'); row.durum = stored ? 'guncellendi' : 'dolduruldu';
+      if (!dry) {
+        db.prepare('UPDATE document_flats SET bedenTablosu=? WHERE id=?').run(JSON.stringify(best.chart), f.id);
+        audit(db, null, 'kalip_olcu_yukle', f.id, { kaynak:best.chart.kaynak, kaynakTuru:best.chart.kaynakTuru, cli:true });
+      }
+    }
+  };
+  dry ? run() : tx(db, run);
+  const used = new Set(records.filter(x => seen.has(x.r.ad)).map(x => x.r.ad));
+  return { rows, unused:records.map(x => x.r.ad).filter(ad => !used.has(ad)), filled:rows.filter(r => r.durum==='dolduruldu' || r.durum==='guncellendi').length };
+}
+// The one call measurement code (G61) uses: pattern + size -> measurement points in mm and their source.
+function kalipOlculeri(db, kalipId, beden) {
+  const flat = get(db, kalipId);
+  const found = chartMeasurements(flat.bedenTablosu, beden);
+  return found ? { kalipId:flat.id, kalip:flat.ad, ...found } : null;
+}
 function lineSelection(db,line) {
   const {candidates,flat}=selection(db,line);
   return {kalipId:flat?.id??null,kalipAdaylari:candidates.map(({id,ad,refBeden})=>({id,ad,refBeden}))};
@@ -172,4 +227,4 @@ function saveReference(db, id, input, user) {
     return get(db, id);
   });
 }
-module.exports = { init, get, list, upload, saveReference, selection, lineSelection, missingLNote, fillMissingL, fillMissingSizeCharts };
+module.exports = { init, get, list, upload, saveReference, selection, lineSelection, missingLNote, fillMissingL, fillMissingSizeCharts, loadMeasurementFile, kalipOlculeri };

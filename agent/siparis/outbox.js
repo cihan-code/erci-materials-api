@@ -106,7 +106,7 @@ function markManualSent(db,id,user,providerRef = 'elle') {
   });
 }
 function registerHandler(kind, fn) {
-  if (!['atolye_dosya','maliyet_aktarim'].includes(kind) || typeof fn !== 'function') fail('Geçersiz kuyruk bağdaştırıcısı');
+  if (!['atolye_dosya','maliyet_aktarim','onay_zinciri'].includes(kind) || typeof fn !== 'function') fail('Geçersiz kuyruk bağdaştırıcısı');
   handlers.set(kind,fn);
   return () => { if (handlers.get(kind) === fn) handlers.delete(kind); };
 }

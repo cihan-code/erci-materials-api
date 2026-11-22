@@ -85,6 +85,9 @@ function insertLine(db, versionId, line, lineKey, sourceApplications = []) {
   if (note && note.length > 500) fail('Kumaş/kalıp açıklaması en çok 500 karakter olabilir');
   const kalipId = line.kalipId ?? line.kalip_id ?? null;
   if (kalipId!=null && !flats.selection(db,line).candidates.some(f=>f.id===kalipId)) fail('Kalıp bu ürünün adaylarından biri olmalı');
+  // G63: optional unit sale price, excluding VAT, in whole kuruş (no decimal money).
+  const price = line.unit_price_kurus ?? null;
+  if (price != null) integer(price, 'unit_price_kurus', 1);
   const fabric = resolveFabric(db, line);
   const id = Number(db.prepare(`INSERT INTO order_lines(version_id,line_key,product_key,fabric_item_id,color_name,quantity,sizes_json,lining,material_items_json,numune)
     VALUES(?,?,?,?,?,?,?,?,?,?)`).run(versionId, lineKey || crypto.randomUUID(), line.product_key, fabric.itemId,
@@ -92,6 +95,7 @@ function insertLine(db, versionId, line, lineKey, sourceApplications = []) {
   if (fabric.type) db.prepare('UPDATE order_lines SET fabric_type=? WHERE id=?').run(fabric.type,id);
   if (kalipId!=null) db.prepare('UPDATE order_lines SET kalip_id=? WHERE id=?').run(kalipId,id);
   if (note) db.prepare('UPDATE order_lines SET note=? WHERE id=?').run(note,id);
+  if (price != null) db.prepare('UPDATE order_lines SET unit_price_kurus=? WHERE id=?').run(price,id);
   for (const a of line.applications || []) {
     const appId = insertApplication(db, id, a);
     const source = sourceApplications.find(old => old.id === a.id &&
