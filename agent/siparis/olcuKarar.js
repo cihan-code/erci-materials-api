@@ -9,6 +9,8 @@
 // olcuDurumu is the same value under its first name.
 // Pure function: no database, no files. Sizes are integer millimetres.
 const { standardFor } = require('./konumStandartlari');
+// Notes are read by people on the forms: "sağ kol", never the order key "sag_kol".
+const { positionText } = require('./areas');
 
 const SLEEVES = ['kol', 'sol_kol', 'sag_kol'];
 const WIDTH_STEP = 5; // mm; the workshop sets widths in half centimetres
@@ -118,13 +120,13 @@ function decide(result, ctx = {}) {
     // G61b: a size the eye's box and a scale gave is never replaced by the standard (a 3 cm sleeve
     // mark stays 3 cm); out of band it is only approximate.
     if ((raw.w < std.min / 2 || raw.w > std.max * 2) && from !== 'görselden (göz)') {
-      notes.push(`Ölçülen en ${cm(raw.w)} cm, ${ctx.position} için olağan aralığın (${band}) çok dışında; ölçü yerine standart en (${cm(std.varsayilan)} cm) yazıldı.`);
+      notes.push(`Ölçülen en ${cm(raw.w)} cm, ${positionText(ctx.position)} için olağan aralığın (${band}) çok dışında; ölçü yerine standart en (${cm(std.varsayilan)} cm) yazıldı.`);
       state = 'standart'; from = 'standart ölçü (ölçü aralık dışı)';
       // The measured box keeps the print's proportion even when its size is not believable.
       const r = s.boyKaynagi === 'desen_orani' ? ctx.designRatio : positive(raw.h) ? raw.w / raw.h : shape?.ratio;
       raw = { w: std.varsayilan, h: positive(r) ? std.varsayilan / r : null };
     } else if (raw.w < std.min || raw.w > std.max) {
-      notes.push(`Ölçülen en ${cm(raw.w)} cm, ${ctx.position} için olağan aralığın (${band}) dışında.`);
+      notes.push(`Ölçülen en ${cm(raw.w)} cm, ${positionText(ctx.position)} için olağan aralığın (${band}) dışında.`);
       if (state === 'otomatik') state = 'yaklasik';
     }
     if (std.kasaMax && raw.w > std.kasaMax) {
@@ -142,7 +144,7 @@ function decide(result, ctx = {}) {
     state = 'standart'; from = 'standart ölçü (ölçülemedi)';
     const r = shape?.ratio;
     raw = { w: std.varsayilan, h: positive(r) ? std.varsayilan / r : null };
-    notes.push(`Görselden ölçü çıkmadı; ${ctx.position} için standart en ${cm(std.varsayilan)} cm yazıldı${positive(r) ? ` (boy ${shape.from === 'desen' ? 'desen' : 'kutu'} oranından)` : '; boy için oran yok'}.`);
+    notes.push(`Görselden ölçü çıkmadı; ${positionText(ctx.position)} için standart en ${cm(std.varsayilan)} cm yazıldı${positive(r) ? ` (boy ${shape.from === 'desen' ? 'desen' : 'kutu'} oranından)` : '; boy için oran yok'}.`);
   }
 
   const width = roundWidth(raw.w);

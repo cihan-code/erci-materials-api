@@ -14,6 +14,7 @@ const { buildWorkshopMessage, createWorkshopHandler } = require('./workshop');
 const { registerHandler } = require('./outbox');
 const goz = require('./goz');
 const { decide, formNote } = require('./olcuKarar');
+const { labelRawKeys } = require('./areas');
 const positionStandards = require('./konumStandartlari');
 const RECIPE_PRODUCTS = require('../operations/recipes.json').products;
 // Forms print the recipe label ("Tişört"), not the product key ("tisort"); an unknown key prints as stored.
@@ -716,7 +717,8 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPendi
 // "≈" on the forms: a mockup scale note (G45) and, from G61, an approximate or standard size.
 function measureNotes(source) {
   const notes=[...(source.scaleMode==='geo_ortalama'&&source.scaleNote?[String(source.scaleNote)]:[]),...(formNote(source)?[formNote(source)]:[])];
-  return notes.length ? {scaleNote:notes.join(' · '),...(source.olcuDurumu?{measureState:source.olcuDurumu}:{})} : {};
+  // Notes stored before G68 may still carry order keys (sag_kol); the forms show them in words.
+  return notes.length ? {scaleNote:labelRawKeys(notes.join(' · ')),...(source.olcuDurumu?{measureState:source.olcuDurumu}:{})} : {};
 }
 // The worker calibrates the scale on the pattern's own flat drawing (G45b).
 // One result per drawing file and L values is kept for this process; a
