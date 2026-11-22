@@ -97,3 +97,20 @@ test('G61b end to end: the eye\'s points size the chest print without a pixel sc
   const again = JSON.parse(f.db.prepare('SELECT measure_source FROM applications WHERE id=?').get(app.id).measure_source);
   assert.equal(again.goz.olcek, undefined);
 });
+
+test('G61b a design the colour separation cannot isolate is cut from the eye\'s box, the garment made transparent', async () => {
+  const { extractArtwork } = require('../agent/siparis/autoMeasure');
+  const { PNG } = require('pngjs');
+  const c = createCanvas(600, 600), x = c.getContext('2d');
+  x.fillStyle = '#5a1020'; x.fillRect(0, 0, 600, 600);
+  x.fillStyle = '#f4f4f4'; x.fillRect(100, 300, 80, 20); x.fillRect(100, 330, 40, 10);
+  const image = { buffer: c.toBuffer('image/png'), mime: 'image/png', gorunum: 'on' };
+  // A sleeve position: the colour path refuses it; without the eye's box the reason stays.
+  assert.match((await extractArtwork({ image, position: 'sol_kol' })).reason, /ayrıştırılamadı/);
+  const cut = await extractArtwork({ image, position: 'sol_kol', gozBox: { x: 90 / 600, y: 290 / 600, w: 100 / 600, h: 60 / 600 } });
+  assert.equal(cut.placement.gozKesit, true);
+  assert.deepEqual(cut.placement.designBoxPx, { x: 100, y: 300, w: 80, h: 40 });
+  const png = PNG.sync.read(cut.buffer), alpha = (px, py) => png.data[(py * png.width + px) * 4 + 3];
+  assert.equal(alpha(5, 5), 255); assert.equal(alpha(70, 30), 0); // ink kept, garment between the bars transparent
+  assert.match(cut.notes[0], /gözün kutusundan kesildi/);
+});

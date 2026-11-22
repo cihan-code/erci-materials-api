@@ -2022,7 +2022,32 @@ function positionPrint(match,ref,position) {
   return {...chosen,ambiguous:false,others:[],known:ranked.slice(1).map(r=>r.c.box)};
 }
 // Artwork recovery uses the existing placement detector but never infers a physical scale.
-async function extractArtwork({image,position,product:productKey,color,viewHint=null}) {
+// G61b: when colour separation cannot isolate the print, the eye's box (fitted to the ink) is
+// cut out: ink kept, the garment colour around it made transparent. A note says so.
+async function gozCut(image,gozBox) {
+  canvasLib ||= require('@napi-rs/canvas');
+  const [p]=await rasterPages(image,1600,image.mime==='application/pdf'?[1]:null);
+  const box={x:gozBox.x*p.width,y:gozBox.y*p.height,w:gozBox.w*p.width,h:gozBox.h*p.height};
+  const garment=ringColour(p,box),f=fitInkWith(p,box,garment);
+  const x0=Math.max(0,Math.floor(f.x)),y0=Math.max(0,Math.floor(f.y)),w=Math.min(p.width-x0,Math.ceil(f.w)),h=Math.min(p.height-y0,Math.ceil(f.h));
+  if(w<4||h<4)return null;
+  const c=canvasLib.createCanvas(w,h),ctx=c.getContext('2d'),out=ctx.createImageData(w,h);
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++) {
+    const i=((y0+y)*p.width+x0+x)*4,o=(y*w+x)*4,rgb=[p.data[i],p.data[i+1],p.data[i+2]];
+    if(p.data[i+3]<64||distance(rgb,garment)<=GOZ_INK)continue;
+    out.data[o]=rgb[0];out.data[o+1]=rgb[1];out.data[o+2]=rgb[2];out.data[o+3]=255;
+  }
+  ctx.putImageData(out,0,0);
+  return {buffer:c.toBuffer('image/png'),placement:{page:1,view:image.gorunum,rasterWidth:p.width,rasterHeight:p.height,designBoxPx:{x:x0,y:y0,w,h},gozKesit:true},
+    warnings:[],notes:['Desen gözün kutusundan kesildi (kumaş rengi saydam); kenarları kontrol edin.']};
+}
+async function extractArtwork(input) {
+  const result=await extractArtworkColour(input);
+  if(result?.buffer || !input.gozBox)return result;
+  const cut=await gozCut(input.image,input.gozBox).catch(()=>null);
+  return cut || result;
+}
+async function extractArtworkColour({image,position,product:productKey,color,viewHint=null}) {
   const view=viewForPosition(position);
   const supported=['gogus','sol_gogus','sag_gogus','sirt'];
   if(!supported.includes(position))return {reason:'Bu konumda üründen güvenilir desen ayrıştırılamadı; ayrı desen dosyası bağlayın.'};

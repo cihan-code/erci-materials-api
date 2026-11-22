@@ -413,8 +413,17 @@ function artworkFor(db,v,line,app) {
   // G58: the separation follows the front/back this print was measured with (or the picture's answer).
   const measured=provenance(app),own=image && measured.gorselFileId===image.id ? frontSide(measured.views,measured.selectedPage ?? 1) : null;
   const viewHint=own ? {front:own,source:'olcum'} : imageViewHint(db,v,image,app.id);
-  const key=JSON.stringify([ARTWORK_EXTRACTION_REVISION,line.product_key,line.color_name??null,app.position,app.kind,image?.id,image?.sha256,image?.gorunum,gap,...(viewHint?[viewHint]:[])]);
-  return {image,key,gap,...(viewHint?{viewHint}:{})};
+  // G61b: the eye's print box on this picture is the cut-out of last resort for the design.
+  const eye=image && measured.gorselFileId===image.id ? gozCutBox(measured.goz) : null;
+  const key=JSON.stringify([ARTWORK_EXTRACTION_REVISION,line.product_key,line.color_name??null,app.position,app.kind,image?.id,image?.sha256,image?.gorunum,gap,...(viewHint?[viewHint]:[]),...(eye?[eye]:[])]);
+  return {image,key,gap,...(viewHint?{viewHint}:{}),...(eye?{gozBox:eye}:{})};
+}
+// The eye's print box as fractions of the measured raster (fitted to the ink when it could be).
+function gozCutBox(eye) {
+  const b=eye?.boxPx||eye?.gozBoxPx,W=eye?.rasterWidth,H=eye?.rasterHeight;
+  if(!b || !(W>0) || !(H>0) || ![b.x,b.y,b.w,b.h].every(Number.isFinite) || b.w<=0 || b.h<=0)return null;
+  const r=n=>Math.round(n*1e4)/1e4;
+  return {x:r(b.x/W),y:r(b.y/H),w:r(b.w/W),h:r(b.h/H)};
 }
 // G58: where the front garment sits on a sheet whose two garments are named front and back.
 function frontSide(views,page=1) {
@@ -588,7 +597,7 @@ async function extractPreview(db,dataDir,v,line,app,input,user,signal,retryError
     if(previous&&(!retryError||previous.status!=='hata'))return previous;
     // A small print is read a second time at a higher resolution; on a slow
     // single CPU a ten-page sheet then needs more than the former 15 s.
-    artwork=await generateInChild({type:'extractArtwork',input:{image:original,position:app.position,product:line.product_key,color:line.color_name,viewHint:input.viewHint??null}},signal,{timeoutMs:30000});
+    artwork=await generateInChild({type:'extractArtwork',input:{image:original,position:app.position,product:line.product_key,color:line.color_name,viewHint:input.viewHint??null,...(input.gozBox?{gozBox:input.gozBox}:{})}},signal,{timeoutMs:30000});
     if(artwork.reason) {message=artwork.reason;status='teyit';}
     else {
       result=await generateInChild({type:'vector',designBox:true,input:{buffer:artwork.buffer,mime:'image/png'}},signal);
@@ -627,16 +636,18 @@ async function extractPreview(db,dataDir,v,line,app,input,user,signal,retryError
 function assertExtractedMeasurement(app,image,placement) {
   const source=provenance(app);
   if(!['otomatik','otomatik_renk'].includes(source.method))return;
-  const box=source.designBoxPx, current=placement.designBoxPx;
+  const eye=source.goz?.boxPx||source.goz?.gozBoxPx;
+  const box=(placement.gozKesit && eye) ? {...eye,rasterWidth:source.goz.rasterWidth,rasterHeight:source.goz.rasterHeight} : source.designBoxPx, current=placement.designBoxPx;
+  const edges=box && box.rasterWidth ? {w:box.rasterWidth,h:box.rasterHeight} : {w:source.rasterWidth,h:source.rasterHeight};
   const aligned=(offset,size,edge,currentOffset,currentSize,currentEdge)=> {
     if(![offset,size,edge,currentOffset,currentSize,currentEdge].every(Number.isFinite)||size<=0||edge<=0)return false;
     const relativeSize=size/edge,expectedSize=currentSize/currentEdge;
     const relativeCenter=(offset+size/2)/edge,expectedCenter=(currentOffset+currentSize/2)/currentEdge;
     return Math.abs(relativeSize/expectedSize-1)<=.12&&Math.abs(relativeCenter-expectedCenter)<=expectedSize*.12;
   };
-  if(source.gorselFileId===image.id&&source.selectedPage===placement.page&&box&&
-    aligned(box.x,box.w,source.rasterWidth,current.x,current.w,placement.rasterWidth)&&
-    aligned(box.y,box.h,source.rasterHeight,current.y,current.h,placement.rasterHeight))return;
+  if(source.gorselFileId===image.id&&(placement.gozKesit||source.selectedPage===placement.page)&&box&&
+    aligned(box.x,box.w,edges.w,current.x,current.w,placement.rasterWidth)&&
+    aligned(box.y,box.h,edges.h,current.y,current.h,placement.rasterHeight))return;
   fail(`Uygulama ${app.id}: Ayrıştırılan desen otomatik ölçü kutusuyla eşleşmedi. Önizlemeyi kontrol edip fiziksel ölçüyü girin.`,409);
 }
 
