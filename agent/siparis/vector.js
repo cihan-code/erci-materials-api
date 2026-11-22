@@ -870,7 +870,9 @@ function resizePage(page, target, crop) {
 }
 
 /** Local only. targetMm is the artwork content boundary in millimetres. */
-async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = false, applicationType = 'baski', qualitySource, garmentColor, includeSvg = false } = {}) {
+// rasterPixels (G74): the flat-artwork pixel bound for this call only (a redrawn print is traced at 1 MP; default FLAT_RASTER_PIXELS).
+async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = false, applicationType = 'baski', qualitySource, garmentColor, includeSvg = false, rasterPixels = null } = {}) {
+  const flatPixels = Number.isFinite(rasterPixels) && rasterPixels > 0 ? rasterPixels : qualityLimits().flatRasterPixels;
   if (!Buffer.isBuffer(buffer) || !buffer.length) throw new TypeError('buffer gerekli');
   const target = targetSize(targetMm);
   mime = String(mime || '').split(';')[0].toLowerCase();
@@ -885,7 +887,7 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
     // Flat logos are traced from up to FLAT_RASTER_PIXELS of the original (6 MP mask budget);
     // other artwork keeps the 800 px bound for the native colour tracer.
     if (bounded.resampled && !rasterSource && tracerChoice()!=='vtracer' && await flatRaster(bounded)) {
-      const large=await boundedRaster(buffer,qualityLimits().flatRasterPixels);
+      const large=await boundedRaster(buffer,flatPixels);
       global.gc?.();
       result=await trace(large.buffer, large.source??null, target, true, {flatOnly:true});
       if (result) bounded=large;
@@ -964,7 +966,7 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
       || !['image/png','image/jpeg','image/jpg'].includes(qualitySource.mime)) throw new TypeError('Geçerli kalite kaynağı gerekli');
     // A flat preview was traced from the larger raster; judge it against the same pixels.
     const flatPreview=FLAT_VECTORIZERS.has(qualitySource.metrics?.vectorizer) && !qualitySource.rasterSource;
-    const bounded=await boundedRaster(qualitySource.buffer,flatPreview ? qualityLimits().flatRasterPixels : undefined);
+    const bounded=await boundedRaster(qualitySource.buffer,flatPreview ? flatPixels : undefined);
     if(qualitySource.rasterSource)bounded.resampled=true;
     global.gc?.();
     const original=await rasterInput(bounded.buffer,bounded.source??null,true);

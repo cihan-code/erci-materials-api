@@ -254,3 +254,100 @@ test('G74 a whole-picture drawing refused as a copy of the input also gets the c
   assert.deepEqual(up.sonuc, { gogus: 'ikinci' });
   assert.match(konum(f).neden, /kopyası|Zemin/);
 });
+
+// ---- G74b: review round ----------------------------------------------------------------------------------
+function badge({ w = 800, h = 400, left = null } = {}) { // an invented opaque navy badge filling the picture, white lettering in the middle
+  const c = createCanvas(w, h), x = c.getContext('2d');
+  x.fillStyle = '#1a2a6c'; x.fillRect(0, 0, w, h);
+  if (left) { x.fillStyle = left; x.fillRect(0, 0, w / 2, h); }
+  x.fillStyle = '#ffffff'; x.font = `bold ${Math.round(h * 0.28)}px sans-serif`; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText('MERC', w / 2, h / 2);
+  return c.toBuffer('image/png');
+}
+const navyShare = png => { let n = 0, all = 0; for (let i = 0; i < png.data.length; i += 4) { all++; if (png.data[i + 3] && png.data[i + 2] > 80 && png.data[i] < 60) n++; } return n / all; };
+
+test('G74b an opaque badge whose edge is its own colour keeps that colour as ink: navy in the PNG, 2:1, nothing enlarged', async () => {
+  const r = await cikti.highResPng({ source: badge(), widthMm: 100, heightMm: 50 });
+  assert.ok(Math.abs(r.width / r.height - 2) < 0.02, `${r.width} x ${r.height}`);
+  assert.deepEqual(r.mm, { w: 100, h: 50 });
+  const png = PNG.sync.read(r.png);
+  assert.ok(navyShare(png) > 0.5, `lacivert pay ${navyShare(png)}`);
+  // White paper around a design is still its ground (left out, transparent).
+  const c = createCanvas(800, 400), x = c.getContext('2d'); x.fillStyle = '#ffffff'; x.fillRect(0, 0, 800, 400); x.fillStyle = '#1a2a6c'; x.beginPath(); x.arc(400, 200, 150, 0, 7); x.fill();
+  const paper = PNG.sync.read((await cikti.highResPng({ source: c.toBuffer('image/png'), widthMm: 60, heightMm: 60 })).png);
+  assert.equal(paper.data[3], 0);
+  // An edge that is half white, half navy: the ground cannot be told. No picture is made; the caller asks a person.
+  await assert.rejects(cikti.highResPng({ source: badge({ left: '#ffffff' }), widthMm: 100, heightMm: 50 }), e => e.code === 'ZEMIN_BELIRSIZ');
+});
+
+test('G74b a faithful one-colour full-bleed vector passes the gate (fine structure of two flat maps is equal, not 0)', async () => {
+  const c = createCanvas(1600, 800), x = c.getContext('2d'); x.fillStyle = '#1a2a6c'; x.fillRect(0, 0, 1600, 800);
+  const doc = await PDFDocument.create(), page = doc.addPage([800, 400]);
+  page.drawRectangle({ x: 0, y: 0, width: 800, height: 400, color: require('pdf-lib').rgb(0x1a / 255, 0x2a / 255, 0x6c / 255) });
+  const g = await cikti.vectorGate({ source: c.toBuffer('image/png'), pdf: Buffer.from(await doc.save()) });
+  assert.equal(g.gecti, true, JSON.stringify(g));
+  assert.equal(g.olcum.ince, 1);
+});
+
+test('G74b the gate draws the vector itself (no pdf.js): it works with the pdf.js renderer unavailable', async t => {
+  const vector = require('../agent/siparis/vector'), keep = vector.renderFirstPage;
+  vector.renderFirstPage = () => { throw new Error('pdf.js kullanılmamalı'); };
+  t.after(() => { vector.renderFirstPage = keep; });
+  const source = mark();
+  const g = await cikti.vectorGate({ source, pdf: await vectorOf(source) });
+  assert.equal(g.gecti, true, JSON.stringify(g));
+  const badgeSrc = badge({ w: 1600, h: 800 });
+  const doc = await PDFDocument.create(), page = doc.addPage([800, 400]); // an invented vector of the badge without its lettering
+  page.drawRectangle({ x: 0, y: 0, width: 800, height: 400, color: require('pdf-lib').rgb(0x1a / 255, 0x2a / 255, 0x6c / 255) });
+  const lost = await cikti.vectorGate({ source: badgeSrc, pdf: Buffer.from(await doc.save()) });
+  assert.equal(lost.gecti, false); // the white lettering is missing
+});
+
+test('G74b children: a child over its memory budget is stopped (BELLEK_SINIRI); its own time limit has its own code', async () => {
+  const src = { buffer: mark(), mime: 'image/png' };
+  await assert.rejects(documents.generateInChild({ type: 'desenPng', input: { source: src, widthMm: 475, heightMm: 329 } }, undefined, { memoryMb: 1 }), e => e.code === 'BELLEK_SINIRI');
+  await assert.rejects(documents.generateInChild({ type: 'desenPng', input: { source: src, widthMm: 475, heightMm: 329 } }, undefined, { timeoutMs: 30, timeoutCode: 'COCUK_ZAMAN_ASIMI' }), e => e.code === 'COCUK_ZAMAN_ASIMI');
+});
+
+test('G74b a too small memory budget never stops the preparation: the gate counts as failed, the picture falls back', async t => {
+  useEnv(t, {});
+  const before = process.env.DESEN_COCUK_MB; process.env.DESEN_COCUK_MB = '1';
+  t.after(() => { if (before === undefined) delete process.env.DESEN_COCUK_MB; else process.env.DESEN_COCUK_MB = before; });
+  const f = await fixture(t, [{ position: 'sol_kol', method: 'otomatik', box: { x: 260, y: 255, w: 80, h: 87 }, w: 80, h: 45 }]);
+  ok(await f.prepare());
+  const out = f.audit().desenCikti.find(o => o.applicationId === f.apps.sol_kol);
+  assert.equal(out.kapi.gecti, false);
+  assert.ok(f.files().some(x => x.kind === 'desen_vektor' && x.application_id === f.apps.sol_kol));
+});
+
+test('G74b a cut from the eye box that differs from it by more than 12% rescales the size (≈ on the forms), once', async t => {
+  useEnv(t, {});
+  // Eye box 80 x 87 px, the print 120 x 68 px: 80 x 45 mm becomes about 120 x 35 mm (per axis: no tilted sleeve axis here).
+  const f = await fixture(t, [{ position: 'sol_kol', method: 'otomatik', box: { x: 260, y: 255, w: 80, h: 87 }, w: 80, h: 45 }]);
+  ok(await f.prepare());
+  const app = () => f.db.prepare('SELECT width_mm,height_mm,measure_source FROM applications WHERE id=?').get(f.apps.sol_kol);
+  const a1 = app(), ms = JSON.parse(a1.measure_source);
+  assert.ok(a1.width_mm >= 114 && a1.width_mm <= 126 && a1.height_mm >= 32 && a1.height_mm <= 38, JSON.stringify(a1));
+  assert.equal(ms.olcuDurumu, 'yaklasik');
+  assert.match(ms.olcuNotu, /desen kesiti/);
+  const text = await pdfText(fs.readFileSync(f.files().find(x => x.kind === 'baski_formu').path));
+  assert.match(text, /≈/);
+  ok(await f.prepare());
+  assert.deepEqual([app().width_mm, app().height_mm], [a1.width_mm, a1.height_mm]); // not scaled twice
+  ok(await f.request(`/surumler/${f.v}/onizleme`, { method: 'POST', token: f.token })); // fresh: the forms do not ask to be made again
+});
+
+test('G74b a prepared draft is not re-extracted in the background; a preview stored under an older key is still shown', async t => {
+  useEnv(t, {});
+  const f = await fixture(t, [{ position: 'sol_kol', method: 'otomatik', box: { x: 232, y: 258, w: 136, h: 82 }, w: 90, h: 55 }]);
+  ok(await f.prepare());
+  f.db.prepare("UPDATE document_extracted_previews SET input_json='eski-anahtar'").run(); // as after an extraction revision change
+  const confirmations = () => f.db.prepare("SELECT COUNT(*) n FROM confirmations WHERE kind='vektor_kalite' AND status='acik'").get().n;
+  const open = confirmations();
+  ok(await f.request(`/surumler/${f.v}/vektor-durum`, { token: f.token }));
+  await documents.settled();
+  assert.deepEqual(f.db.prepare('SELECT input_json FROM document_extracted_previews').all().map(r => r.input_json), ['eski-anahtar']);
+  assert.equal(confirmations(), open);
+  const pv = ok(await f.request(`/surumler/${f.v}/onizleme`, { method: 'POST', token: f.token }));
+  const text = await pdfText(Buffer.from(pv.formlar.find(x => x.kind === 'baski_formu').pdf, 'base64'));
+  assert.doesNotMatch(text, /Önizleme yok/);
+});

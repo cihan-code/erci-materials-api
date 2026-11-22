@@ -165,13 +165,14 @@ test('HTTP approval package contains only workshop files, authenticated links an
   ok(await f.post(`/surumler/${a.id}/onay`,{fileId:a.files.find(file=>file.kind==='onay_formu').id},f.managerToken));
   ok(await f.post(`/surumler/${a.id}/onay`,{fileId:a.files.find(file=>file.kind==='onay_formu').id},f.managerToken));
   const bundle=ok(await f.request(`/surumler/${a.id}/atolye-paketi`,{token:f.token}));
-  assert.equal(bundle.files.length,4);assert.match(bundle.message,/MRC-T1/);assert.doesNotMatch(bundle.message,/Örnek Kulüp/);
+  // G74: each traced raster design also sends its high resolution picture (desen_png).
+  assert.equal(bundle.files.filter(file=>file.kind!=='desen_png').length,4);assert.equal(bundle.files.filter(file=>file.kind==='desen_png').length,2);assert.match(bundle.message,/MRC-T1/);assert.doesNotMatch(bundle.message,/Örnek Kulüp/);
   for (const file of bundle.files) {
     assert.ok(documents.WORKSHOP.includes(file.kind));assert.equal(file.outbox.status,'bekliyor');
     assert.equal(file.outbox.idempotency_key,`atolye:${a.id}:${file.id}`);
     assert.equal((await f.request(file.url.replace('/api/siparis',''),{token:f.token})).status,200);
   }
-  assert.equal(f.db.prepare("SELECT count(*) n FROM outbox WHERE kind='atolye_dosya'").get().n,4);
+  assert.equal(f.db.prepare("SELECT count(*) n FROM outbox WHERE kind='atolye_dosya'").get().n,6);
   const vectors=bundle.files.filter(file=>file.kind==='desen_vektor');
   assert.equal(vectors.length,2);
   f.db.prepare("UPDATE outbox SET status='manuel_bekliyor' WHERE id=?").run(vectors[0].outbox.id);

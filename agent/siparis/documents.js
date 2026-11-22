@@ -15,6 +15,7 @@ const { registerHandler } = require('./outbox');
 const goz = require('./goz');
 const desenCizim = require('./desenCizim');
 const desenIsci = require('./desenIsci');
+const desenCikti = require('./desenCikti');
 const { decide, formNote } = require('./olcuKarar');
 const { labelRawKeys } = require('./areas');
 const positionStandards = require('./konumStandartlari');
@@ -35,6 +36,12 @@ const GENERATED = ['uretim_formu','onay_formu','baski_formu','nakis_formu','dese
 const WORKSHOP = ['baski_formu','nakis_formu','desen_vektor','desen_png'];
 // Derived from an uploaded source right after upload; never an input of the forms and never sent to the workshop.
 const PREVIEW = 'desen_vektor_onizleme';
+// G74 children (gate, picture, clean drawing, a redrawn print's trace) are stopped above DESEN_COCUK_MB (default 220 MB;
+// the live server has 512 MB and runs one child at a time). A redrawn print is traced from at most REDRAW_PIXELS
+// (a sharp clean drawing passes the gate at 1 MP; the uploaded flat-logo path keeps its own bound); SAFE_PIXELS is the retry.
+const childMemoryMb=()=>Number(process.env.DESEN_COCUK_MB)>0 ? Number(process.env.DESEN_COCUK_MB) : 220;
+const traceMemoryMb=()=>Number(process.env.DESEN_IZ_MB)>0 ? Number(process.env.DESEN_IZ_MB) : 340;
+const REDRAW_PIXELS=1e6;
 const ARTWORK_EXTRACTION_REVISION = 4; // G74: eye-box cuts follow the strokes and leave the photo ground out
 // Product image views; a complete sleeve view can supply its own L length scale.
 const VIEWS = ['on','arka','kol'];
@@ -604,10 +611,15 @@ function invalidateExtracted(db,appIds) {
   }
 }
 
-function extractedRecord(db,appId,{key},includeArtwork=false) {
-  return db.prepare(`SELECT preview_file_id,status,report_json,message${includeArtwork?',artwork':''} FROM document_extracted_previews
-    WHERE application_id=? AND input_json=? AND (artwork IS NULL OR preview_file_id IS NOT NULL)`).get(appId,key);
+// anyKey (G74): a version that is not edited any more (approved, or a prepared draft) shows the preview it was prepared
+// with even when the extraction key has changed since (a new ARTWORK_EXTRACTION_REVISION); it is made again only by the next preparation.
+function extractedRecord(db,appId,{key},includeArtwork=false,anyKey=false) {
+  const cols=`preview_file_id,status,report_json,message${includeArtwork?',artwork':''}`;
+  return db.prepare(`SELECT ${cols} FROM document_extracted_previews
+    WHERE application_id=? AND input_json=? AND (artwork IS NULL OR preview_file_id IS NOT NULL)`).get(appId,key)
+    ?? (anyKey ? db.prepare(`SELECT ${cols} FROM document_extracted_previews WHERE application_id=? AND (artwork IS NULL OR preview_file_id IS NOT NULL) ORDER BY rowid DESC LIMIT 1`).get(appId) : undefined);
 }
+const settledVersion=(db,v)=>v.status!=='taslak' || !!db.prepare('SELECT ready FROM document_preparations WHERE version_id=?').get(v.id)?.ready;
 
 async function extractPreview(db,dataDir,v,line,app,input,user,signal,retryError=false) {
   if(input.gap)return {message:input.gap};
@@ -633,12 +645,23 @@ async function extractPreview(db,dataDir,v,line,app,input,user,signal,retryError
           cacheDir:desenIsci.cacheDir(dataDir),signal});
         if(redraw.used) {
           // G74: the tracer and the workshop PNG get the clean drawing: every pixel one of its inks or transparent.
-          const clean=await generateInChild({type:'temizCizim',input:{source:{buffer:redraw.buffer,mime:'image/png'}}},signal);
+          // Any failure of that child keeps the redraw as it came.
+          let clean=null;
+          try {clean=await generateInChild({type:'temizCizim',input:{source:{buffer:redraw.buffer,mime:'image/png'}}},signal,{memoryMb:childMemoryMb(),timeoutCode:'COCUK_ZAMAN_ASIMI'});}
+          catch(e) {if(signal.aborted)throw e;}
           artwork={...artwork,buffer:clean?Buffer.from(clean.buffer):redraw.buffer};
           if(clean)redraw.report.murekkep=clean.inks;
         }
       }
-      result=await generateInChild({type:'vector',designBox:true,input:{buffer:artwork.buffer,mime:'image/png'}},signal);
+      // G74: a redrawn print is traced at REDRAW_PIXELS under its own memory guard (DESEN_IZ_MB: a tracing child carries pdf.js,
+      // ~216 MB by itself); a stopped child traces once more the way every print was traced before G74 (vtracer, 800 px).
+      const traceJob=extra=>generateInChild({type:'vector',designBox:true,input:{buffer:artwork.buffer,mime:'image/png',...extra}},signal,
+        extra.rasterPixels?{memoryMb:traceMemoryMb(),timeoutCode:'COCUK_ZAMAN_ASIMI'}:{});
+      if(redraw?.used) {
+        try {result=await traceJob({rasterPixels:REDRAW_PIXELS});}
+        catch(e) {if(signal.aborted||!['BELLEK_SINIRI','COCUK_ZAMAN_ASIMI'].includes(e.code))throw e;result=await traceJob({vtracer:true});}
+      }
+      else result=await traceJob({});
       // A separation warning (small print) needs the same visual check as a vector warning.
       if(artwork.warnings?.length)result.report={...result.report,quality:'teyit',reasons:[...(result.report.reasons||[]),...artwork.warnings]};
       // Information only (line colour not seen on the garment): no confirmation.
@@ -677,6 +700,31 @@ async function extractPreview(db,dataDir,v,line,app,input,user,signal,retryError
   }
 }
 
+// G74: the cut followed the print past the eye's box (or stopped inside it): the measured size belongs to the eye's box, so
+// beyond 12% on an axis it is scaled by cut / box (Patron 22.11: the system takes the approximate size itself, no new
+// confirmation; "≈" on the forms). A print measured along a sleeve axis (goz.eksen) keeps its millimetres: they run along and
+// across the sleeve, not along the picture's axes, so a box ratio would be a guess; beyond 12% in area it is only marked
+// approximate (≈) with a note. Always from the size before the first change (kesitOlcegi.onceki),
+// so a second preparation gives the same size. -> null (no change) | {w, h, source}
+const GOZ_SIZE_TOLERANCE=.12;
+function gozScale(app,source,eye,cut) {
+  const before=source.kesitOlcegi?.onceki ?? {w:app.width_mm,h:app.height_mm,durum:source.durum,olcuDurumu:source.olcuDurumu,olcuNotu:source.olcuNotu};
+  if(![before.w,before.h].every(n=>Number.isSafeInteger(n)&&n>0))return null;
+  const kx=cut.w/eye.w,ky=cut.h/eye.h,even=Math.sqrt(kx*ky);
+  const off=k=>Math.abs(k-1)>GOZ_SIZE_TOLERANCE ? k : 1;
+  const axis=!!source.goz?.eksen, [fw,fh]=axis ? [1,1] : [off(kx),off(ky)], marked=axis&&off(even)!==1;
+  const w=Math.round(before.w*fw),h=Math.round(before.h*fh);
+  const {kesitOlcegi,durum,olcuDurumu,olcuNotu,...rest}=source;
+  const kept=Object.fromEntries(['durum','olcuDurumu','olcuNotu'].filter(k=>before[k]!=null).map(k=>[k,before[k]]));
+  const said=marked ? `desen kesiti göz kutusundan %${Math.round(Math.abs(even-1)*100)} farklı; kol ekseninde ölçü yaklaşık`
+    : `desen kesitinden ölçeklendi (en ×${fw.toFixed(2)}, boy ×${fh.toFixed(2)})`;
+  const next=fw===1&&fh===1&&!marked ? {...rest,...kept} // the eye's own size (again)
+    : {...rest,...kept,durum:'yaklasik',olcuDurumu:'yaklasik',olcuNotu:[before.olcuNotu,said].filter(Boolean).join(' · '),
+      kesitOlcegi:{onceki:before,en:+fw.toFixed(3),boy:+fh.toFixed(3),...(marked?{alan:+even.toFixed(3)}:{})}};
+  if(w===app.width_mm&&h===app.height_mm&&JSON.stringify(next)===app.measure_source)return null;
+  if(w===app.width_mm&&h===app.height_mm&&!source.kesitOlcegi&&fw===1&&fh===1&&!marked)return null;
+  return {w,h,source:next};
+}
 function assertExtractedMeasurement(app,image,placement) {
   const source=provenance(app);
   if(!['otomatik','otomatik_renk'].includes(source.method))return;
@@ -684,8 +732,8 @@ function assertExtractedMeasurement(app,image,placement) {
   // G74: a cut from the eye's own box follows the print's strokes (G72 left sleeve: an ink fit 20% shorter than the eye's
   // box was refused and the form said "desen dosyası bekleniyor" although the print was drawn); see autoMeasure.gozCutAgrees.
   if(placement.gozKesit && eye && source.gorselFileId===image.id && source.goz.rasterWidth>0 && source.goz.rasterHeight>0) {
-    const kx=placement.rasterWidth/source.goz.rasterWidth,ky=placement.rasterHeight/source.goz.rasterHeight;
-    if(require('./autoMeasure').gozCutAgrees({x:eye.x*kx,y:eye.y*ky,w:eye.w*kx,h:eye.h*ky},placement.designBoxPx))return;
+    const kx=placement.rasterWidth/source.goz.rasterWidth,ky=placement.rasterHeight/source.goz.rasterHeight,box={x:eye.x*kx,y:eye.y*ky,w:eye.w*kx,h:eye.h*ky};
+    if(require('./autoMeasure').gozCutAgrees(box,placement.designBoxPx))return gozScale(app,source,box,placement.designBoxPx);
   }
   const box=(placement.gozKesit && eye) ? {...eye,rasterWidth:source.goz.rasterWidth,rasterHeight:source.goz.rasterHeight} : source.designBoxPx, current=placement.designBoxPx;
   const edges=box && box.rasterWidth ? {w:box.rasterWidth,h:box.rasterHeight} : {w:source.rasterWidth,h:source.rasterHeight};
@@ -1109,13 +1157,15 @@ async function addApplication(db,dataDir,lineId,input,user) {
 }
 // Decode large source images in a separate one-shot process. Native decoder
 // arenas then exit before the tracer/mask worker loads its own libraries.
-async function generateInChild(input,signal,{timeoutMs=120000}={}) {
+// G74: memoryMb stops a child whose resident memory passes it (code BELLEK_SINIRI); timeoutCode gives the child's own time
+// limit its own code, so the caller can fall back instead of losing the whole preparation.
+async function generateInChild(input,signal,{timeoutMs=120000,memoryMb=null,timeoutCode=null}={}) {
   if (!(Number.isFinite(timeoutMs) && timeoutMs>0)) throw new TypeError('Geçerli render süresi gerekli');
   signal?.throwIfAborted();
   const deadline=Date.now()+timeoutMs;
   const run=job=> {
-    if(Date.now()>=deadline)throw preparationTimeout();
-    return generateRawChild(job,signal,{timeoutMs:deadline-Date.now()});
+    if(Date.now()>=deadline)throw timeoutCode ? childTimeout(timeoutCode) : preparationTimeout();
+    return generateRawChild(job,signal,{timeoutMs:deadline-Date.now(),memoryMb,timeoutCode});
   };
   async function shrink(source,edge) {
     if(!source || !['image/png','image/jpeg','image/jpg'].includes(source.mime))return source;
@@ -1124,7 +1174,7 @@ async function generateInChild(input,signal,{timeoutMs=120000}={}) {
     const result=await run({type:'raster',input:{buffer:source.buffer,edge}});
     return {...source,buffer:result.buffer,mime:'image/png',rasterSource:size};
   }
-  if(['desenPng','vektorKapisi','temizCizim'].includes(input.type)) input={...input,input:{...input.input,source:await shrink(input.input.source,2048)}};
+  if(['desenCikti','desenPng','temizCizim'].includes(input.type)) input={...input,input:{...input.input,source:await shrink(input.input.source,2048)}};
   else if(input.type==='vector') {
     const source=await shrink(input.input,800);
     const qualitySource=await shrink(source.qualitySource,800);
@@ -1135,7 +1185,13 @@ async function generateInChild(input,signal,{timeoutMs=120000}={}) {
   }
   return run(input);
 }
-function generateRawChild(input,signal,{timeoutMs=120000}={}) {
+const childTimeout=code=>Object.assign(new Error('Alt süreç kendi süresini aştı'),{code});
+// Resident memory of a process in MB (Linux /proc, else ps), or null.
+function residentMb(pid) {
+  try { const m=/VmRSS:\s+(\d+)/.exec(fs.readFileSync(`/proc/${pid}/status`,'utf8')); if(m)return Number(m[1])/1024; } catch {}
+  return new Promise(resolve=>childProcess.execFile('ps',['-o','rss=','-p',String(pid)],{timeout:2000},(e,out)=>resolve(e?null:Number(String(out).trim())/1024||null)));
+}
+function generateRawChild(input,signal,{timeoutMs=120000,memoryMb=null,timeoutCode=null}={}) {
   if (!(Number.isFinite(timeoutMs) && timeoutMs>0)) throw new TypeError('Geçerli render süresi gerekli');
   signal?.throwIfAborted();
   return new Promise((resolve,reject)=> {
@@ -1144,13 +1200,18 @@ function generateRawChild(input,signal,{timeoutMs=120000}={}) {
     const stop=e=> {error ||= e;child.kill('SIGKILL');};
     const abort=()=>stop(signal.reason);
     signal?.addEventListener('abort',abort,{once:true});
-    const timer=setTimeout(()=>stop(preparationTimeout()),timeoutMs);
+    const timer=setTimeout(()=>stop(timeoutCode ? childTimeout(timeoutCode) : preparationTimeout()),timeoutMs);
+    // The memory guard looks every 250 ms; a child over its budget is stopped before it can take the server down.
+    const guard=memoryMb>0 && setInterval(async()=> {
+      const mb=await residentMb(child.pid);
+      if(mb>memoryMb)stop(Object.assign(new Error(`Alt süreç bellek sınırını aştı (${Math.round(mb)} MB > ${memoryMb} MB)`),{code:'BELLEK_SINIRI'}));
+    },250);
     child.stderr.resume();
     child.once('error',stop);
     // exit can precede the final IPC/stdio events. Keep listeners and the queue
     // slot until close, including failed spawns and SIGKILL cancellation.
     child.once('close',(code,exitSignal)=> {
-      clearTimeout(timer);signal?.removeEventListener('abort',abort);
+      clearTimeout(timer);if(guard)clearInterval(guard);signal?.removeEventListener('abort',abort);
       if (error) reject(error);
       else if (!received || code!==0) reject(new Error(`Vektör süreci tamamlanamadı (${exitSignal || code})`));
       else resolve(result);
@@ -1169,6 +1230,27 @@ function generateRawChild(input,signal,{timeoutMs=120000}={}) {
     if (signal?.aborted) {abort();return;}
     try {child.send(input,e=> {if (e) stop(e);});} catch (e) {stop(e);}
   });
+}
+// A large raster made smaller once (one child) for the gate and the picture: >4 MP, or always above edge when asked.
+async function shrinkRaster(source,edge,signal,always=false) {
+  if(!source||!['image/png','image/jpeg','image/jpg'].includes(source.mime))return source;
+  const size=imageSize(source.buffer,source.mime);
+  if(always ? Math.max(size.width,size.height)<=edge : size.width*size.height<=4e6)return source;
+  const r=await generateRawChild({type:'raster',input:{buffer:source.buffer,edge}},signal,{timeoutMs:60000});
+  return {...source,buffer:Buffer.from(r.buffer),mime:'image/png'};
+}
+// G74: the gate and the picture of one traced print in ONE child under the memory guard (gate ~170 MB, then picture ~125 MB
+// for a back print; one spawn less per print). Nothing here stops the preparation: if that child is stopped or fails, the gate
+// counts as not passed and the picture is made alone, once more from a 1024 px source at 40 MP (yedek); if that fails too the
+// picture is left out (hata). An unclear ground (ZEMIN_BELIRSIZ) is not retried.
+async function designOutput(original,pdf,targetMm,signal) {
+  const guard={memoryMb:childMemoryMb(),timeoutCode:'COCUK_ZAMAN_ASIMI'},size={widthMm:targetMm.w,heightMm:targetMm.h};
+  const source=await shrinkRaster(original,2048,signal);
+  let kapi;
+  try {return await generateInChild({type:'desenCikti',input:{source,pdf,...size}},signal,{...guard,timeoutMs:240000});}
+  catch(e) {if(signal.aborted)throw e;kapi={gecti:false,olcum:{},neden:`kapı tamamlanamadı: ${e.message}`.slice(0,200),...(e.code?{kod:e.code}:{})};}
+  try {return {kapi,...await generateInChild({type:'desenPng',input:{source:await shrinkRaster(source,1024,signal,true),maxMp:40,...size}},signal,{...guard,timeoutMs:180000}),yedek:'1024 px kaynak, en çok 40 MP'};}
+  catch(e) {if(signal.aborted)throw e;return {kapi,hata:String(e.message||e).slice(0,200)};}
 }
 async function prepare(db,dataDir,versionId,user,regenerate=false) {
   assertUser(db,user.id);
@@ -1189,15 +1271,15 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
   try {
     const {v}=start;
     const generated=await renderQueue(async signal=> {
-      const sourceByApp=new Map(), extractedByApp=new Map(), vectorByApp=new Map(), missingDesign=new Map(), wayByApp=new Map(), outputByApp=new Map(), outputs=[], generated=[];
+      const sourceByApp=new Map(), extractedByApp=new Map(), vectorByApp=new Map(), missingDesign=new Map(), wayByApp=new Map(), outputByApp=new Map(), outputs=[], rescaled=new Map(), generated=[];
       const applications=v.lines.flatMap(line=>line.applications.map(app=>({line,app})));
       for (const source of v.files.filter(f=>SOURCE_KINDS.includes(f.kind)))
         if (!applications.length) fail(`Desen ${source.id}: ölçülü uygulama bağlantısı gerekli`,409);
       const unmeasured=pendingApplications(db,v);
       for (const {line,app:a} of applications) {
         if (unmeasured.has(a.id)) continue;
-        const targetMm={w:a.width_mm,h:a.height_mm},input=artworkFor(db,v,line,a);
-        let original,prev;
+        const input=artworkFor(db,v,line,a);
+        let original,prev,redrawn=false;
         if(input.source) {
           sourceByApp.set(a.id,input.source);
           original=await vectorInput(dataDir,input.source);
@@ -1208,59 +1290,55 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
           // the other prints' forms and vectors are still prepared.
           if(!row.artwork) {missingDesign.set(a.id,row.message);continue;}
           const report=JSON.parse(row.report_json);
-          try {assertExtractedMeasurement(a,input.image,report.placement);}
+          let scaled;
+          try {scaled=assertExtractedMeasurement(a,input.image,report.placement);}
           catch(e) {if(e.status!==409)throw e;missingDesign.set(a.id,e.message);continue;}
+          // G74: the size taken from the cut is this preparation's size (forms, vector, picture) and is saved with it.
+          if(scaled) {Object.assign(a,{width_mm:scaled.w,height_mm:scaled.h,measure_source:JSON.stringify(scaled.source)});rescaled.set(a.id,scaled);}
           original={buffer:row.artwork,mime:'image/png'};
           extractedByApp.set(a.id,row.artwork);
           if(report.desenYolu)wayByApp.set(a.id,report.desenYolu);
+          redrawn=report.desenYolu==='yeniden-cizim';
           const file=db.prepare('SELECT * FROM files WHERE id=? AND version_id=? AND kind=?').get(row.preview_file_id,v.id,PREVIEW);
           if(file)prev={buffer:readFile(dataDir,file),report};
         }
+        const targetMm={w:a.width_mm,h:a.height_mm};
         const raster=['image/png','image/jpeg','image/jpg'].includes(original.mime);
         // A drawn vector (PDF/SVG) is cheap to read again and is always judged from its own
         // source, whichever kind uploaded it; only traced previews are reused.
         const drawn=!raster && input.source && prev?.report?.sourceKind!=='raster';
         const cached=prev && !drawn && (!raster || (Number.isFinite(prev.report.rasterQuality?.pathCount) && Number.isFinite(prev.report.rasterQuality?.nodeCount)));
+        // G74: the measured box against the design's own ratio is known before any vector is made. Past the gate's limit
+        // the vector is made at the design's ratio inside the box (never stretched, no second vector); the mismatch stays
+        // reported as the stretched vector reported it (oran_bozuldu, teyit).
+        const design=raster&&cached&&prev.report.designBox, designRatio=design&&design.w>0&&design.h>0 ? design.w/design.h : null;
+        const boxError=designRatio ? Math.abs((targetMm.w/targetMm.h)/designRatio-1) : 0;
+        const fitted=designRatio&&boxError>desenCikti.GATE.oran ? desenCikti.containMm(designRatio,targetMm) : null;
         // Legacy previews without complexity metrics are retraced from the original raster.
         // Keep cached vector paths; final raster quality is measured against the original artwork.
-        const vectorAt=targetMm=>generateInChild({type:'vector',input:{...(cached
-          ? {manualVector:true,buffer:prev.buffer,mime:'application/pdf',targetMm,applicationType:a.kind,
-            ...(raster ? {qualitySource:{...original,metrics:prev.report.rasterQuality}} : {})}
+        const result=await generateInChild({type:'vector',input:{...(cached
+          ? {manualVector:true,buffer:prev.buffer,mime:'application/pdf',targetMm:fitted||targetMm,applicationType:a.kind,
+            ...(raster ? {qualitySource:{...original,metrics:prev.report.rasterQuality}} : {}),...(redrawn?{rasterPixels:REDRAW_PIXELS}:{})}
           : {...original,targetMm,applicationType:a.kind}),garmentColor:garmentColor(db,line.id)}},signal);
-        const result=await vectorAt(targetMm);
-        const report=cached && !raster ? {...result.report,quality:prev.report.quality==='teyit' || result.report.aspectRatioError>0.01 ? 'teyit' : 'iyi',
+        let report=cached && !raster ? {...result.report,quality:prev.report.quality==='teyit' || result.report.aspectRatioError>0.01 ? 'teyit' : 'iyi',
           reasons:[...new Set([...(prev.report.reasons||[]),...(result.report.aspectRatioError>0.01 ? ['oran_bozuldu'] : [])])]} : result.report;
+        if(fitted)report={...report,quality:'teyit',reasons:[...new Set([...(report.reasons||[]),'Hedef ölçü desenin en boy oranını değiştiriyor.'])],
+          vektorOlcuMm:fitted,notes:[...(report.notes||[]),'Vektör, desenin kendi oranıyla ölçü kutusuna sığdırıldı (çekiştirilmedi).']};
         // G74: a vector traced from a raster goes only through the gate (desenCikti.vectorGate); otherwise its desen_vektor
-        // is the PDF of the very high resolution PNG. The PNG itself always goes along. A ready PDF/SVG design is the customer's own vector.
+        // is the PDF of the very high resolution PNG. The PNG itself goes along. A ready PDF/SVG design is the customer's own vector.
         const meta={applicationId:a.id,...(!input.source?{lineId:line.id}:{})};
-        let out=null;
-        if(raster) {
-          // Two one-shot children in turn (renderQueue runs one job at a time): the gate and the picture never share a heap.
-          try {
-            const kapi=await generateInChild({type:'vektorKapisi',input:{source:original,pdf:result.pdf}},signal);
-            out={kapi,...await generateInChild({type:'desenPng',input:{source:original,widthMm:a.width_mm,heightMm:a.height_mm}},signal,{timeoutMs:180000})};
-          }
-          catch(e) {if(signal.aborted||e.code==='PREPARE_TIMEOUT')throw e;out={hata:String(e.message||e).slice(0,200)};}
-        }
-        // A faithful trace refused only because the measured box stretches it: the vector is made again at the design's own
-        // ratio inside that box (the size of the PNG) and judged again. The stretch itself stays reported (oran_bozuldu).
-        let vectorPdf=result.pdf,fitted=null;
-        if(out?.png&&!out.kapi.gecti&&require('./desenCikti').onlyAspect(out.kapi)) {
-          const again=await vectorAt({w:out.mm.w,h:out.mm.h});
-          const kapi=await generateInChild({type:'vektorKapisi',input:{source:original,pdf:again.pdf}},signal);
-          out={...out,kapi:{...kapi,olcuKutusuna:out.kapi}};
-          if(kapi.gecti) {vectorPdf=again.pdf;fitted={w:out.mm.w,h:out.mm.h};}
-        }
+        const out=raster ? await designOutput(original,result.pdf,targetMm,signal) : null;
         const cikti=out?.png&&!out.kapi.gecti ? 'png' : 'vektor';
-        const final={...report,cikti,...(out?.kapi?{vektorKapisi:out.kapi}:{}),...(fitted?{vektorOlcuMm:fitted,notes:[...(report.notes||[]),'Vektör, desenin kendi oranıyla ölçü kutusuna sığdırıldı (çekiştirilmedi).']}:{}),
-          ...(out?.png?{yuksekPng:{genislik:out.width,yukseklik:out.height,dpi:out.dpi,murekkep:out.inks,olcuMm:out.mm}}:{}),
-          // The gate could not run: the vector is not known to be faithful, so a person looks at it.
-          ...(out?.hata?{quality:'teyit',reasons:[...(report.reasons||[]),`Vektör kapısı ve yüksek çözünürlüklü görsel hazırlanamadı: ${out.hata}`]}:{})};
-        generated.push({kind:'desen_vektor',buffer:cikti==='png'?Buffer.from(out.pdf):vectorPdf,meta,report:final});
+        const final={...report,cikti,...(out?.kapi?{vektorKapisi:out.kapi}:{}),
+          ...(out?.png?{yuksekPng:{genislik:out.width,yukseklik:out.height,dpi:out.dpi,murekkep:out.inks,olcuMm:out.mm,...(out.yedek?{yedek:out.yedek}:{})}}:{}),
+          // No picture and no passed gate: the vector is not known to be faithful, so a person looks at it.
+          ...(out&&!out.png&&!out.kapi.gecti?{quality:'teyit',reasons:[...(report.reasons||[]),`Vektör kapıdan geçmedi ve yüksek çözünürlüklü görsel hazırlanamadı: ${out.hata||out.kapi.neden}`]}:{})};
+        generated.push({kind:'desen_vektor',buffer:cikti==='png'?Buffer.from(out.pdf):result.pdf,meta,report:final});
         if(out?.png)generated.push({kind:'desen_png',buffer:Buffer.from(out.png),meta:{...meta,ext:'png',mime:'image/png'}});
         if(cikti==='png')outputByApp.set(a.id,'png');
-        if(raster)outputs.push({applicationId:a.id,cikti,kapi:out?.kapi?{gecti:out.kapi.gecti,neden:out.kapi.neden,olcum:out.kapi.olcum}:null,
-          ...(out?.png?{png:{genislik:out.width,yukseklik:out.height,dpi:out.dpi}}:{}),...(out?.hata?{hata:out.hata}:{})});
+        if(raster)outputs.push({applicationId:a.id,cikti,kapi:{gecti:out.kapi.gecti,neden:out.kapi.neden,olcum:out.kapi.olcum},
+          ...(out.png?{png:{genislik:out.width,yukseklik:out.height,dpi:out.dpi,...(out.yedek?{yedek:out.yedek}:{})}}:{}),...(out.hata?{hata:out.hata}:{}),
+          ...(fitted?{vektorOlcuMm:fitted}:{}),...(rescaled.has(a.id)?{olcu:{en:a.width_mm,boy:a.height_mm,kesitOlcegi:rescaled.get(a.id).source.kesitOlcegi}}:{})});
         // G56: the preview shows the design itself (its own ratio, nothing cut), never the vector
         // fitted to the measured box; that box can differ from the design's ratio (sırt %14,5).
         if (input.source && prev) vectorByApp.set(a.id,{buffer:prev.buffer,background:groundOf(prev.report)});
@@ -1269,6 +1347,7 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
       generated.push(...await generateInChild({type:'forms',model},signal));
       if(missingDesign.size)generated.missingDesign=[...missingDesign].map(([applicationId,message])=>({applicationId,message}));
       if(outputs.length)generated.desenCikti=outputs;
+      generated.rescaled=rescaled;
       return generated;
     });
     return tx(db,()=> {
@@ -1288,10 +1367,13 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
       }
       for(const line of current.lines)for(const app of line.applications)
         if(artworkFor(db,current,line,app).source)retireExtractedPreview(db,app.id,user);
+      // G74: sizes taken from a grown eye cut are saved with the documents that print them.
+      for(const [id,r] of generated.rescaled)db.prepare('UPDATE applications SET width_mm=?,height_mm=?,measure_source=? WHERE id=?').run(r.w,r.h,JSON.stringify(r.source),id);
       // Preview confirmations are superseded by the confirmation on the generated vector.
       db.prepare(`UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='vektor_kalite' AND status='acik' AND ref_table='files'
         AND ref_id IN (SELECT id FROM files WHERE version_id=? AND kind=?)`).run(user.id,versionId,PREVIEW);
-      db.prepare('UPDATE document_preparations SET token=NULL,ready=1,source_json=? WHERE version_id=? AND token=?').run(start.sourceFingerprint,versionId,token);
+      db.prepare('UPDATE document_preparations SET token=NULL,ready=1,source_json=? WHERE version_id=? AND token=?')
+        .run(generated.rescaled.size ? inputFingerprint(db,draft(db,versionId)) : start.sourceFingerprint,versionId,token);
       audit(db,user.id,'belgeler_hazirla',versionId,{regenerate,...(generated.missingDesign?{desenBekleyen:generated.missingDesign}:{}),...(generated.desenCikti?{desenCikti:generated.desenCikti}:{})});
       return orders.snapshot(db,versionId).files;
     });
@@ -1310,7 +1392,7 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
 async function previewForms(db,dataDir,versionId,user,{omitQuantities=false}={}) {
   assertUser(db,user.id);
   const v=orders.snapshot(db,integer(versionId,'versionId',1));
-  const sourceByApp=new Map(),extractedByApp=new Map(),vectorByApp=new Map(),wayByApp=new Map(),pending=pendingApplications(db,v);
+  const sourceByApp=new Map(),extractedByApp=new Map(),vectorByApp=new Map(),wayByApp=new Map(),pending=pendingApplications(db,v),anyKey=settledVersion(db,v);
   for (const line of v.lines) for (const app of line.applications) {
     if (pending.has(app.id)) continue;
     const input=artworkFor(db,v,line,app);
@@ -1321,7 +1403,7 @@ async function previewForms(db,dataDir,versionId,user,{omitQuantities=false}={})
       if (prev) vectorByApp.set(app.id,{buffer:prev.buffer,background:groundOf(prev.report)});
     }
     else if (!input.gap) {
-      const row=extractedRecord(db,app.id,input,true);
+      const row=extractedRecord(db,app.id,input,true,anyKey);
       if (row?.artwork) {
         extractedByApp.set(app.id,row.artwork);
         try {const way=JSON.parse(row.report_json||'null')?.desenYolu; if(way)wayByApp.set(app.id,way);} catch {}
@@ -1373,7 +1455,8 @@ function queuePreview(db,dataDir,file,user) {
   pending.add(task);
   return task;
 }
-function ensureExtractedRecords(db,dataDir,v,user) {
+// prepared (G74): a prepared draft keeps the extraction it was prepared with (under any key); the next preparation renews it.
+function ensureExtractedRecords(db,dataDir,v,user,{prepared=false}={}) {
   for(const line of v.lines) for(const app of line.applications) {
     const input=artworkFor(db,v,line,app);
     if(input.source||input.gap) {
@@ -1382,6 +1465,7 @@ function ensureExtractedRecords(db,dataDir,v,user) {
       continue;
     }
     if(extractedRecord(db,app.id,input))continue;
+    if(prepared&&db.prepare('SELECT 1 FROM document_extracted_previews WHERE application_id=?').get(app.id))continue;
     const workKey=`extract:${app.id}:${input.key}`;
     if(previewing(db).has(workKey))continue;
     previewing(db).add(workKey);
@@ -1399,7 +1483,7 @@ function ensureVectorRecords(db,dataDir,versionId,user) {
     const row=db.prepare('SELECT status FROM document_vector_previews WHERE source_file_id=?').get(file.id);
     if (!row || row.status==='hazirlaniyor') queuePreview(db,dataDir,file,user);
   }
-  ensureExtractedRecords(db,dataDir,v,user);
+  ensureExtractedRecords(db,dataDir,v,user,{prepared:settledVersion(db,v)});
 }
 // Once an application has a size, a preview that waited for it ('beklemede') is judged
 // against that target. Runs in the background on the shared render queue.
@@ -1469,7 +1553,7 @@ function vectorStatus(db,versionId) {
   for(const line of v.lines)for(const app of line.applications) {
     const input=artworkFor(db,v,line,app);
     if(input.source)continue;
-    const row=extractedRecord(db,app.id,input),report=row?.report_json ? JSON.parse(row.report_json) : {};
+    const row=extractedRecord(db,app.id,input,false,settledVersion(db,v)),report=row?.report_json ? JSON.parse(row.report_json) : {};
     if(!row&&v.status!=='taslak')continue;
     rows.push({extracted:true,applicationId:app.id,sourceFileId:input.image?.id??null,position:app.position,
       previewFileId:row?.preview_file_id??null,status:row?.status??(input.gap?'teyit':'hazirlaniyor'),message:row?.message??input.gap??null,
@@ -1559,12 +1643,22 @@ if (require.main===module && process.argv[2]==='--vector-worker') {
         result=await require('./autoMeasure').autoMeasure({...input,design:reference});
       }
       else if (job.type==='extractArtwork') result=await require('./autoMeasure').extractArtwork(job.input);
-      else if (job.type==='vektorKapisi') result=await require('./desenCikti').vectorGate({source:Buffer.from(job.input.source.buffer),pdf:Buffer.from(job.input.pdf)});
+      else if (job.type==='desenCikti') {
+        // G74: the gate, then the picture; the gate's pixels are let go before the picture is made.
+        const desenCikti=require('./desenCikti'),source=Buffer.from(job.input.source.buffer);
+        const kapi=await desenCikti.vectorGate({source,pdf:Buffer.from(job.input.pdf)});
+        global.gc?.();
+        try {result={kapi,...await desenCikti.highResPng({source,widthMm:job.input.widthMm,heightMm:job.input.heightMm})};}
+        catch(e) {if(e.code!=='ZEMIN_BELIRSIZ')throw e;result={kapi,hata:e.message};} // no picture of an unclear ground; a person looks
+      }
       // G74: the picture's rows are compressed in bands (desenCikti.js); the clean drawing is made here, off the server's event loop.
-      else if (job.type==='desenPng') result=await require('./desenCikti').highResPng({source:Buffer.from(job.input.source.buffer),widthMm:job.input.widthMm,heightMm:job.input.heightMm});
+      else if (job.type==='desenPng') result=await require('./desenCikti').highResPng({source:Buffer.from(job.input.source.buffer),widthMm:job.input.widthMm,heightMm:job.input.heightMm,maxMp:job.input.maxMp??null});
       else if (job.type==='temizCizim') result=await require('./desenCikti').cleanPng(Buffer.from(job.input.source.buffer));
       else if (job.type==='vector') {
-        const input=await normalizeVectorInput(job.input);
+        // G74: the redraw's safe retry traces as before G74 (this child is one-shot; the setting dies with it).
+        if(job.input.vtracer)process.env.SIPARIS_VECTOR_TRACER='vtracer';
+        const {vtracer,...vectorJob}=job.input;
+        const input=await normalizeVectorInput(vectorJob);
         result=await vectorModule().vectorize(input);
         // Upload previews also record the source kind and the artwork content box (ratio for manual sizing).
         global.gc?.();
