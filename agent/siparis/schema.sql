@@ -109,3 +109,15 @@ CREATE TABLE IF NOT EXISTS customer_approvals (
 );
 CREATE INDEX IF NOT EXISTS customer_links_version ON customer_links(version_id);
 CREATE INDEX IF NOT EXISTS customer_notes_version ON customer_notes(version_id);
+-- G70: redraw jobs for the Codex worker on the owner's Mac. One job per picture + print list (anahtar = the redraw cache key).
+CREATE TABLE IF NOT EXISTS desen_isci_is (
+ id INTEGER PRIMARY KEY, anahtar TEXT NOT NULL UNIQUE, gorsel_yol TEXT NOT NULL, gorsel_mime TEXT NOT NULL, konumlar_json TEXT NOT NULL,
+ durum TEXT NOT NULL DEFAULT 'bekliyor' CHECK(durum IN ('bekliyor','kiralandi','hazir','reddedildi','vazgecildi')),
+ deneme INTEGER NOT NULL DEFAULT 0, kiralama TEXT, kiralama_bitis INTEGER, hata TEXT,
+ created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE TABLE IF NOT EXISTS desen_isci_konum (
+ id INTEGER PRIMARY KEY, is_id INTEGER NOT NULL REFERENCES desen_isci_is(id), konum TEXT NOT NULL, application_id INTEGER, kirpim_yol TEXT,
+ durum TEXT NOT NULL DEFAULT 'bekliyor' CHECK(durum IN ('bekliyor','hazir','reddedildi')), neden TEXT, UNIQUE(is_id,konum,application_id)
+);
+CREATE INDEX IF NOT EXISTS desen_isci_konum_is ON desen_isci_konum(is_id);

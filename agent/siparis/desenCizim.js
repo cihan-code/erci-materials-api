@@ -4,6 +4,7 @@
 // normal vector.js path. Off unless DESEN_CIZIM=1 and a provider is available; any failure, timeout or a
 // redraw that does not look like the source leaves the old path (direct tracing) and records why.
 //   DESEN_CIZIM_SAGLAYICI = openai (OPENAI_API_KEY) | codex (development only: local Codex CLI) | kayit (replay folder)
+//                           | isci (G70: the job is queued; the Codex worker on the owner's Mac draws it, see desenIsci.js)
 //   DESEN_CIZIM_KIP       = tam (default: the whole product picture, every print at once) | kirpik (the cut-out print alone)
 // Only the print / product picture leaves the server: no customer name, order number, price or e-mail.
 // Results are cached on disk per input bytes + request: the same print is never charged twice.
@@ -44,11 +45,16 @@ function provider(env = process.env) {
   if (name === 'openai') return env.OPENAI_API_KEY ? 'openai' : null;
   if (name === 'codex') return env.NODE_ENV === 'production' ? null : cliBin(env) ? 'codex' : null; // development only
   if (name === 'kayit') return env.DESEN_CIZIM_KAYIT_DIZIN ? 'kayit' : null;
+  if (name === 'isci') return 'isci';
   return null;
 }
 // The OpenAI edit endpoint returns ONE image per request, so there it is always one request per print (kirpik).
-const mode = (env = process.env) => (env.DESEN_CIZIM_SAGLAYICI || 'openai') === 'openai' || env.DESEN_CIZIM_KIP === 'kirpik' ? 'kirpik' : 'tam';
-const model = (env = process.env) => env.DESEN_CIZIM_MODEL || ((env.DESEN_CIZIM_SAGLAYICI || 'openai') === 'codex' ? 'gpt-6-astra' : 'gpt-image-1');
+const mode = (env = process.env) => {
+  const name = env.DESEN_CIZIM_SAGLAYICI || 'openai';
+  if (name === 'isci') return 'tam'; // the worker draws every print of the picture in one Codex call
+  return name === 'openai' || env.DESEN_CIZIM_KIP === 'kirpik' ? 'kirpik' : 'tam';
+};
+const model = (env = process.env) => env.DESEN_CIZIM_MODEL || (['codex', 'isci'].includes(env.DESEN_CIZIM_SAGLAYICI || 'openai') ? 'gpt-6-astra' : 'gpt-image-1');
 // Part of the artwork cache key of documents.js while the layer is on (off: the old key, untouched).
 const keyTag = (env = process.env) => provider(env) ? [REVISION, provider(env), mode(env), model(env)].join(':') : null;
 
@@ -117,6 +123,8 @@ function callCodex(req, env, signal) {
     child.stdin.end(prompt);
   });
 }
+// The worker (tools/desen-isci.js) draws with the same Codex call: request {files, prompt, outputs}.
+const codexDraw = (req, env = process.env, signal) => callCodex(req, env, signal);
 async function callKayit(req, env) { // replay folder: <name>.png, named after the request outputs
   const out = new Map();
   for (const n of req.outputs) { const f = path.join(env.DESEN_CIZIM_KAYIT_DIZIN, `${n}.png`); if (fs.existsSync(f)) out.set(n, fs.readFileSync(f)); }
@@ -286,11 +294,19 @@ async function redrawCrop({ crop, image = null, cacheDir, env = process.env, sig
   return { buffer, cached: false, ms: Date.now() - t0, key };
 }
 // Redraw of every print of the whole product picture in one request. prints: [{position}] -> Map position -> {buffer}
-async function redrawFull({ image, prints, cacheDir, env = process.env, signal }) {
+async function redrawFull({ image, prints, cacheDir, env = process.env, signal, queue = null, position = null, crop = null, mime = null, applicationId = null }) {
   const named = [...new Set(prints.map(p => p.position))].sort().map(position => ({ position, name: position }));
   const base = keyOf(env, ['tam', sha(image), named.map(n => n.position)]);
   const result = new Map(), missing = [];
   for (const n of named) { const hit = cacheDir && readCache(cacheDir, `${base}-${n.name}`); if (hit) result.set(n.position, { buffer: hit, cached: true, ms: 0 }); else missing.push(n); }
+  if (provider(env) === 'isci') {
+    // G70: never waits. A finished drawing is in the cache; otherwise the job is queued (once per picture) and the old path runs now.
+    if (position && result.has(position)) return result;
+    if (!queue) throw new Error('İşçi kuyruğu yok');
+    const st = await queue.enqueue({ anahtar: base, image, mime, positions: named.map(n => n.position), position, crop, applicationId });
+    if (st.durum === 'reddedildi' || st.durum === 'vazgecildi') throw new Error(`Yeniden çizim ${st.durum}${st.neden ? `: ${st.neden}` : ''}`);
+    throw Object.assign(new Error('Yeniden çizim sırada; işçi bekleniyor'), { bekliyor: true });
+  }
   if (missing.length) {
     const flight = `${base}:${missing.map(n => n.name)}`;
     if (!memo.has(flight)) {
@@ -311,14 +327,14 @@ async function redrawFull({ image, prints, cacheDir, env = process.env, signal }
 
 // The one entry point of documents.js. Never throws: {used:true, buffer, report} or {used:false, report:{reason}}.
 //   crop: the artwork PNG the old path would trace; image: the product picture buffer; prints: all positions on it.
-async function apply({ crop, image, position, prints, cacheDir, env = process.env, signal, log = console.warn }) {
+async function apply({ crop, image, position, prints, cacheDir, env = process.env, signal, log = console.warn, queue = null, mime = null, applicationId = null }) {
   if (!provider(env)) return { used: false, off: true };
   const t0 = Date.now(), kip = mode(env), saglayici = provider(env);
   const report = { yol: 'dogrudan-izleme', kip, saglayici, model: model(env) };
   try {
     let drawn;
     if (kip === 'tam' && image) {
-      const map = await redrawFull({ image, prints: prints?.length ? prints : [{ position }], cacheDir, env, signal });
+      const map = await redrawFull({ image, prints: prints?.length ? prints : [{ position }], cacheDir, env, signal, queue, position, crop, mime, applicationId });
       drawn = map.get(position);
       if (!drawn) throw new Error(`Tam görselden "${position}" deseni çıkmadı; eski yola dönüldü`);
     } else drawn = await redrawCrop({ crop, image, cacheDir, env, signal });
@@ -330,6 +346,7 @@ async function apply({ crop, image, position, prints, cacheDir, env = process.en
     return { used: true, buffer: big.buffer, report };
   } catch (e) {
     report.neden = String(e.message || e).slice(0, 300);
+    if (e.bekliyor) { report.durum = 'bekliyor'; report.sureMs = Date.now() - t0; return { used: false, report }; } // queued, not a failure
     report.elleKontrol = true;
     report.sureMs = Date.now() - t0;
     try { log(`[desen-cizim] ${position}: eski yola dönüldü: ${report.neden}`); } catch {}
@@ -337,5 +354,5 @@ async function apply({ crop, image, position, prints, cacheDir, env = process.en
   }
 }
 
-module.exports = { enabled, provider, mode, model, keyTag, apply, redrawCrop, redrawFull, fidelity, upscale, groundToAlpha, setTestProvider,
+module.exports = { enabled, provider, mode, model, keyTag, apply, redrawCrop, redrawFull, fidelity, upscale, groundToAlpha, codexDraw, setTestProvider,
   promptCrop, promptFull, LIMITS, POSITION_TEXT };

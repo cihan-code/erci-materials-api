@@ -10,6 +10,7 @@ const { approveVersion } = require('./approval');
 const stock = require('./stock');
 const { kartelaView, fabricTypeList } = require('./kartela');
 const outbox = require('./outbox');
+const desenIsci = require('./desenIsci');
 module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, recipes, customerLimits } = {}) {
   const db = suppliedDb || openDb(path.join(dataDir, 'siparis.sqlite'));
   const router = express.Router();
@@ -17,6 +18,7 @@ module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, r
   const wrap = fn => (req,res,next) => Promise.resolve().then(() => fn(req,res)).catch(next);
   // G64: customer link (own body limit, no login); the staff link-minting route inside needs requireUser.
   require('./routes-musteri')(router, { db, dataDir, requireUser, recipes, ...(customerLimits ? { limits: customerLimits } : {}) });
+  require('./routes-desen-isci')(router, { db, dataDir }); // G70: worker routes, own key and body limit
   router.use(express.json({limit:'2mb'}));
   router.post('/giris', wrap(async (req,res) => res.json(await login(db, { name:req.body.name ?? req.body.ad, password:req.body.password ?? req.body.sifre }))));
   require('./routes-fatura')(router, { db, requireUser }); // before the user gate: intake also takes the service key
@@ -28,7 +30,9 @@ module.exports = function mount(app, { dataDir, db: suppliedDb, worker = true, r
   router.get('/siparisler/:id', wrap((req,res) => {
     const order = db.prepare('SELECT * FROM orders WHERE id=? AND deleted_at IS NULL').get(req.params.id);
     if (!order) fail('Sipariş bulunamadı',404);
-    res.json({...order,versions:db.prepare('SELECT id FROM order_versions WHERE order_id=? ORDER BY version_no').all(order.id).map(v => orders.snapshot(db,v.id))});
+    // G70: each application carries the redraw state (bekliyor|hazir|reddedildi|kapali); a read-only field.
+    const withRedraw = snap => ({...snap,lines:snap.lines?.map(l => ({...l,applications:l.applications?.map(a => ({...a,desenCizim:desenIsci.stateFor(db,a.id)}))}))});
+    res.json({...order,versions:db.prepare('SELECT id FROM order_versions WHERE order_id=? ORDER BY version_no').all(order.id).map(v => withRedraw(orders.snapshot(db,v.id)))});
   }));
   router.patch('/siparisler/:id', wrap((req,res) => res.json(orders.updateOrder(db,Number(req.params.id),req.body,req.user))));
   router.delete('/siparisler/:id', wrap((req,res) => res.json(orders.cancelOrder(db,Number(req.params.id),req.user))));

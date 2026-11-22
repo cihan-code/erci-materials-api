@@ -14,6 +14,7 @@ const { buildWorkshopMessage, createWorkshopHandler } = require('./workshop');
 const { registerHandler } = require('./outbox');
 const goz = require('./goz');
 const desenCizim = require('./desenCizim');
+const desenIsci = require('./desenIsci');
 const { decide, formNote } = require('./olcuKarar');
 const { labelRawKeys } = require('./areas');
 const positionStandards = require('./konumStandartlari');
@@ -585,6 +586,23 @@ function retireExtractedPreview(db,appId,user) {
   db.prepare('DELETE FROM files WHERE id=? AND kind=?').run(old.preview_file_id,PREVIEW);
 }
 
+// G70: a finished (or refused) worker drawing replaces the stored preview of draft prints; the next request builds it again.
+function invalidateExtracted(db,appIds) {
+  for (const id of appIds) {
+    const draftApp=db.prepare(`SELECT 1 FROM applications a JOIN order_lines l ON l.id=a.line_id JOIN order_versions v ON v.id=l.version_id
+      WHERE a.id=? AND v.status='taslak'`).get(id);
+    if(!draftApp)continue;
+    const old=db.prepare('SELECT preview_file_id FROM document_extracted_previews WHERE application_id=?').get(id);
+    if(!old)continue;
+    tx(db,()=> {
+      db.prepare('DELETE FROM document_extracted_previews WHERE application_id=?').run(id);
+      if(!old.preview_file_id)return;
+      db.prepare("UPDATE confirmations SET status='cozuldu' WHERE kind='vektor_kalite' AND ref_table='files' AND ref_id=? AND status='acik'").run(old.preview_file_id);
+      db.prepare('DELETE FROM files WHERE id=? AND kind=?').run(old.preview_file_id,PREVIEW);
+    });
+  }
+}
+
 function extractedRecord(db,appId,{key},includeArtwork=false) {
   return db.prepare(`SELECT preview_file_id,status,report_json,message${includeArtwork?',artwork':''} FROM document_extracted_previews
     WHERE application_id=? AND input_json=? AND (artwork IS NULL OR preview_file_id IS NOT NULL)`).get(appId,key);
@@ -607,9 +625,10 @@ async function extractPreview(db,dataDir,v,line,app,input,user,signal,retryError
       let redraw=null;
       if(desenCizim.enabled()) {
         const raster=['image/png','image/jpeg','image/jpg'].includes(original.mime);
-        redraw=await desenCizim.apply({crop:artwork.buffer,image:raster?original.buffer:null,position:app.position,
+        redraw=await desenCizim.apply({crop:artwork.buffer,image:raster?original.buffer:null,position:app.position,mime:original.mime,applicationId:app.id,
+          queue:desenCizim.provider()==='isci'?desenIsci.queue(db,dataDir):null,
           prints:line.applications.map(a=>({position:a.position})),
-          cacheDir:path.join(dataDir,'siparis','desen-cizim'),signal});
+          cacheDir:desenIsci.cacheDir(dataDir),signal});
         if(redraw.used)artwork={...artwork,buffer:redraw.buffer};
       }
       result=await generateInChild({type:'vector',designBox:true,input:{buffer:artwork.buffer,mime:'image/png'}},signal);
@@ -1446,7 +1465,7 @@ function registerWorkshop(boundDb,dataDir) {
     return {providerRef:result.providerRef};
   });
 }
-module.exports={withPatternPoints,acceptSuggestion,confirmationDetails,SUGGESTION_SOURCE,explain,measureSuggestion,answerView,garmentCrop,frontSide,imageViewHint,flatCalibrationInput,FLAT_CALIBRATIONS,editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,previewForms,pendingApplications,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
+module.exports={invalidateExtracted,withPatternPoints,acceptSuggestion,confirmationDetails,SUGGESTION_SOURCE,explain,measureSuggestion,answerView,garmentCrop,frontSide,imageViewHint,flatCalibrationInput,FLAT_CALIBRATIONS,editLine,queuePreview,ensureVectorRecords,VIEWS,addApplication,automaticMeasure,vectorStatus,settled,PREVIEW,init,UPLOAD_KINDS,directory,safeSegment,editApplication,deleteApplication,assertVectorQuality,documentDate,createRenderQueue,generateInChild,validateUpload,upload,measure,prepare,previewForms,pendingApplications,formOrder,workshopPackage,registerWorkshop,filePath,readFile,sha256,WORKSHOP,openMeasurements,assertMeasurements,assertFresh,unlocked};
 function vectorModule() {
   // Native tracer/canvas binaries come from npm; a platform without them must say so, not fail anonymously.
   try { return require('./vector'); }
