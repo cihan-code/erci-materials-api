@@ -19,6 +19,18 @@ const sha256 = v => crypto.createHash('sha256').update(v).digest('hex');
 const notFound = () => fail(NOT_FOUND, 404);
 const PRODUCT_IMAGE_MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg' };
 
+// One combined front+back picture uploaded as both views is the same bytes twice: show it once (G68).
+// gorunum stays the single view when there is one; gorunumler lists every view the same bytes were saved as.
+function productImages(files, base) {
+  const bySha = new Map();
+  for (const f of files) {
+    const seen = bySha.get(f.sha256);
+    if (seen) { if (f.gorunum && !seen.gorunumler.includes(f.gorunum)) seen.gorunumler.push(f.gorunum); continue; }
+    bySha.set(f.sha256, { file: f, gorunumler: f.gorunum ? [f.gorunum] : [] });
+  }
+  return [...bySha.values()].map(({ file, gorunumler }) => ({ gorunum: gorunumler.length > 1 ? null : file.gorunum || null, gorunumler,
+    url: `${base}/gorsel/${file.id}` }));
+}
 // Special account that owns approvals made through a link. Its password hash can never verify (no scrypt preimage is known).
 function ensureCustomerUser(db) {
   const row = db.prepare('SELECT id FROM users WHERE name=?').get(CUSTOMER_USER);
@@ -106,8 +118,7 @@ function summary(db, token, opts) {
         numune: !!l.numune,
         adet: l.quantity,
         bedenler: Object.fromEntries(Object.entries(sizes).map(([k, n]) => [String(k), Number(n)])),
-        gorseller: v.files.filter(f => f.kind === 'urun_gorsel' && f.line_id === l.id && PRODUCT_IMAGE_MIME[path.extname(f.path).toLowerCase()])
-          .map(f => ({ gorunum: f.gorunum || null, url: `${base}/gorsel/${f.id}` })),
+        gorseller: productImages(v.files.filter(f => f.kind === 'urun_gorsel' && f.line_id === l.id && PRODUCT_IMAGE_MIME[path.extname(f.path).toLowerCase()]), base),
         uygulamalar: l.applications.map(a => {
           let src = {};
           try { src = JSON.parse(a.measure_source) || {}; } catch { /* free text source */ }
