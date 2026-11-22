@@ -1347,37 +1347,123 @@ async function autoMeasureLeg({image,design,flat,product,position}) {
 // print; a fit that keeps less than 60% or grows past 110% of the eye's box on
 // either axis is not trusted and the eye's box stays.
 const GOZ_INK=60, GOZ_PAD=.04;
-function fitInk(p,ref,box) {
-  const garment=dominant(p,Array.from(ref.mask.keys()).filter(i=>ref.mask[i]));
-  const px=Math.max(2,box.w*GOZ_PAD),py=Math.max(2,box.h*GOZ_PAD);
+// Ink pixels inside the eye's box (grown by GOZ_PAD) that differ from the garment colour.
+function inkPixels(p,box,garment) {
+  const px=Math.max(2,box.w*GOZ_PAD),py=Math.max(2,box.h*GOZ_PAD),out=[];
   const x0=Math.max(0,Math.floor(box.x-px)),y0=Math.max(0,Math.floor(box.y-py)),x1=Math.min(p.width,Math.ceil(box.x+box.w+px)),y1=Math.min(p.height,Math.ceil(box.y+box.h+py));
-  let minX=Infinity,minY=Infinity,maxX=-1,maxY=-1,n=0;
   for(let y=y0;y<y1;y++)for(let x=x0;x<x1;x++) {
     const i=(y*p.width+x)*4;
-    if(p.data[i+3]<64||distance([p.data[i],p.data[i+1],p.data[i+2]],garment)<=GOZ_INK)continue;
-    n++;if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;
+    if(p.data[i+3]>=64&&distance([p.data[i],p.data[i+1],p.data[i+2]],garment)>GOZ_INK)out.push(x,y);
   }
+  return out;
+}
+// The garment colour around a box: a ring 4-20% outside it (no product mask needed).
+function ringColour(p,box) {
+  const grow=(k)=>({x0:Math.max(0,Math.floor(box.x-box.w*k)),y0:Math.max(0,Math.floor(box.y-box.h*k)),x1:Math.min(p.width,Math.ceil(box.x+box.w*(1+k))),y1:Math.min(p.height,Math.ceil(box.y+box.h*(1+k)))});
+  const outer=grow(.2),inner=grow(.04),idx=[];
+  for(let y=outer.y0;y<outer.y1;y++)for(let x=outer.x0;x<outer.x1;x++)if(x<inner.x0||x>=inner.x1||y<inner.y0||y>=inner.y1)idx.push(y*p.width+x);
+  return dominant(p,idx);
+}
+function fitInkWith(p,box,garment) {
+  const ink=inkPixels(p,box,garment),n=ink.length/2;
+  let minX=Infinity,minY=Infinity,maxX=-1,maxY=-1;
+  for(let k=0;k<ink.length;k+=2){const x=ink[k],y=ink[k+1];if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}
   const fitted=n?{x:minX,y:minY,w:maxX-minX+1,h:maxY-minY+1}:null;
   const kept=fitted&&[fitted.w/box.w,fitted.h/box.h].every(k=>k>=.6&&k<=1.1)&&n>=box.w*box.h*.005;
   return kept?{...fitted,fit:'murekkep'}:{x:box.x,y:box.y,w:box.w,h:box.h,fit:'goz'};
 }
-// goz: {print:{box (0..1 of the picture)}, product:{box}|null} chosen by the parent for this print.
+function fitInk(p,ref,box) {return fitInkWith(p,box,dominant(p,Array.from(ref.mask.keys()).filter(i=>ref.mask[i])));}
+// G61b: scale from the eye's garment points and the pattern's known widths (cm, L).
+// Candidates: shoulder, chest (armpits) and hem width; their median is the body scale.
+// Candidates more than 12% apart: the most consistent pair is used and the scale is
+// approximate. Height alone (collar to hem) is never used as a scale (G61: TAYF %69).
+const POINT_SPREAD=.12;
+function pointScale(pts,cm,W,H) {
+  const d=(a,b)=>pts?.[a]&&pts?.[b]?Math.hypot((pts[a].x-pts[b].x)*W,(pts[a].y-pts[b].y)*H):null;
+  const found=[['omuz',d('omuz_sol','omuz_sag')],['gogus',d('koltuk_sol','koltuk_sag')],['etek',d('etek_sol','etek_sag')]]
+    .filter(([k,px])=>px>4&&Number.isFinite(cm[k])&&cm[k]>0).map(([k,px])=>({k,px:Math.round(px*10)/10,mmPerPx:cm[k]*10/px}));
+  if(!found.length)return {reason:pts?.yaka&&(pts.etek_sol||pts.etek_sag)?'Yalnız boy noktaları var; tek eksenli ölçek kullanılmaz.':'Gözün noktalarında kalıbın bilinen bir eniyle eşleşen ölçü yok.'};
+  const values=found.map(c=>c.mmPerPx).sort((a,b)=>a-b),mid=values.length>>1,median=values.length%2?values[mid]:(values[mid-1]+values[mid])/2;
+  const spread=(values.at(-1)-values[0])/median;
+  if(found.length<2||spread<=POINT_SPREAD)
+    return {mmPerPx:median,adaylar:found,...(found.length<2?{yaklasik:`Ölçek tek yatay adaydan (${found[0].k}).`}:{})};
+  let best=null;
+  for(let i=0;i<found.length;i++)for(let j=i+1;j<found.length;j++) {
+    const a=found[i].mmPerPx,b=found[j].mmPerPx,off=Math.abs(a-b)/((a+b)/2);
+    if(!best||off<best.off)best={off,pair:[found[i],found[j]]};
+  }
+  return {mmPerPx:(best.pair[0].mmPerPx+best.pair[1].mmPerPx)/2,adaylar:found,secilen:best.pair.map(c=>c.k),
+    yaklasik:`Ölçek adayları %${Math.round(spread*100)} ayrışıyor; en tutarlı ikili (${best.pair.map(c=>c.k).join(' ve ')}) alındı.`};
+}
+// goz: {print:{box (0..1 of the picture), pairing?}, product:{box, points?}|null} chosen by the parent for this print.
 function gozMeasure(p,refs,goz,measurements,scalePair,calK) {
   const px=b=>({x:b.x*p.width,y:b.y*p.height,w:b.w*p.width,h:b.h*p.height});
   const box=px(goz.print.box),product=goz.product?.box?px(goz.product.box):null;
   const centre={x:box.x+box.w/2,y:box.y+box.h/2},inside=r=>centre.x>=r.box.x&&centre.x<=r.box.x+r.box.w&&centre.y>=r.box.y&&centre.y<=r.box.y+r.box.h;
   const ranked=refs.slice().sort((a,b)=>(product?overlapFraction(b.box,product)-overlapFraction(a.box,product):0)||(inside(b)-inside(a)));
   const ref=ranked.find(r=>product?overlapFraction(r.box,product)>.3:inside(r));
-  const out={gozBoxPx:box,rasterWidth:p.width,rasterHeight:p.height,confidence:goz.print.confidence??null};
-  if(!ref)return {...out,boxPx:box,reason:'Gözün gösterdiği ürün piksel maskesinde bulunamadı; ölçek için ürün eni bilinmiyor.'};
-  const fitted=fitInk(p,ref,box),scale=scaleFor(ref,measurements,scalePair,p,calK);
+  const out={gozBoxPx:box,rasterWidth:p.width,rasterHeight:p.height,confidence:goz.print.confidence??null,...(goz.print.pairing?{pairing:goz.print.pairing}:{})};
+  const fitted=ref?fitInk(p,ref,box):fitInkWith(p,box,ringColour(p,box));
+  const points=goz.product?.points?pointScale(goz.product.points,measurements,p.width,p.height):null;
+  if(points?.mmPerPx)
+    return {...out,boxPx:fitted,...(ref?{productIndex:refs.indexOf(ref)}:{}),olcek:'noktalar',olcekAdaylari:points.adaylar,...(points.yaklasik?{olcekYaklasik:points.yaklasik}:{}),
+      mmPerPx:points.mmPerPx,width_mm:Math.round(fitted.w*points.mmPerPx),height_mm:Math.round(fitted.h*points.mmPerPx)};
+  if(!ref)return {...out,boxPx:box,reason:points?.reason||'Gözün gösterdiği ürün piksel maskesinde bulunamadı; ölçek için ürün eni bilinmiyor.'};
+  const scale=scaleFor(ref,measurements,scalePair,p,calK);
   out.boxPx=fitted;out.productIndex=refs.indexOf(ref);
-  if(!(scale.mean>0))return {...out,reason:'Göz kutusu var, ama ürünün L ölçeği doğrulanamadı; ölçek yok.'};
+  if(!(scale.mean>0))return {...out,reason:points?.reason||'Göz kutusu var, ama ürünün L ölçeği doğrulanamadı; ölçek yok.'};
   return {...out,mmPerPx:scale.mean,width_mm:Math.round(fitted.w*scale.mean),height_mm:Math.round(fitted.h*scale.mean)};
 }
+// G61b: a sleeve or leg print measured on its own axis. Axis = the eye's shoulder end -> cuff
+// (leg: waist side -> leg opening) nearest to the print; scale = pattern sleeve length (leg:
+// yan_boy) over that axis in pixels, or the body scale (approximate). The ink inside the eye's
+// box is projected on the axis: "en" runs along the arm (workshop rule, G47/G55), "boy" across.
+function gozLimbMeasure(p,goz,position,measurements) {
+  const pts=goz.product?.points||{},W=p.width,H=p.height,P=k=>pts[k]&&{x:pts[k].x*W,y:pts[k].y*H};
+  const box={x:goz.print.box.x*W,y:goz.print.box.y*H,w:goz.print.box.w*W,h:goz.print.box.h*H},c={x:box.x+box.w/2,y:box.y+box.h/2};
+  const leg=LEGS.includes(position);
+  const sides=(leg?[['sol','bel_sol','paca_sol'],['sag','bel_sag','paca_sag']]:[['sol','kol_sol_omuz','kol_sol_agiz'],['sag','kol_sag_omuz','kol_sag_agiz']])
+    .map(([side,a,b])=>({side,a:P(a),b:P(b)})).filter(x=>x.a&&x.b&&Math.hypot(x.b.x-x.a.x,x.b.y-x.a.y)>8);
+  const out={gozBoxPx:box,rasterWidth:W,rasterHeight:H,confidence:goz.print.confidence??null,...(goz.print.pairing?{pairing:goz.print.pairing}:{})};
+  if(!sides.length)return {...out,reason:`Göz ${leg?'bacak':'kol'} ekseninin noktalarını vermedi; ${leg?'bacak':'kol'} baskısı eski yoldan.`};
+  const segment=x=>{const vx=x.b.x-x.a.x,vy=x.b.y-x.a.y,t=Math.max(0,Math.min(1,((c.x-x.a.x)*vx+(c.y-x.a.y)*vy)/(vx*vx+vy*vy)));return Math.hypot(x.a.x+t*vx-c.x,x.a.y+t*vy-c.y);};
+  const axis=sides.sort((m,n)=>segment(m)-segment(n))[0],len=Math.hypot(axis.b.x-axis.a.x,axis.b.y-axis.a.y);
+  const u={x:(axis.b.x-axis.a.x)/len,y:(axis.b.y-axis.a.y)/len},v={x:-u.y,y:u.x};
+  const limbCm=leg?measurements.yan_boy:measurements.kol_boyu;
+  let k=null,olcek=null,olcekYaklasik=null;
+  if(Number.isFinite(limbCm)&&limbCm>0){k=limbCm*10/len;olcek=leg?'yan_boy':'kol_boyu';}
+  else {
+    const body=pointScale(pts,measurements,W,H);
+    if(body.mmPerPx){k=body.mmPerPx;olcek='noktalar';olcekYaklasik=`Kalıpta ${leg?'yan boy':'kol boyu'} yok; gövde ölçeği kullanıldı.`;}
+    else return {...out,reason:`Kalıpta ${leg?'yan boy':'kol boyu'} yok ve gövde ölçeği kurulamadı.`};
+  }
+  const ink=inkPixels(p,box,ringColour(p,box)),n=ink.length/2;
+  const corners=[[box.x,box.y],[box.x+box.w,box.y],[box.x,box.y+box.h],[box.x+box.w,box.y+box.h]].flat();
+  const use=n>=box.w*box.h*.005?ink:corners;
+  let a0=Infinity,a1=-Infinity,b0=Infinity,b1=-Infinity;
+  for(let i=0;i<use.length;i+=2){const along=use[i]*u.x+use[i+1]*u.y,across=use[i]*v.x+use[i+1]*v.y;if(along<a0)a0=along;if(along>a1)a1=along;if(across<b0)b0=across;if(across>b1)b1=across;}
+  const alongPx=a1-a0+1,acrossPx=b1-b0+1;
+  return {...out,eksen:{taraf:axis.side,basPx:axis.a,sonPx:axis.b,uzunlukPx:Math.round(len)},olcek,...(olcekYaklasik?{olcekYaklasik}:{}),fit:use===ink?'murekkep':'goz',
+    mmPerPx:k,boyuncaPx:Math.round(alongPx),dikPx:Math.round(acrossPx),width_mm:Math.round(alongPx*k),height_mm:Math.round(acrossPx*k)};
+}
+async function gozLimb({image,design,flat,position,goz}) {
+  const base={method:'otomatik',flatId:flat?.id??null,flatAd:flat?.ad??null,refBeden:flat?.refBeden??null,gorselFileId:image?.id??null,desenFileId:design?.id??null,selectedView:image?.gorunum||'on'};
+  try {
+    const [p]=await rasterPages(image,1600,image.mime==='application/pdf'?[1]:null);
+    const m=gozLimbMeasure(p,goz,position,bodyPoints.points(flat).cm);
+    return m.width_mm>0?{width_mm:null,height_mm:null,needs_confirmation:false,reasons:[],reason:'',measure_source:{...base,goz:m}}:{reason:m.reason};
+  } catch(e) {return {reason:`Göz kol/bacak ölçüsü okunamadı: ${e.message}`};}
+}
 async function autoMeasure({image,design,flat,product,position,color,viewHint=null,viewDefault=false,goz=null}) {
-  if(['kol','sol_kol','sag_kol'].includes(position))return autoMeasureSleeve({image,design,flat,product,position});
-  if(LEGS.includes(position))return autoMeasureLeg({image,design,flat,product,position});
+  if(['kol','sol_kol','sag_kol'].includes(position)||LEGS.includes(position)) {
+    // G61b: with the eye's points a sleeve/leg print is measured on its own axis; otherwise as before.
+    const eye=goz?.print?.box&&goz.product?.points?await gozLimb({image,design,flat,position,goz}):null;
+    if(eye?.measure_source)return eye;
+    const old=LEGS.includes(position)?await autoMeasureLeg({image,design,flat,product,position}):await autoMeasureSleeve({image,design,flat,product,position});
+    const why=eye?.reason||goz?.reason||null;
+    if(goz?.baskiYok||why)old.measure_source={...old.measure_source,goz:{...(goz?.baskiYok?{baskiYok:goz.baskiYok}:{}),...(why?{reason:why}:{})}};
+    return old;
+  }
   const scalePair=scalePairFor(flat,product),pairLabel=scalePair==='boy_gogus'?'boy/göğüs':'boy/etek',horizontalLabel=scalePair==='boy_gogus'?'göğüs':'etek';
   const started=performance.now(),timings={},reasons=[],source={scalePair,method:'otomatik',flatId:flat?.id??null,flatAd:flat?.ad??null,refBeden:flat?.refBeden??null,refCm:flat?.refLengthCm??null,olculerL:flat?.olculerL??null,chestPx:null,designBoxPx:null,scale:null,mmPerPx:null,confidence:0,gorselFileId:image?.id??null,desenFileId:design?.id??null};
   if(viewHint)source.viewHint=viewHint;
@@ -2206,4 +2292,4 @@ async function extractArtwork({image,position,product:productKey,color,viewHint=
     return {buffer:canvas.toBuffer('image/png'),placement:{page,view,rasterWidth:w,rasterHeight:h,designBoxPx:{...box,x:x+box.x,y:y+box.y}},warnings,notes};
   } finally {canvas.width=canvas.height=0;}
 }
-module.exports={defaultViewHint,fitInk,paleGroundReason,applyViewHint,autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette,silhouettes,extractArtwork};
+module.exports={pointScale,gozLimbMeasure,defaultViewHint,fitInk,paleGroundReason,applyViewHint,autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette,silhouettes,extractArtwork};

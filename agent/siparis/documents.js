@@ -849,7 +849,9 @@ function autoInputs(db,v,line,app) {
       if(viewHint.front!==eye.front)gozConflict=`Göz önü "${eye.front}" tarafta gördü, kullanıcı cevabı "${viewHint.front}"; kullanıcı cevabı kullanıldı.`;
     } else viewHint={front:eye.front,source:'goz'};
   }
-  const gozInput=eye && (eye.print||eye.baskiYok||eye.urunYok||eye.reason) ? {goz:{...(eye.print?{print:eye.print,product:eye.product}:{}),...(eye.baskiYok?{baskiYok:eye.baskiYok}:{}),...(eye.urunYok?{urunYok:eye.urunYok}:{}),...(eye.reason?{reason:eye.reason}:{})}} : {};
+  // G61b: sleeves and legs are measured on the eye's points too (autoMeasure decides the path).
+  const seen=found;
+  const gozInput=seen && (seen.print||seen.baskiYok||seen.urunYok||seen.reason) ? {goz:{...(seen.print?{print:seen.print,product:seen.product}:{}),...(seen.baskiYok?{baskiYok:seen.baskiYok}:{}),...(seen.urunYok?{urunYok:seen.urunYok}:{}),...(seen.reason?{reason:seen.reason}:{})}} : {};
   return {image,design,flat,product:line.product_key,position:app.position,...(line.color_name?{color:line.color_name}:{}),...(viewHint?{viewHint}:{}),...(sleeve?{}:{viewDefault:true}),...gozInput,...sleeveEye,...(gozConflict?{gozConflict}:{}),...(flatNote?{flatNote}:{}),...(design && linked==null?{linkDesign:true}:{})};
 }
 // G61: one eye request per picture, product and colour; every position is asked at once.
@@ -864,7 +866,9 @@ function gozFor(db,v,line,app,image) {
     const failed=goz.lastFailure(req);
     return failed ? {reason:failed} : null;
   }
-  return goz.forPrint(answer,app.position,line.applications.filter(a=>a.position===app.position).length);
+  // Several prints at one position pair top to bottom with the applications in their order (G61b).
+  const same=line.applications.filter(a=>a.position===app.position).sort((a,b)=>a.id-b.id);
+  return goz.forPrint(answer,app.position,same.length,Math.max(0,same.findIndex(a=>a.id===app.id)));
 }
 async function ensureGoz(db,dataDir,line,image,signal) {
   if(!goz.provider() || !image)return null;

@@ -11,7 +11,7 @@ const os = require('os');
 const path = require('path');
 const childProcess = require('child_process');
 
-const REVISION = 'g61-1';
+const REVISION = 'g61b-1'; // G61b: garment points joined the answer
 const EDGE = 1568; // long edge sent to the model (px)
 const TIMEOUT_MS = 60e3;
 const FAILURE_MEMO_MS = 10 * 60e3;
@@ -27,11 +27,17 @@ const POSITION_TEXT = {
 const POSITIONS = Object.keys(POSITION_TEXT).filter(p => p !== 'kapusan');
 const BOX = { type: 'object', additionalProperties: false, required: ['x', 'y', 'w', 'h'],
   properties: { x: { type: 'number' }, y: { type: 'number' }, w: { type: 'number' }, h: { type: 'number' } } };
+// G61b: landmark points of each garment (pixels of the picture; null when not visible).
+// Left/right are the wearer's. Sleeves: shoulder end and the middle of the cuff.
+const POINT = { anyOf: [{ type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } }, { type: 'null' }] };
+const POINT_KEYS = ['omuz_sol', 'omuz_sag', 'koltuk_sol', 'koltuk_sag', 'etek_sol', 'etek_sag', 'yaka', 'kol_sol_omuz', 'kol_sol_agiz',
+  'kol_sag_omuz', 'kol_sag_agiz', 'bel_sol', 'bel_sag', 'paca_sol', 'paca_sag'];
+const POINTS = { type: 'object', additionalProperties: false, required: POINT_KEYS, properties: Object.fromEntries(POINT_KEYS.map(k => [k, POINT])) };
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['urunler', 'baskilar'],
   properties: {
-    urunler: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['kutu', 'gorunum', 'tur'],
-      properties: { kutu: BOX, gorunum: { type: 'string', enum: ['on', 'arka', 'belirsiz'] }, tur: { type: 'string' } } } },
+    urunler: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['kutu', 'gorunum', 'tur', 'noktalar'],
+      properties: { kutu: BOX, gorunum: { type: 'string', enum: ['on', 'arka', 'belirsiz'] }, tur: { type: 'string' }, noktalar: POINTS } } },
     baskilar: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['konum', 'urun', 'kutu', 'aciklama', 'guven'],
       properties: { konum: { type: 'string' }, urun: { type: 'integer' }, kutu: BOX, aciklama: { type: 'string' },
         guven: { type: 'string', enum: ['yuksek', 'orta', 'dusuk'] } } } },
@@ -104,6 +110,12 @@ function prompt(req, img) {
     'artwork of that print: a logo together with its text, figure and graphics is one print. Give separate entries only',
     'for clearly separate prints at the same position (for example a logo and a separate number).',
     'Left and right are the wearer\'s. Omit a position that carries no print. Never estimate centimetres.',
+    'For every garment also give "noktalar", pixel points of this picture (null when not visible):',
+    'omuz_sol/omuz_sag = shoulder ends (where the sleeve seam meets the body); koltuk_sol/koltuk_sag = armpits (chest line);',
+    'etek_sol/etek_sag = the two lower corners of the hem; yaka = middle of the neckline (back neck on a back view);',
+    'kol_sol_omuz/kol_sol_agiz and kol_sag_omuz/kol_sag_agiz = for each sleeve, its shoulder end and the middle of its cuff;',
+    'bel_sol/bel_sag and paca_sol/paca_sag = waist sides and the middle of each leg opening for trousers or shorts.',
+    'If a hood, an arm or a fold hides part of the body, use the visible edge; never guess a point you cannot see.',
     'Answer with the JSON object only.',
   ].join('\n');
 }
@@ -117,7 +129,9 @@ function normalize(answer, img) {
     const w = Math.min(W - x, b.w), h = Math.min(H - y, b.h);
     return w > 0 && h > 0 ? { x: x / W, y: y / H, w: w / W, h: h / H } : null;
   };
-  const urunler = answer.urunler.map(u => ({ box: box(u.kutu), view: ['on', 'arka'].includes(u.gorunum) ? u.gorunum : 'belirsiz', type: String(u.tur || '') }));
+  const point = q => q && Number.isFinite(q.x) && Number.isFinite(q.y) && q.x >= 0 && q.y >= 0 && q.x <= W && q.y <= H ? { x: q.x / W, y: q.y / H } : null;
+  const points = n => n && typeof n === 'object' ? Object.fromEntries(POINT_KEYS.map(k => [k, point(n[k])]).filter(([, v]) => v)) : {};
+  const urunler = answer.urunler.map(u => ({ box: box(u.kutu), view: ['on', 'arka'].includes(u.gorunum) ? u.gorunum : 'belirsiz', type: String(u.tur || ''), points: points(u.noktalar) }));
   if (urunler.some(u => !u.box)) throw new Error('Göz cevabında geçersiz ürün kutusu');
   const baskilar = answer.baskilar.map(b => ({ position: String(b.konum), product: Number.isInteger(b.urun) && b.urun >= 0 && b.urun < urunler.length ? b.urun : null,
     box: box(b.kutu), note: String(b.aciklama || ''), confidence: ['yuksek', 'orta', 'dusuk'].includes(b.guven) ? b.guven : null })).filter(b => b.box);
@@ -224,22 +238,31 @@ const union = boxes => {
  * order fills once are one print (their union); several applications with several prints
  * cannot be paired on this evidence, so the eye stays out of them.
  */
-function forPrint(answer, ordered, sameCount) {
+function forPrint(answer, ordered, sameCount, rank = 0) {
   const position = ordered === 'kapusan' ? 'kapuson' : ordered;
   if (!answer.urunler.length) return { urunYok: 'görselde giysi yok' };
   // The front/back answer belongs to the picture, whatever this print's outcome.
   const front = frontSide(answer), side = front ? { front } : {};
   const prints = answer.baskilar.filter(b => b.position === position);
   if (!prints.length) return { baskiYok: `${position} konumunda baskı yok`, ...side };
-  if (sameCount !== 1) return { reason: `Göz ${position} konumunda ${prints.length} baskı, siparişte ${sameCount} uygulama var; eşleştirilemedi.`, ...side };
   const products = new Set(prints.map(p => p.product));
   if (products.size > 1) return { reason: `Göz ${position} konumunda ${products.size} farklı üründe baskı gösterdi; hangisi olduğu ayrılamadı.`, ...side };
-  const box = prints.length === 1 ? prints[0].box : union(prints.map(p => p.box));
+  let box, pairing = null;
+  if (sameCount === 1) box = prints.length === 1 ? prints[0].box : union(prints.map(p => p.box));
+  else if (prints.length === sameCount) {
+    // G61b: as many prints as ordered: top to bottom in the order's sequence, marked approximate.
+    box = prints.slice().sort((a, b) => a.box.y - b.box.y)[rank].box;
+    pairing = `Göz ${position} konumunda ${prints.length} baskı gördü; yukarıdan aşağı sırayla eşlendi (${rank + 1}. baskı).`;
+  } else {
+    box = union(prints.map(p => p.box));
+    pairing = `Göz ${position} konumunda ${prints.length} baskı, siparişte ${sameCount} uygulama; hepsi tek grup kutusu olarak ölçüldü.`;
+  }
   const product = prints[0].product == null ? null : answer.urunler[prints[0].product];
   // Pixel proportion of the box (the answer's boxes are fractions of its picture).
   const aspect = answer.width && answer.height ? (box.w * answer.width) / (box.h * answer.height) : null;
-  return { print: { box, confidence: prints.length === 1 ? prints[0].confidence : 'orta', ...(aspect ? { aspect } : {}) },
-    product: product ? { box: product.box, view: product.view } : null, ...side };
+  return { print: { box, confidence: prints.length === 1 ? prints[0].confidence : 'orta', ...(aspect ? { aspect } : {}), ...(pairing ? { pairing } : {}) },
+    product: product ? { box: product.box, view: product.view, ...(product.points && Object.keys(product.points).length ? { points: product.points } : {}) } : null,
+    ...(answer.width && answer.height ? { frame: { width: answer.width, height: answer.height } } : {}), ...side };
 }
 function setTestProvider(fn) { testProvider = fn; failures.clear(); }
-module.exports = { POSITIONS, provider, model, init, request, key, cached, ensure, lastFailure, forPrint, frontSide, normalize, setTestProvider, cliBin, SCHEMA, EDGE, REVISION, prompt };
+module.exports = { POINT_KEYS, POSITIONS, provider, model, init, request, key, cached, ensure, lastFailure, forPrint, frontSide, normalize, setTestProvider, cliBin, SCHEMA, EDGE, REVISION, prompt };

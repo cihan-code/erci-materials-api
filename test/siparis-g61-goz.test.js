@@ -139,7 +139,10 @@ test('G61 eye answers: boxes are normalised and checked, several prints at one o
   assert.equal(n.baskilar.length, 2);
   const one = goz.forPrint(n, 'sirt', 1), round = b => Object.fromEntries(Object.entries(b).map(([k, v]) => [k, Math.round(v * 1000) / 1000]));
   assert.deepEqual(round(one.print.box), { x: .1, y: .05, w: .3, h: .25 });
-  assert.match(goz.forPrint(n, 'sirt', 2).reason, /eşleştirilemedi/);
+  // G61b: as many prints as ordered pair top to bottom (approximate); otherwise one group box.
+  const [top, bottom] = [0, 1].map(rank => goz.forPrint(n, 'sirt', 2, rank).print);
+  assert.ok(top.box.y < bottom.box.y && /yukarıdan aşağı/.test(top.pairing));
+  assert.match(goz.forPrint(n, 'sirt', 3).print.pairing, /tek grup kutusu/);
   assert.ok(goz.forPrint(n, 'gogus', 1).baskiYok);
   assert.throws(() => goz.normalize({ urunler: [{ kutu: null }], baskilar: [] }, { width: 1, height: 1 }));
   assert.equal(goz.frontSide({ urunler: [{ box: { x: .6, y: 0, w: .3, h: 1 }, view: 'on' }, { box: { x: 0, y: 0, w: .3, h: 1 }, view: 'arka' }] }), 'sag');

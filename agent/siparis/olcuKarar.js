@@ -76,6 +76,8 @@ function decide(result, ctx = {}) {
 
   if (eye) {
     raw = eye; from = 'görselden (göz)';
+    // G61b: a scale from disagreeing point candidates, or prints paired by their order, is approximate.
+    for (const note of [s.goz.olcekYaklasik, s.goz.pairing].filter(Boolean)) { notes.push(note); state = 'yaklasik'; }
     if (pixel) {
       const difference = Math.abs(pixel.w - eye.w) / eye.w;
       s.gozPikselFarki = Math.round(difference * 1000) / 1000;
@@ -97,7 +99,7 @@ function decide(result, ctx = {}) {
   const shape = shapeRatio(s, ctx.designRatio, sleeve, ctx.gozKol?.aspect);
   if (raw) s.hamOlcu = { width_mm: Math.round(raw.w), height_mm: Math.round(raw.h) };
   // Only the width is measured: the height follows the design's own proportion.
-  if (raw && !sleeve && positive(ctx.designRatio)) {
+  if (raw && !sleeve && !s.goz?.eksen && positive(ctx.designRatio)) {
     const r = ctx.designRatio, boxRatio = raw.w / raw.h, off = Math.abs(boxRatio / r - 1);
     // A partly found print is short on one edge: the edge that gives the larger print is the one consistent with the design.
     const width = boxRatio < r ? raw.h * r : raw.w;
@@ -113,7 +115,9 @@ function decide(result, ctx = {}) {
   if (std) s.konumStandardi = std;
   const band = std && `${cm(std.min)}–${cm(std.max)} cm`;
   if (raw && std) {
-    if (raw.w < std.min / 2 || raw.w > std.max * 2) {
+    // G61b: a size the eye's box and a scale gave is never replaced by the standard (a 3 cm sleeve
+    // mark stays 3 cm); out of band it is only approximate.
+    if ((raw.w < std.min / 2 || raw.w > std.max * 2) && from !== 'görselden (göz)') {
       notes.push(`Ölçülen en ${cm(raw.w)} cm, ${ctx.position} için olağan aralığın (${band}) çok dışında; ölçü yerine standart en (${cm(std.varsayilan)} cm) yazıldı.`);
       state = 'standart'; from = 'standart ölçü (ölçü aralık dışı)';
       // The measured box keeps the print's proportion even when its size is not believable.
