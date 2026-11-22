@@ -1058,7 +1058,16 @@ async function compareDirectory(input, output) {
   return { output: realOutput, files: results };
 }
 
-module.exports = { vectorize, compareDirectory };
+// G74: page 1 as a PNG with its long edge near longEdge px, transparent unless a background is given (desenCikti's gate).
+async function renderFirstPage(buffer, longEdge = 1024, background = 'rgba(0,0,0,0)') {
+  const doc = await openPdf(buffer);
+  try {
+    const page = await doc.getPage(1), view = page.getViewport({ scale: 1 });
+    return await renderPage(page, longEdge / Math.max(view.width, view.height), background);
+  } finally { await doc.destroy(); }
+}
+
+module.exports = { vectorize, compareDirectory, renderFirstPage };
 if (require.main === module) {
   const args = process.argv.slice(2);
   const index = args.indexOf('--karsilastir'), out = args.indexOf('--output');

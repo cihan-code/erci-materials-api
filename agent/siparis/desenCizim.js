@@ -262,10 +262,11 @@ async function fidelity(source, redrawn, limits = LIMITS) {
     if (diff / (sa.data.length / 4 * 3) < 6) return { ok: false, metrics: {}, reasons: ['Çıktı girdinin kopyası; yeniden çizilmemiş'] };
   }
   const A = boxAndGrid(points(a));
-  let best = null;
+  let best = null, upright = 0;
   for (let deg = -90; deg <= 90; deg += 5) {
     const B = boxAndGrid(points(b, deg * Math.PI / 180));
     const aspect = Math.abs(B.ratio / A.ratio - 1), overlap = overlapOf(A.grid, B.grid);
+    if (deg === 0) upright = aspect > limits.aspect ? 0 : overlap; // G74: how well it matches without turning
     // Score: shape first; a turn must also bring the ratio close, otherwise it only hides a wrong drawing.
     const score = overlap - (aspect > limits.aspect ? 1 : 0);
     if (!best || score > best.score + 1e-9 || (Math.abs(score - best.score) < 1e-9 && Math.abs(deg) < Math.abs(best.deg))) best = { deg, aspect, overlap, score };
@@ -282,7 +283,7 @@ async function fidelity(source, redrawn, limits = LIMITS) {
   if (best.overlap < limits.overlap) reasons.push(`Biçim örtüşmesi düşük (%${Math.round(best.overlap * 100)})`);
   const puan = 0.5 * best.overlap + 0.5 * ince - 0.2 * Math.min(1, (color ?? 0) / limits.color) - 0.2 * Math.min(1, best.aspect / limits.aspect);
   return { ok: !reasons.length, metrics: { aspect: +best.aspect.toFixed(3), color, overlap: +best.overlap.toFixed(3), ince: +ince.toFixed(3), puan: +puan.toFixed(3),
-    donusDerece: best.deg, sourceInk: a.color, redrawnInk: b.color }, reasons };
+    donusDerece: best.deg, duzOrtusme: +upright.toFixed(3), sourceInk: a.color, redrawnInk: b.color }, reasons };
 }
 
 // ---- cache + public API --------------------------------------------------------------------------------
@@ -308,16 +309,27 @@ async function redrawCrop({ crop, image = null, cacheDir, env = process.env, sig
   return { buffer, cached: false, ms: Date.now() - t0, key };
 }
 // Redraw of every print of the whole product picture in one request. prints: [{position}] -> Map position -> {buffer}
+// G74: a print whose every entry carries its own design file ({kaynak:true}) keeps its place in the job key but is never
+// asked of the model: the key stays the same when a design file arrives after the other prints were drawn.
 async function redrawFull({ image, prints, cacheDir, env = process.env, signal, queue = null, position = null, crop = null, mime = null, applicationId = null }) {
   const named = [...new Set(prints.map(p => p.position))].sort().map(position => ({ position, name: position }));
+  const own = new Set(named.map(n => n.position).filter(pos => prints.filter(p => p.position === pos).every(p => p.kaynak)));
   const base = keyOf(env, ['tam', sha(image), named.map(n => n.position)]);
   const result = new Map(), missing = [];
-  for (const n of named) { const hit = cacheDir && readCache(cacheDir, `${base}-${n.name}`); if (hit) result.set(n.position, { buffer: hit, cached: true, ms: 0 }); else missing.push(n); }
+  for (const n of named) {
+    const hit = cacheDir && readCache(cacheDir, `${base}-${n.name}`);
+    if (hit) result.set(n.position, { buffer: hit, cached: true, ms: 0 }); else if (!own.has(n.position)) missing.push(n);
+  }
   if (provider(env) === 'isci') {
     // G70: never waits. A finished drawing is in the cache; otherwise the job is queued (once per picture) and the old path runs now.
-    if (position && result.has(position)) return result;
+    if (position && result.has(position)) {
+      // G74: the report names the drawing the worker actually chose (tam | kirpik), not the mode the job started in.
+      const kip = queue?.secilen ? await queue.secilen({ anahtar: base, position }) : null;
+      if (kip) result.get(position).kip = kip;
+      return result;
+    }
     if (!queue) throw new Error('İşçi kuyruğu yok');
-    const st = await queue.enqueue({ anahtar: base, image, mime, positions: named.map(n => n.position), position, crop, applicationId });
+    const st = await queue.enqueue({ anahtar: base, image, mime, positions: named.map(n => n.position).filter(pos => !own.has(pos)), position, crop, applicationId });
     if (st.durum === 'reddedildi' || st.durum === 'vazgecildi') throw new Error(`Yeniden çizim ${st.durum}${st.neden ? `: ${st.neden}` : ''}`);
     throw Object.assign(new Error('Yeniden çizim sırada; işçi bekleniyor'), { bekliyor: true });
   }
@@ -352,12 +364,15 @@ async function apply({ crop, image, position, prints, cacheDir, env = process.en
       drawn = map.get(position);
       if (!drawn) throw new Error(`Tam görselden "${position}" deseni çıkmadı; eski yola dönüldü`);
     } else drawn = await redrawCrop({ crop, image, cacheDir, env, signal });
+    if (drawn.kip) report.kip = drawn.kip;
     const check = await fidelity(crop, drawn.buffer);
     Object.assign(report, { sadakat: check.metrics, onbellek: drawn.cached, sureMs: drawn.ms });
     if (!check.ok) throw Object.assign(new Error(`Yeniden çizim kaynağa benzemiyor: ${check.reasons.join('; ')}`), { sadakat: check });
     const big = await upscale(await groundToAlpha(drawn.buffer));
-    Object.assign(report, { yol: 'yeniden-cizim', cozunurluk: [big.width, big.height], buyutuldu: big.enlarged });
-    return { used: true, buffer: big.buffer, report };
+    // G74: the tracer and the workshop PNG get the clean drawing: every pixel one of its inks or transparent.
+    const clean = await require('./desenCikti').cleanPng(big.buffer);
+    Object.assign(report, { yol: 'yeniden-cizim', cozunurluk: [big.width, big.height], buyutuldu: big.enlarged, ...(clean ? { murekkep: clean.inks } : {}) });
+    return { used: true, buffer: clean ? clean.buffer : big.buffer, report };
   } catch (e) {
     report.neden = String(e.message || e).slice(0, 300);
     if (e.bekliyor) { report.durum = 'bekliyor'; report.sureMs = Date.now() - t0; return { used: false, report }; } // queued, not a failure

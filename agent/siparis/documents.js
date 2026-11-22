@@ -30,11 +30,12 @@ const PREPARE_TIMEOUT_MS = 8*60e3;
 // 0.5 CPU starter plan is slower still, so 15 s timed out on live sheets.
 const MEASURE_TIMEOUT_MS = 60e3;
 const PREPARE_LOCK_MS = 10*60e3;
-const GENERATED = ['uretim_formu','onay_formu','baski_formu','nakis_formu','desen_vektor'];
-const WORKSHOP = ['baski_formu','nakis_formu','desen_vektor'];
+// G74: desen_png is the very high resolution PNG of a traced print (always beside its desen_vektor; see desenCikti.js).
+const GENERATED = ['uretim_formu','onay_formu','baski_formu','nakis_formu','desen_vektor','desen_png'];
+const WORKSHOP = ['baski_formu','nakis_formu','desen_vektor','desen_png'];
 // Derived from an uploaded source right after upload; never an input of the forms and never sent to the workshop.
 const PREVIEW = 'desen_vektor_onizleme';
-const ARTWORK_EXTRACTION_REVISION = 3;
+const ARTWORK_EXTRACTION_REVISION = 4; // G74: eye-box cuts follow the strokes and leave the photo ground out
 // Product image views; a complete sleeve view can supply its own L length scale.
 const VIEWS = ['on','arka','kol'];
 const pending = new Set();
@@ -627,7 +628,8 @@ async function extractPreview(db,dataDir,v,line,app,input,user,signal,retryError
         const raster=['image/png','image/jpeg','image/jpg'].includes(original.mime);
         redraw=await desenCizim.apply({crop:artwork.buffer,image:raster?original.buffer:null,position:app.position,mime:original.mime,applicationId:app.id,
           queue:desenCizim.provider()==='isci'?desenIsci.queue(db,dataDir):null,
-          prints:line.applications.map(a=>({position:a.position})),
+          // G74: a print with its own design file is never drawn by the model (it stays in the list: the job key does not change when a file arrives later).
+          prints:line.applications.map(a=>({position:a.position,...(a.id!==app.id&&artworkFor(db,v,line,a).source?{kaynak:true}:{})})),
           cacheDir:desenIsci.cacheDir(dataDir),signal});
         if(redraw.used)artwork={...artwork,buffer:redraw.buffer};
       }
@@ -674,6 +676,12 @@ function assertExtractedMeasurement(app,image,placement) {
   const source=provenance(app);
   if(!['otomatik','otomatik_renk'].includes(source.method))return;
   const eye=source.goz?.boxPx||source.goz?.gozBoxPx;
+  // G74: a cut from the eye's own box follows the print's strokes (G72 left sleeve: an ink fit 20% shorter than the eye's
+  // box was refused and the form said "desen dosyası bekleniyor" although the print was drawn); see autoMeasure.gozCutAgrees.
+  if(placement.gozKesit && eye && source.gorselFileId===image.id && source.goz.rasterWidth>0 && source.goz.rasterHeight>0) {
+    const kx=placement.rasterWidth/source.goz.rasterWidth,ky=placement.rasterHeight/source.goz.rasterHeight;
+    if(require('./autoMeasure').gozCutAgrees({x:eye.x*kx,y:eye.y*ky,w:eye.w*kx,h:eye.h*ky},placement.designBoxPx))return;
+  }
   const box=(placement.gozKesit && eye) ? {...eye,rasterWidth:source.goz.rasterWidth,rasterHeight:source.goz.rasterHeight} : source.designBoxPx, current=placement.designBoxPx;
   const edges=box && box.rasterWidth ? {w:box.rasterWidth,h:box.rasterHeight} : {w:source.rasterWidth,h:source.rasterHeight};
   const aligned=(offset,size,edge,currentOffset,currentSize,currentEdge)=> {
@@ -691,7 +699,8 @@ function assertExtractedMeasurement(app,image,placement) {
 // allowPending prints unmeasured applications as "Ölçü teyit bekliyor"; omitQuantities leaves every quantity field empty.
 // vectorByApp: application id -> {buffer, background} of its vector PDF, the preview of a PDF/SVG design.
 // missingDesign: application id -> why its design could not be separated; it prints as "Desen dosyası bekleniyor".
-function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPending=false,omitQuantities=false,vectorByApp=new Map(),missingDesign=new Map(),wayByApp=new Map()}={}) {
+// outputByApp: application id -> 'png' when its design leaves as the high resolution picture (G74), noted on the forms.
+function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPending=false,omitQuantities=false,vectorByApp=new Map(),missingDesign=new Map(),wayByApp=new Map(),outputByApp=new Map()}={}) {
   if (!allowPending) assertMeasurements(db,v);
   const pending=allowPending ? pendingApplications(db,v) : new Map();
   const order=db.prepare('SELECT * FROM orders WHERE id=?').get(v.order_id);
@@ -735,7 +744,7 @@ function formOrder(db,dataDir,v,sourceByApp,extractedByApp=new Map(),{allowPendi
         const source=provenance(app);
         const image=Object.values(images).find(image=>image.fileId===source.gorselFileId);
         applications.push({type:app.kind,position:app.position,width_mm:app.width_mm,height_mm:app.height_mm,lineIds:[lineId],
-          preview:preview(design)||extractedByApp.get(app.id),...(wayByApp.get(app.id)?{previewWay:wayByApp.get(app.id)}:{}),previewVector:previewVector(app,design),placement:formPlacement(app,source,image,design),
+          preview:preview(design)||extractedByApp.get(app.id),...(wayByApp.get(app.id)?{previewWay:wayByApp.get(app.id)}:{}),...(outputByApp.get(app.id)?{previewOutput:outputByApp.get(app.id)}:{}),previewVector:previewVector(app,design),placement:formPlacement(app,source,image,design),
           ...(source.method==='elle' && typeof source.kaynak==='string' && source.kaynak ? {measureNote:source.kaynak} : {}),
           ...measureNotes(source)});
       }
@@ -1110,7 +1119,8 @@ async function generateInChild(input,signal,{timeoutMs=120000}={}) {
     const result=await run({type:'raster',input:{buffer:source.buffer,edge}});
     return {...source,buffer:result.buffer,mime:'image/png',rasterSource:size};
   }
-  if(input.type==='vector') {
+  if(input.type==='desenCikti') input={...input,input:{...input.input,source:await shrink(input.input.source,2048)}};
+  else if(input.type==='vector') {
     const source=await shrink(input.input,800);
     const qualitySource=await shrink(source.qualitySource,800);
     input={...input,input:{...source,...(qualitySource?{qualitySource}:{})}};
@@ -1174,7 +1184,7 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
   try {
     const {v}=start;
     const generated=await renderQueue(async signal=> {
-      const sourceByApp=new Map(), extractedByApp=new Map(), vectorByApp=new Map(), missingDesign=new Map(), wayByApp=new Map(), generated=[];
+      const sourceByApp=new Map(), extractedByApp=new Map(), vectorByApp=new Map(), missingDesign=new Map(), wayByApp=new Map(), outputByApp=new Map(), outputs=[], generated=[];
       const applications=v.lines.flatMap(line=>line.applications.map(app=>({line,app})));
       for (const source of v.files.filter(f=>SOURCE_KINDS.includes(f.kind)))
         if (!applications.length) fail(`Desen ${source.id}: ölçülü uygulama bağlantısı gerekli`,409);
@@ -1214,14 +1224,32 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
           : {...original,targetMm,applicationType:a.kind}),garmentColor:garmentColor(db,line.id)}},signal);
         const report=cached && !raster ? {...result.report,quality:prev.report.quality==='teyit' || result.report.aspectRatioError>0.01 ? 'teyit' : 'iyi',
           reasons:[...new Set([...(prev.report.reasons||[]),...(result.report.aspectRatioError>0.01 ? ['oran_bozuldu'] : [])])]} : result.report;
-        generated.push({kind:'desen_vektor',buffer:result.pdf,meta:{applicationId:a.id,...(!input.source?{lineId:line.id}:{})},report});
+        // G74: a vector traced from a raster goes only through the gate (desenCikti.vectorGate); otherwise its desen_vektor
+        // is the PDF of the very high resolution PNG. The PNG itself always goes along. A ready PDF/SVG design is the customer's own vector.
+        const meta={applicationId:a.id,...(!input.source?{lineId:line.id}:{})};
+        let out=null;
+        if(raster) {
+          try {out=await generateInChild({type:'desenCikti',input:{source:original,pdf:result.pdf,widthMm:a.width_mm,heightMm:a.height_mm}},signal,{timeoutMs:180000});}
+          catch(e) {if(signal.aborted||e.code==='PREPARE_TIMEOUT')throw e;out={hata:String(e.message||e).slice(0,200)};}
+        }
+        const cikti=out?.png&&!out.kapi.gecti ? 'png' : 'vektor';
+        const final={...report,cikti,...(out?.kapi?{vektorKapisi:out.kapi}:{}),
+          ...(out?.png?{yuksekPng:{genislik:out.width,yukseklik:out.height,dpi:out.dpi,murekkep:out.inks,olcuMm:out.mm}}:{}),
+          // The gate could not run: the vector is not known to be faithful, so a person looks at it.
+          ...(out?.hata?{quality:'teyit',reasons:[...(report.reasons||[]),`Vektör kapısı ve yüksek çözünürlüklü görsel hazırlanamadı: ${out.hata}`]}:{})};
+        generated.push({kind:'desen_vektor',buffer:cikti==='png'?Buffer.from(out.pdf):result.pdf,meta,report:final});
+        if(out?.png)generated.push({kind:'desen_png',buffer:Buffer.from(out.png),meta:{...meta,ext:'png',mime:'image/png'}});
+        if(cikti==='png')outputByApp.set(a.id,'png');
+        if(raster)outputs.push({applicationId:a.id,cikti,kapi:out?.kapi?{gecti:out.kapi.gecti,neden:out.kapi.neden,olcum:out.kapi.olcum}:null,
+          ...(out?.png?{png:{genislik:out.width,yukseklik:out.height,dpi:out.dpi}}:{}),...(out?.hata?{hata:out.hata}:{})});
         // G56: the preview shows the design itself (its own ratio, nothing cut), never the vector
         // fitted to the measured box; that box can differ from the design's ratio (sırt %14,5).
         if (input.source && prev) vectorByApp.set(a.id,{buffer:prev.buffer,background:groundOf(prev.report)});
       }
-      const model=formOrder(db,dataDir,v,sourceByApp,extractedByApp,{allowPending:true,vectorByApp,missingDesign,wayByApp});
+      const model=formOrder(db,dataDir,v,sourceByApp,extractedByApp,{allowPending:true,vectorByApp,missingDesign,wayByApp,outputByApp});
       generated.push(...await generateInChild({type:'forms',model},signal));
       if(missingDesign.size)generated.missingDesign=[...missingDesign].map(([applicationId,message])=>({applicationId,message}));
+      if(outputs.length)generated.desenCikti=outputs;
       return generated;
     });
     return tx(db,()=> {
@@ -1245,7 +1273,7 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
       db.prepare(`UPDATE confirmations SET status='cozuldu',resolved_by=? WHERE kind='vektor_kalite' AND status='acik' AND ref_table='files'
         AND ref_id IN (SELECT id FROM files WHERE version_id=? AND kind=?)`).run(user.id,versionId,PREVIEW);
       db.prepare('UPDATE document_preparations SET token=NULL,ready=1,source_json=? WHERE version_id=? AND token=?').run(start.sourceFingerprint,versionId,token);
-      audit(db,user.id,'belgeler_hazirla',versionId,{regenerate,...(generated.missingDesign?{desenBekleyen:generated.missingDesign}:{})});
+      audit(db,user.id,'belgeler_hazirla',versionId,{regenerate,...(generated.missingDesign?{desenBekleyen:generated.missingDesign}:{}),...(generated.desenCikti?{desenCikti:generated.desenCikti}:{})});
       return orders.snapshot(db,versionId).files;
     });
   } catch (e) {
@@ -1459,7 +1487,9 @@ function registerWorkshop(boundDb,dataDir) {
     // Verify the registered path and bytes even if the upstream payload was altered.
     const root=roots.get(db) || path.dirname(db.name);
     const buffer=readFile(root,file);
-    const result=await handler({...job,payload_json:{...payload,order:{...order,version_no:orders.version(db,job.version_id).version_no,lines:orders.snapshot(db,job.version_id).lines},file:{...file,buffer,mime:'application/pdf'}}});
+    // G74: a desen_png travels as a PNG; every other workshop file is a PDF.
+    const mime=db.prepare('SELECT mime FROM document_file_meta WHERE file_id=?').get(file.id)?.mime || 'application/pdf';
+    const result=await handler({...job,payload_json:{...payload,order:{...order,version_no:orders.version(db,job.version_id).version_no,lines:orders.snapshot(db,job.version_id).lines},file:{...file,buffer,mime}}});
     audit(db,null,'atolye_bagdastirici_sonucu',job.id,{status:result.status});
     if (result.status==='manuel_bekliyor') return {status:'manuel_bekliyor'};
     return {providerRef:result.providerRef};
@@ -1510,6 +1540,13 @@ if (require.main===module && process.argv[2]==='--vector-worker') {
         result=await require('./autoMeasure').autoMeasure({...input,design:reference});
       }
       else if (job.type==='extractArtwork') result=await require('./autoMeasure').extractArtwork(job.input);
+      else if (job.type==='desenCikti') {
+        // G74: the gate first, then the picture (its rows are compressed in bands; see desenCikti.js).
+        const desenCikti=require('./desenCikti'),{source,pdf,widthMm,heightMm}=job.input;
+        const kapi=await desenCikti.vectorGate({source:Buffer.from(source.buffer),pdf:Buffer.from(pdf)});
+        global.gc?.();
+        result={kapi,...await desenCikti.highResPng({source:Buffer.from(source.buffer),widthMm,heightMm})};
+      }
       else if (job.type==='vector') {
         const input=await normalizeVectorInput(job.input);
         result=await vectorModule().vectorize(input);

@@ -4,7 +4,8 @@ const { assertUser } = require('./auth');
 const { version, retireWorkshopJobs } = require('./orders');
 const { available, movement, fillShortages } = require('./stock');
 // Only these kinds go to the workshop; onay_formu, uretim_formu and customer files never do.
-const WORKSHOP_KINDS = ['baski_formu', 'nakis_formu', 'desen_vektor'];
+// G74: desen_png (the very high resolution picture of a traced print) goes with its desen_vektor.
+const WORKSHOP_KINDS = ['baski_formu', 'nakis_formu', 'desen_vektor', 'desen_png'];
 const recipeReader = require('../operations/recipes');
 function result(db, versionId) {
   return { approval: db.prepare('SELECT * FROM approvals WHERE version_id=?').get(versionId),

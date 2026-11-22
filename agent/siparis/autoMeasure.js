@@ -2030,18 +2030,87 @@ function positionPrint(match,ref,position) {
 // Artwork recovery uses the existing placement detector but never infers a physical scale.
 // G61b: when colour separation cannot isolate the print, the eye's box (fitted to the ink) is
 // cut out: ink kept, the garment colour around it made transparent. A note says so.
+// G74: the cut starts from the ink inside the eye's box and follows its strokes (gaps up to GOZ_GAP px) out of the box,
+// at most GOZ_GROW of the box on each side: an eye box narrower than the print no longer cuts a letter off (G72 left
+// sleeve "BBT"). Strokes that reach that limit ran into something else (a seam, another print): the box fit stays.
+// The photo ground outside the garment is never ink: a box corner over it left a white triangle in the design (G72 right sleeve).
+const GOZ_GROW=.5, GOZ_GAP=2, GOZ_GROUND=40;
+const far=(d,i,c,limit)=>Math.abs(d[i]-c[0])>limit||Math.abs(d[i+1]-c[1])>limit||Math.abs(d[i+2]-c[2])>limit;
+// Pixels of the picture's own ground (its border colour) reached from the border: outside every garment.
+function outsideGround(p,garment) {
+  const W=p.width,H=p.height,d=p.data,out=new Uint8Array(W*H),ring=[];
+  for(let x=0;x<W;x++)ring.push(x,(H-1)*W+x);
+  for(let y=1;y<H-1;y++)ring.push(y*W,y*W+W-1);
+  const ground=dominant(p,ring);
+  if(!far(ground,0,garment,GOZ_INK))return out; // the garment reaches the border: no separate photo ground
+  const near=k=>d[k*4+3]<64||!far(d,k*4,ground,GOZ_GROUND);
+  const stack=new Int32Array(W*H);let n=0;
+  for(const k of ring)if(!out[k]&&near(k)){out[k]=1;stack[n++]=k;}
+  while(n) {
+    const k=stack[--n],x=k%W;
+    for(const m of [x>0?k-1:-1,x<W-1?k+1:-1,k>=W?k-W:-1,k<W*(H-1)?k+W:-1])if(m>=0&&!out[m]&&near(m)){out[m]=1;stack[n++]=m;}
+  }
+  // The blended edge between that ground and the garment (JPEG, anti-aliasing) belongs to it as well: grown by 4 px.
+  for(let pass=0;pass<4;pass++) {
+    const prev=out.slice();
+    for(let k=0;k<W*H;k++)if(!prev[k]) {
+      const x=k%W;
+      if((x>0&&prev[k-1])||(x<W-1&&prev[k+1])||(k>=W&&prev[k-W])||(k<W*(H-1)&&prev[k+W]))out[k]=1;
+    }
+  }
+  return out;
+}
+// Ink connected to the ink inside the eye's box -> {x,y,w,h,mask(window),win} or null (nothing, or it ran to the limit).
+function grownInk(p,box,garment,outside) {
+  const W=p.width,H=p.height,d=p.data;
+  const wx0=Math.max(0,Math.floor(box.x-box.w*GOZ_GROW)),wy0=Math.max(0,Math.floor(box.y-box.h*GOZ_GROW));
+  const wx1=Math.min(W,Math.ceil(box.x+box.w*(1+GOZ_GROW))),wy1=Math.min(H,Math.ceil(box.y+box.h*(1+GOZ_GROW))),ww=wx1-wx0,wh=wy1-wy0;
+  const ink=(x,y)=>{const k=y*W+x;return !outside[k]&&d[k*4+3]>=64&&far(d,k*4,garment,GOZ_INK);};
+  const px=Math.max(2,box.w*GOZ_PAD),py=Math.max(2,box.h*GOZ_PAD);
+  const sx0=Math.max(wx0,Math.floor(box.x-px)),sy0=Math.max(wy0,Math.floor(box.y-py)),sx1=Math.min(wx1,Math.ceil(box.x+box.w+px)),sy1=Math.min(wy1,Math.ceil(box.y+box.h+py));
+  const mask=new Uint8Array(ww*wh),queue=new Int32Array(ww*wh);let n=0,head=0;
+  for(let y=sy0;y<sy1;y++)for(let x=sx0;x<sx1;x++)if(ink(x,y)){mask[(y-wy0)*ww+x-wx0]=1;queue[n++]=(y-wy0)*ww+x-wx0;}
+  if(!n)return null;
+  let x0=Infinity,y0=Infinity,x1=-1,y1=-1;
+  while(head<n) {
+    const k=queue[head++],x=k%ww,y=(k-x)/ww;
+    if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;
+    for(let dy=-GOZ_GAP;dy<=GOZ_GAP;dy++)for(let dx=-GOZ_GAP;dx<=GOZ_GAP;dx++) {
+      const X=x+dx,Y=y+dy;
+      if(X<0||Y<0||X>=ww||Y>=wh||mask[Y*ww+X]||!ink(X+wx0,Y+wy0))continue;
+      mask[Y*ww+X]=1;queue[n++]=Y*ww+X;
+    }
+  }
+  // A side clipped by the picture's edge is a real end; a side at the growth limit inside the picture is not.
+  if((x0===0&&wx0>0)||(y0===0&&wy0>0)||(x1===ww-1&&wx1<W)||(y1===wh-1&&wy1<H))return null;
+  return {x:x0+wx0,y:y0+wy0,w:x1-x0+1,h:y1-y0+1,count:n,mask,win:{x:wx0,y:wy0,w:ww}};
+}
+// G74: a cut taken from the eye's box belongs to the measured print by construction; it agrees with the eye when the
+// eye's centre lies in it and it stays inside the box grown by GOZ_GROW (the cut's own limit, 2 px for rounding).
+// boxes in the same raster pixels.
+function gozCutAgrees(eye,cut) {
+  if(![eye,cut].every(b=>b&&[b.x,b.y,b.w,b.h].every(Number.isFinite)&&b.w>0&&b.h>0))return false;
+  const cx=eye.x+eye.w/2,cy=eye.y+eye.h/2,gx=eye.w*GOZ_GROW+2,gy=eye.h*GOZ_GROW+2;
+  return cx>=cut.x&&cx<=cut.x+cut.w&&cy>=cut.y&&cy<=cut.y+cut.h&&
+    cut.x>=eye.x-gx&&cut.y>=eye.y-gy&&cut.x+cut.w<=eye.x+eye.w+gx&&cut.y+cut.h<=eye.y+eye.h+gy;
+}
 async function gozCut(image,gozBox) {
   canvasLib ||= require('@napi-rs/canvas');
   const [p]=await rasterPages(image,1600,image.mime==='application/pdf'?[1]:null);
   const box={x:gozBox.x*p.width,y:gozBox.y*p.height,w:gozBox.w*p.width,h:gozBox.h*p.height};
-  const garment=ringColour(p,box),f=fitInkWith(p,box,garment);
+  const garment=ringColour(p,box),outside=outsideGround(p,garment);
+  // Grown strokes are kept when they hold the print (same 60% and ink share rule as the box fit); else the box fit as before.
+  const g=grownInk(p,box,garment,outside);
+  const grown=g&&g.w>=box.w*.6&&g.h>=box.h*.6&&g.count>=box.w*box.h*.005?g:null;
+  const f=grown||fitInkWith(p,box,garment);
   const x0=Math.max(0,Math.floor(f.x)),y0=Math.max(0,Math.floor(f.y)),w=Math.min(p.width-x0,Math.ceil(f.w)),h=Math.min(p.height-y0,Math.ceil(f.h));
   if(w<4||h<4)return null;
   const c=canvasLib.createCanvas(w,h),ctx=c.getContext('2d'),out=ctx.createImageData(w,h);
   for(let y=0;y<h;y++)for(let x=0;x<w;x++) {
-    const i=((y0+y)*p.width+x0+x)*4,o=(y*w+x)*4,rgb=[p.data[i],p.data[i+1],p.data[i+2]];
-    if(p.data[i+3]<64||distance(rgb,garment)<=GOZ_INK)continue;
-    out.data[o]=rgb[0];out.data[o+1]=rgb[1];out.data[o+2]=rgb[2];out.data[o+3]=255;
+    const X=x0+x,Y=y0+y,k=Y*p.width+X,i=k*4,o=(y*w+x)*4;
+    if(outside[k]||p.data[i+3]<64||!far(p.data,i,garment,GOZ_INK))continue;
+    if(grown&&!grown.mask[(Y-grown.win.y)*grown.win.w+X-grown.win.x])continue; // ink in the box's corner that belongs to nothing of the print
+    out.data[o]=p.data[i];out.data[o+1]=p.data[i+1];out.data[o+2]=p.data[i+2];out.data[o+3]=255;
   }
   ctx.putImageData(out,0,0);
   return {buffer:c.toBuffer('image/png'),placement:{page:1,view:image.gorunum,rasterWidth:p.width,rasterHeight:p.height,designBoxPx:{x:x0,y:y0,w,h},gozKesit:true},
@@ -2323,4 +2392,4 @@ async function extractArtworkColour({image,position,product:productKey,color,vie
     return {buffer:canvas.toBuffer('image/png'),placement:{page,view,rasterWidth:w,rasterHeight:h,designBoxPx:{...box,x:x+box.x,y:y+box.y}},warnings,notes};
   } finally {canvas.width=canvas.height=0;}
 }
-module.exports={pointScale,gozLimbMeasure,defaultViewHint,fitInk,paleGroundReason,applyViewHint,autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette,silhouettes,extractArtwork};
+module.exports={pointScale,gozLimbMeasure,defaultViewHint,fitInk,paleGroundReason,applyViewHint,autoMeasure,raster,rasterPages,viewForPosition,designContent,silhouette,silhouettes,extractArtwork,gozCutAgrees};

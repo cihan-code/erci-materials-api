@@ -42,6 +42,11 @@ function queue(db, dataDir) {
         return { durum, neden: row.neden || job.hata || null, isId: job.id };
       });
     },
+    // G74: which drawing the worker chose for this print (tam | kirpik), or null.
+    async secilen({ anahtar, position }) {
+      return db.prepare(`SELECT k.secilen FROM desen_isci_konum k JOIN desen_isci_is j ON j.id=k.is_id
+        WHERE j.anahtar=? AND k.konum=? AND k.secilen IS NOT NULL ORDER BY k.id DESC LIMIT 1`).get(anahtar, position)?.secilen ?? null;
+    },
   };
 }
 
@@ -65,9 +70,20 @@ function stateFor(db, applicationId, env = process.env) {
 const ZAYIF_PUAN = () => Number(process.env.DESEN_ISCI_ZAYIF_PUAN) || 0.5;
 const KUCUK_PX = () => Number(process.env.DESEN_ISCI_KUCUK_PX) || 150;
 const TOLERANS = 0.05;
-// Choice between the two drawings of one print: tamPuan / kirpikPuan are fidelity scores, null when that drawing is missing or refused.
-// The higher score wins; the cut-out drawing wins a near tie (within TOLERANS); nothing usable -> null.
-function pick(tamPuan, kirpikPuan) {
+// G74: a print sitting tilted on the garment (a sleeve signature): the whole-picture drawing had to be turned at least
+// EGIK degrees to match the cut-out, i.e. the model straightened it. The design file is upright (the tilt belongs to the
+// placement), so a straightened drawing that passed the fidelity check is not judged against a cut-out drawing that
+// merely copied the tilt of a small, blurred cut-out (G71/G72 left sleeve "BBT": the copy won on score and was broken).
+// "Turned" means: the best turn is at least EGIK degrees, it matches well (overlap >= 0.8) and clearly better than the
+// drawing as it stands (by 0.1): a poor drawing that only happens to fit better at some angle is not a straightened one.
+const EGIK = 15;
+const straight = c => !!c && Math.abs(c.donus ?? 0) >= EGIK && (c.ortusme ?? 0) >= 0.8 && (c.ortusme ?? 0) - (c.duz ?? 0) >= 0.1;
+// Choice between the two drawings of one print: tamPuan / kirpikPuan are fidelity scores, null when that drawing is missing or refused;
+// tamDonus / kirpikDonus: how each matched the cut-out ({donus: best turn in degrees, ortusme: overlap there, duz: overlap unturned}).
+// A straightened whole-picture drawing wins over a cut-out drawing that kept the tilt; otherwise the higher score wins,
+// the cut-out drawing on a near tie (within TOLERANS); nothing usable -> null.
+function pick(tamPuan, kirpikPuan, { tamDonus = null, kirpikDonus = null } = {}) {
+  if (tamPuan !== null && straight(tamDonus) && (kirpikPuan === null || !straight(kirpikDonus))) return 'tam';
   if (kirpikPuan !== null && (tamPuan === null || kirpikPuan >= tamPuan - TOLERANS)) return 'kirpik';
   return tamPuan !== null ? 'tam' : null;
 }
@@ -134,7 +150,7 @@ async function judge(rows, png) {
     if (!k.kirpim_yol || !fs.existsSync(k.kirpim_yol)) continue;
     const c = await desenCizim.fidelity(fs.readFileSync(k.kirpim_yol), png);
     const puan = c.metrics?.puan ?? null;
-    if (!worst || !c.ok || (worst.ok && puan < worst.puan)) worst = { ok: c.ok, puan, neden: c.ok ? null : `Yeniden çizim kaynağa benzemiyor: ${c.reasons.join('; ')}`, crop: k.kirpim_yol };
+    if (!worst || !c.ok || (worst.ok && puan < worst.puan)) worst = { ok: c.ok, puan, donus: { donus: c.metrics?.donusDerece ?? 0, ortusme: c.metrics?.overlap ?? 0, duz: c.metrics?.duzOrtusme ?? 0 }, neden: c.ok ? null : `Yeniden çizim kaynağa benzemiyor: ${c.reasons.join('; ')}`, crop: k.kirpim_yol };
     if (!c.ok) break;
   }
   return worst || { ok: true, puan: null, neden: null, crop: null };
@@ -159,10 +175,14 @@ async function submit(db, dataDir, id, lease, results) {
     let png = null, check = null, neden = null;
     try { png = await decode(byPos.get(konum)); check = await judge(mine, png); neden = check.neden; } catch (e) { neden = String(e.message).slice(0, 300); }
     if (job.asama === 'tam') {
-      const weak = check && check.crop && (!check.ok || (check.puan ?? 1) < ZAYIF_PUAN() || await small(check.crop));
+      // G74: a missing or refused drawing (even "a copy of the input") always gets the cut-out attempt when a cut-out exists;
+      // a straightened drawing that passed is final (the cut-out drawing would only copy the tilt).
+      const cut = mine.find(k => k.kirpim_yol && fs.existsSync(k.kirpim_yol))?.kirpim_yol;
+      const passed = !!check?.ok, upright = passed && straight(check.donus);
+      const weak = !!cut && (!passed || (!upright && ((check.puan ?? 1) < ZAYIF_PUAN() || await small(cut))));
       if (weak) { // keep this drawing as the candidate, ask for a cut-out drawing
         if (png) write(tamPng(konum), png);
-        setRow(konum, { durum: 'ikinci', tam_yol: png ? tamPng(konum) : null, tam_puan: check.ok ? check.puan : null, neden });
+        setRow(konum, { durum: 'ikinci', tam_yol: png ? tamPng(konum) : null, tam_puan: check?.ok ? check.puan : null, neden });
         second.push(konum); outcome[konum] = 'ikinci'; continue;
       }
       if (check?.ok) { write(cachePng(konum), png); setRow(konum, { durum: 'hazir', neden: null, tam_puan: check.puan, secilen: 'tam' }); outcome[konum] = 'hazir'; }
@@ -170,8 +190,10 @@ async function submit(db, dataDir, id, lease, results) {
       continue;
     }
     // second stage: the better of the two drawings, the cut-out one on a near tie
+    const tamThere = !!(row0.tam_yol && fs.existsSync(row0.tam_yol));
     const tamPuan = row0.tam_puan, kp = check?.ok ? check.puan : null;
-    const choice = pick(tamPuan, kp), tamThere = !!(row0.tam_yol && fs.existsSync(row0.tam_yol));
+    const tamDonus = tamPuan !== null && tamThere ? (await judge(mine, fs.readFileSync(row0.tam_yol))).donus : null;
+    const choice = pick(tamPuan, kp, { tamDonus, kirpikDonus: check?.donus ?? null });
     const useCut = choice === 'kirpik', useTam = choice === 'tam' && tamThere;
     if (useCut || useTam) {
       write(cachePng(konum), useCut ? png : fs.readFileSync(row0.tam_yol));
@@ -210,4 +232,4 @@ const listing = db => ({
     .map(j => ({ id: j.id, konumlar: JSON.parse(j.konumlar_json), deneme: j.deneme, durum: j.durum })),
 });
 
-module.exports = { pick, ZAYIF_PUAN, KUCUK_PX, queue, stateFor, claim, image, cutout, submit, fail, listing, cacheDir, MAX_TRIES };
+module.exports = { pick, EGIK, ZAYIF_PUAN, KUCUK_PX, queue, stateFor, claim, image, cutout, submit, fail, listing, cacheDir, MAX_TRIES };
