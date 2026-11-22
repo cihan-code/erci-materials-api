@@ -104,6 +104,9 @@ test('G61 a sleeve without a design is not "no print": the standard width, along
   // The eye saw a slanted script 4 times longer than wide: the sleeve text band (150 mm).
   const script = run(noDesign, 'sag_kol', { gozKol: { aspect: 1 / 4 } });
   assert.deepEqual([script.width_mm, script.height_mm, script.measure_source.konumStandardi.dikey], [150, 38, true]);
+  // A slanted script's upright box is shorter: 2.25 along/across already counts as text along the arm.
+  assert.equal(run(noDesign, 'sag_kol', { gozKol: { aspect: 0.44 } }).width_mm, 150);
+  assert.equal(run(noDesign, 'sol_kol', { gozKol: { aspect: 0.8 } }).width_mm, 90);
   const missing = run(noDesign, 'sag_kol', { gozKol: { baskiYok: 'sag_kol konumunda baskı yok' } });
   assert.deepEqual([missing.width_mm, missing.needs_confirmation], [null, true]);
 });
