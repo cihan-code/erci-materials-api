@@ -27,13 +27,14 @@ test('G61b agreeing shoulder, chest and hem widths give their median scale', () 
   assert.equal(r.yaklasik, undefined);
 });
 
-test('G61b disagreeing candidates: the most consistent pair, approximate; height alone is no scale', () => {
-  // A dropped shoulder: 61.5 cm on 400 px (1.54 mm/px) against chest and hem near 1.0 mm/px.
+test('G61b disagreeing candidates: shoulder/hem mean or the most consistent pair, approximate; height alone is no scale', () => {
+  // Shoulder 1.2 and hem 1.0 mm/px: their mean, approximate (the chest does not join).
   const pts = { omuz_sol: pt(300, 100), omuz_sag: pt(700, 100), koltuk_sol: pt(280, 300), koltuk_sag: pt(720, 300), etek_sol: pt(290, 800), etek_sag: pt(710, 800) };
-  const r = pointScale(pts, { omuz: 61.5, gogus: 44, etek: 43 }, 1000, 1000);
-  assert.deepEqual(r.secilen, ['gogus', 'etek']);
-  assert.ok(Math.abs(r.mmPerPx - (1 + 430 / 420) / 2) < 1e-9);
-  assert.match(r.yaklasik, /en tutarlı ikili/);
+  const r = pointScale(pts, { omuz: 48, gogus: 44, etek: 42 }, 1000, 1000);
+  assert.deepEqual(r.secilen, ['omuz', 'etek']); assert.ok(Math.abs(r.mmPerPx - 1.1) < 1e-9); assert.match(r.yaklasik, /ortalamaları/);
+  // No hem: shoulder 1.54 against chest 1.0 and nothing else -> the most consistent pair is that pair.
+  const noHem = pointScale({ ...pts, etek_sol: null, etek_sag: null, yaka: pt(500, 90) }, { omuz: 61.5, gogus: 44, omuzdan_boy: 70 }, 1000, 1000);
+  assert.deepEqual(noHem.secilen, ['omuz', 'gogus']); assert.match(noHem.yaklasik, /en tutarlı ikili/);
   const single = pointScale({ etek_sol: pt(290, 800), etek_sag: pt(710, 800) }, { etek: 42 }, 1000, 1000);
   assert.ok(Math.abs(single.mmPerPx - 1) < 1e-9); assert.match(single.yaklasik, /tek yatay aday/);
   const heightOnly = pointScale({ yaka: pt(500, 90), etek_sol: pt(290, 800) }, { omuzdan_boy: 70 }, 1000, 1000);
