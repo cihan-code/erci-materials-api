@@ -16,6 +16,8 @@ const ADDED_COLUMNS = { order_lines: { kalip_id: 'TEXT', note: 'TEXT', fabric_ty
     // G63: optional unit sale price of the line, excluding VAT, in whole kuruş.
     unit_price_kurus: "INTEGER CHECK(unit_price_kurus IS NULL OR (typeof(unit_price_kurus)='integer' AND unit_price_kurus>0))" },
   // G59: soft delete of an order and the fabric type of a line (colour is its own field).
+  // G71: second (cut-out) attempt of a redraw job; the tables of G70 never reached a live database.
+  desen_isci_is: { asama: "TEXT NOT NULL DEFAULT 'tam'" }, desen_isci_konum: { tam_yol: 'TEXT', tam_puan: 'REAL', kirpik_puan: 'REAL', secilen: 'TEXT' },
   orders: { deleted_at: 'TEXT', deleted_by: 'INTEGER REFERENCES users(id)', deleted_order_no: 'TEXT' }, stock_items: { color_hex: 'TEXT' }, stock_movements: { allocation_id: 'INTEGER REFERENCES allocations(id)' },
   invoice_lines: { source: 'TEXT', invoice_no: 'TEXT', invoice_date: 'TEXT', supplier_vkn: 'TEXT', unit_price: 'REAL', content_hash: 'TEXT',
     match_reasons_json: 'TEXT', created_at: 'TEXT', updated_at: 'TEXT', delivery_request_json: 'TEXT' } };

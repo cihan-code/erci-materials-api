@@ -17,13 +17,18 @@ module.exports = function mountDesenIsci(router, { db, dataDir }) {
   const wrap = fn => (req, res, next) => Promise.resolve().then(() => fn(req, res)).catch(next);
   const done = (res, r) => r.error ? res.status(r.status || 400).json({ error: r.error }) : res.json(r);
   sub.get('/is', (req, res) => res.json(isci.listing(db)));
-  sub.post('/al', (req, res) => res.json({ is: isci.claim(db) }));
+  sub.post('/al', (req, res) => res.json({ is: isci.claim(db, dataDir) }));
   sub.get('/is/:id/gorsel', (req, res) => {
     const r = isci.image(db, Number(req.params.id), String(req.query.kiralama || ''));
     if (r.error) return res.status(r.status).json({ error: r.error });
     res.type(r.mime).send(r.buffer);
   });
+  sub.get('/is/:id/kirpim/:konum', (req, res) => {
+    const r = isci.cutout(db, Number(req.params.id), String(req.query.kiralama || ''), String(req.params.konum));
+    if (r.error) return res.status(r.status).json({ error: r.error });
+    res.type(r.mime).send(r.buffer);
+  });
   sub.post('/is/:id/sonuc', wrap(async (req, res) => done(res, await isci.submit(db, dataDir, Number(req.params.id), String(req.body?.kiralama || ''), req.body?.sonuclar))));
-  sub.post('/is/:id/hata', (req, res) => done(res, isci.fail(db, Number(req.params.id), String(req.body?.kiralama || ''), req.body?.mesaj)));
+  sub.post('/is/:id/hata', (req, res) => done(res, isci.fail(db, dataDir, Number(req.params.id), String(req.body?.kiralama || ''), req.body?.mesaj)));
   router.use('/desen-isci', sub);
 };

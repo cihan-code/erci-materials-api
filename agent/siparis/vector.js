@@ -870,11 +870,11 @@ function resizePage(page, target, crop) {
 }
 
 /** Local only. targetMm is the artwork content boundary in millimetres. */
-async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = false, applicationType = 'baski', qualitySource, garmentColor } = {}) {
+async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = false, applicationType = 'baski', qualitySource, garmentColor, includeSvg = false } = {}) {
   if (!Buffer.isBuffer(buffer) || !buffer.length) throw new TypeError('buffer gerekli');
   const target = targetSize(targetMm);
   mime = String(mime || '').split(';')[0].toLowerCase();
-  let pdf, kind, inputPages, rasterQualityReport, designBox, rasterDetails = [], reasons = [], aspectRatioError = 0, grounds = [], opaqueRaster = false;
+  let tracedSvg, pdf, kind, inputPages, rasterQualityReport, designBox, rasterDetails = [], reasons = [], aspectRatioError = 0, grounds = [], opaqueRaster = false;
   const vectorizers = new Set();
   if (!['baski','nakis'].includes(applicationType)) throw new TypeError('applicationType baski veya nakis olmalı');
   if (manualVector && mime!=='application/pdf') throw new Error('Hazır vektör PDF gerekli');
@@ -892,7 +892,7 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
     }
     result ??= await trace(bounded.buffer, bounded.source??null, target, true);
     if(bounded.resampled)reasons.push('Büyük raster bellek sınırı için küçültüldü; ince detayları özgün dosyayla teyit edin.');
-    pdf = result.pdf; kind = 'raster';
+    pdf = result.pdf; kind = 'raster'; tracedSvg = result.svg;
     designBox={w:result.image.width,h:result.image.height};
     inputPages = [{ width: result.image.width, height: result.image.height }];
     const source = { width: result.image.width * 0.75, height: result.image.height * 0.75 };
@@ -1005,7 +1005,7 @@ async function vectorize({ buffer, mime, rasterSource, targetMm, manualVector = 
   if (!rasterQualityReport && !vectorQualityReport && !pendingFill && pathCount && minLineWidth === null) reasons.push('dolgu_detay_kalinligi_olculemedi');
   if (inputPages.some(x => !Number.isFinite(x.width / x.height) || x.width / x.height > 20 || x.width / x.height < 0.05)) reasons.push(rasterQualityReport ? 'Desenin en boy oranı olağan sınırların dışında.' : 'supheli_oran');
   if (aspectRatioError > 0.01) reasons.push(rasterQualityReport ? 'Hedef ölçü desenin en boy oranını değiştiriyor.' : 'oran_bozuldu');
-  return { pdf, kind, report: { pathCount, colorCount: rasterQualityReport?.metrics.colorCount ?? colors.size, minLineWidth,
+  return { pdf, kind, ...(includeSvg && tracedSvg ? { svg: tracedSvg } : {}), report: { pathCount, colorCount: rasterQualityReport?.metrics.colorCount ?? colors.size, minLineWidth,
     minLineWidthUnit: 'mm', minLineWidthEstimated: true, aspectRatioPreserved: aspectRatioError <= 0.01,
     aspectRatioError, aspectRatioMethod: 'content-boundary-transform',
     rasterQuality: rasterQualityReport?.metrics,

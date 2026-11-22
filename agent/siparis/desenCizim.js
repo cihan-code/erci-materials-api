@@ -175,7 +175,7 @@ async function groundToAlpha(buffer) {
 }
 
 // ---- fidelity check ------------------------------------------------------------------------------------
-const GRID = 32;
+const GRID_COARSE = 32, GRID_FINE = 64;
 const LIMITS = { aspect: 0.25, color: 110, overlap: 0.5 };
 // Ink mask: transparent pixels are ground; otherwise ground = median colour of the border, ink = clearly different.
 function inkOf(p) {
@@ -209,7 +209,7 @@ function points(ink, angle = 0) {
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (mask[y * W + x]) pts.push([x * c - y * s, x * s + y * c]);
   return pts;
 }
-function boxAndGrid(pts) {
+function boxAndGrid(pts, GRID = GRID_COARSE) {
   const cut = Math.max(0, Math.floor(pts.length * 0.005));
   const q = (k, lo) => { const v = pts.map(p => p[k]).sort((a, b) => a - b); return lo ? v[cut] : v[v.length - 1 - cut]; };
   const x0 = q(0, true), x1 = q(0, false), y0 = q(1, true), y1 = q(1, false);
@@ -220,7 +220,7 @@ function boxAndGrid(pts) {
   }
   return { ratio: w / h, grid: g };
 }
-const dilate = (g, r = 1) => {
+const dilate = (g, r = 1, GRID = GRID_COARSE) => {
   const o = new Uint8Array(GRID * GRID);
   for (let y = 0; y < GRID; y++) for (let x = 0; x < GRID; x++) if (g[y * GRID + x])
     for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
@@ -228,8 +228,18 @@ const dilate = (g, r = 1) => {
     }
   return o;
 };
+// Fine structure: correlation of the two ink maps on a 64 x 64 grid, each softened by a 3 x 3 average (1 = same
+// structure, ~0 = unrelated). It sees an interior (lattice vs flower) that the coarse 32 grid cannot.
+function structure(ga, gb) {
+  const G = GRID_FINE, blur = g => { const o = new Float32Array(G * G); for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { let n = 0, c = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const X = x + dx, Y = y + dy; if (X >= 0 && Y >= 0 && X < G && Y < G) { n += g[Y * G + X]; c++; } } o[y * G + x] = n / c; } return o; };
+  const a = blur(ga), b = blur(gb), n = a.length;
+  const ma = a.reduce((s, v) => s + v, 0) / n, mb = b.reduce((s, v) => s + v, 0) / n;
+  let sab = 0, saa = 0, sbb = 0;
+  for (let i = 0; i < n; i++) { sab += (a[i] - ma) * (b[i] - mb); saa += (a[i] - ma) ** 2; sbb += (b[i] - mb) ** 2; }
+  return saa && sbb ? Math.max(0, sab / Math.sqrt(saa * sbb)) : 0;
+}
 function overlapOf(ga, gb) {
-  const da = dilate(ga), db = dilate(gb);
+  const da = dilate(ga, 1, GRID_COARSE), db = dilate(gb, 1, GRID_COARSE);
   let ca = 0, cb = 0, na = 0, nb = 0;
   for (let i = 0; i < ga.length; i++) { if (ga[i]) { na++; if (db[i]) ca++; } if (gb[i]) { nb++; if (da[i]) cb++; } }
   return Math.min(na ? ca / na : 0, nb ? cb / nb : 0);
@@ -260,6 +270,9 @@ async function fidelity(source, redrawn, limits = LIMITS) {
     const score = overlap - (aspect > limits.aspect ? 1 : 0);
     if (!best || score > best.score + 1e-9 || (Math.abs(score - best.score) < 1e-9 && Math.abs(deg) < Math.abs(best.deg))) best = { deg, aspect, overlap, score };
   }
+  // Score (0..1) used to pick between two redraws of the same print: shape overlap and fine structure, minus colour and ratio drift.
+  const F = boxAndGrid(points(a), GRID_FINE), FB = boxAndGrid(points(b, best.deg * Math.PI / 180), GRID_FINE);
+  const ince = structure(F.grid, FB.grid);
   if (best.aspect > limits.aspect) reasons.push(`En/boy oranı kaynaktan %${Math.round(best.aspect * 100)} farklı`);
   let color = null;
   if (a.color && b.color) {
@@ -267,7 +280,8 @@ async function fidelity(source, redrawn, limits = LIMITS) {
     if (color > limits.color) reasons.push(`Baskın renk kaynaktan farklı (uzaklık ${color})`);
   }
   if (best.overlap < limits.overlap) reasons.push(`Biçim örtüşmesi düşük (%${Math.round(best.overlap * 100)})`);
-  return { ok: !reasons.length, metrics: { aspect: +best.aspect.toFixed(3), color, overlap: +best.overlap.toFixed(3),
+  const puan = 0.5 * best.overlap + 0.5 * ince - 0.2 * Math.min(1, (color ?? 0) / limits.color) - 0.2 * Math.min(1, best.aspect / limits.aspect);
+  return { ok: !reasons.length, metrics: { aspect: +best.aspect.toFixed(3), color, overlap: +best.overlap.toFixed(3), ince: +ince.toFixed(3), puan: +puan.toFixed(3),
     donusDerece: best.deg, sourceInk: a.color, redrawnInk: b.color }, reasons };
 }
 

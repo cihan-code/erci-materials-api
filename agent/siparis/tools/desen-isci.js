@@ -60,15 +60,31 @@ async function oneJob(cfg) {
   if (!job) return 'yok';
   const t0 = Date.now(); // the picture is held in memory; the Codex helper writes it to its own temp folder and removes that afterwards
   try {
-    const img = await api(cfg, 'GET', `/is/${job.id}/gorsel?kiralama=${job.kiralama}`);
-    if (!img.ok) throw new Error(`görsel indirilemedi (${img.status})`);
-    const buffer = Buffer.from(await img.arrayBuffer());
-    const prints = job.konumlar.map(position => ({ position, name: position }));
-    const out = await cfg.draw({ files: [{ name: 'product', buffer }], prompt: desenCizim.promptFull(prints), outputs: prints.map(p => p.name) }, cfg.env);
-    const sonuclar = [...out].map(([konum, png]) => ({ konum, png: png.toString('base64') }));
+    let sonuclar = [];
+    if (job.kip === 'kirpik') {
+      // Second attempt: one Codex call per weak print, from its cut-out alone. A print whose drawing fails is simply left out
+      // (the server then keeps its whole-picture drawing); if every call fails the job goes back to the queue.
+      let errors = 0;
+      for (const konum of job.konumlar) {
+        try {
+          const cut = await api(cfg, 'GET', `/is/${job.id}/kirpim/${encodeURIComponent(konum)}?kiralama=${job.kiralama}`);
+          if (!cut.ok) throw new Error(`kırpım indirilemedi (${cut.status})`);
+          const out = await cfg.draw({ files: [{ name: 'print', buffer: Buffer.from(await cut.arrayBuffer()) }], prompt: desenCizim.promptCrop(), outputs: ['print'] }, cfg.env);
+          sonuclar.push({ konum, png: out.get('print').toString('base64') });
+        } catch (e) { if (e.fatal) throw e; errors++; }
+      }
+      if (!sonuclar.length && errors) throw new Error('kırpım çizimleri alınamadı');
+    } else {
+      const img = await api(cfg, 'GET', `/is/${job.id}/gorsel?kiralama=${job.kiralama}`);
+      if (!img.ok) throw new Error(`görsel indirilemedi (${img.status})`);
+      const buffer = Buffer.from(await img.arrayBuffer());
+      const prints = job.konumlar.map(position => ({ position, name: position }));
+      const out = await cfg.draw({ files: [{ name: 'product', buffer }], prompt: desenCizim.promptFull(prints), outputs: prints.map(p => p.name) }, cfg.env);
+      sonuclar = [...out].map(([konum, png]) => ({ konum, png: png.toString('base64') }));
+    }
     const up = await api(cfg, 'POST', `/is/${job.id}/sonuc`, { kiralama: job.kiralama, sonuclar });
     if (!up.ok) throw new Error(`sonuç yüklenemedi (${up.status})`);
-    log(`is=${job.id} sure=${Math.round((Date.now() - t0) / 1000)}s durum=tamam`);
+    log(`is=${job.id} kip=${job.kip} sure=${Math.round((Date.now() - t0) / 1000)}s durum=tamam`);
     return 'tamam';
   } catch (e) {
     if (e.fatal) throw e;

@@ -15,14 +15,15 @@ const { mockup } = require('./fixtures/siparis/oto-mockup');
 
 const ok = (r, status = 200) => { assert.equal(r.status, status, JSON.stringify(r.data)); return r.data; };
 const KEY = crypto.randomBytes(24).toString('hex'); // generated per run, never a real secret
-const ENVS = ['DESEN_CIZIM', 'DESEN_CIZIM_SAGLAYICI', 'DESEN_ISCI_ANAHTARI'];
+const ENVS = ['DESEN_CIZIM', 'DESEN_CIZIM_SAGLAYICI', 'DESEN_ISCI_ANAHTARI', 'DESEN_ISCI_KUCUK_PX', 'DESEN_ISCI_ZAYIF_PUAN'];
 function useEnv(t, values) {
   const before = Object.fromEntries(ENVS.map(k => [k, process.env[k]]));
   for (const k of ENVS) delete process.env[k];
   Object.assign(process.env, values);
   t.after(() => { for (const k of ENVS) { if (before[k] === undefined) delete process.env[k]; else process.env[k] = before[k]; } });
 }
-const ISCI = { DESEN_CIZIM: '1', DESEN_CIZIM_SAGLAYICI: 'isci', DESEN_ISCI_ANAHTARI: KEY };
+// KUCUK_PX=1: the invented crops are small; G71 (second attempt) has its own tests, here a fidelity-passing drawing is final.
+const ISCI = { DESEN_CIZIM: '1', DESEN_CIZIM_SAGLAYICI: 'isci', DESEN_ISCI_ANAHTARI: KEY, DESEN_ISCI_KUCUK_PX: '1', DESEN_ISCI_ZAYIF_PUAN: '0.0001' };
 async function fixture(t) {
   const f = await setup();
   t.after(async () => { await documents.settled(); await f.close(); fs.rmSync(f.dir, { recursive: true, force: true }); });
@@ -135,7 +136,7 @@ test('G70 an uploaded drawing passes the fidelity check, is cached and the previ
   const j = ok(await f.W('/al', { method: 'POST', body: {} })).is;
   const png = await cleanOf(crop(f));
   const up = ok(await f.W(`/is/${j.id}/sonuc`, { method: 'POST', body: { kiralama: j.kiralama, sonuclar: [{ konum: 'gogus', png: png.toString('base64') }] } }));
-  assert.deepEqual(up.sonuc, { gogus: 'hazir' }, JSON.stringify(f.db.prepare('SELECT neden FROM desen_isci_konum').all()));
+  assert.deepEqual(up.sonuc, { gogus: 'hazir' }, JSON.stringify(f.db.prepare('SELECT durum,tam_puan,neden FROM desen_isci_konum').all()));
   assert.equal(f.db.prepare('SELECT durum FROM desen_isci_is').get().durum, 'hazir');
   assert.equal(fs.readdirSync(isci.cacheDir(fs.realpathSync(f.dir))).length, 1);
   assert.equal(f.db.prepare('SELECT COUNT(*) n FROM document_extracted_previews WHERE application_id=?').get(f.appId).n, 0); // old preview dropped
@@ -155,7 +156,11 @@ test('G70 an upload that does not look like the source is refused: job reddedild
   const j = ok(await f.W('/al', { method: 'POST', body: {} })).is;
   const c = createCanvas(600, 600), x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, 600, 600); x.fillStyle = '#000'; x.fillRect(10, 10, 40, 500); // a thin black bar: another drawing
   const up = ok(await f.W(`/is/${j.id}/sonuc`, { method: 'POST', body: { kiralama: j.kiralama, sonuclar: [{ konum: 'gogus', png: c.toBuffer('image/png').toString('base64') }] } }));
-  assert.deepEqual(up.sonuc, { gogus: 'reddedildi' });
+  assert.deepEqual(up.sonuc, { gogus: 'ikinci' }); // G71: a failed whole-picture drawing gets a cut-out attempt first
+  const j2 = ok(await f.W('/al', { method: 'POST', body: {} })).is;
+  assert.equal(j2.kip, 'kirpik');
+  const up2 = ok(await f.W(`/is/${j2.id}/sonuc`, { method: 'POST', body: { kiralama: j2.kiralama, sonuclar: [{ konum: 'gogus', png: c.toBuffer('image/png').toString('base64') }] } }));
+  assert.deepEqual(up2.sonuc, { gogus: 'reddedildi' });
   const row = f.db.prepare('SELECT durum,neden FROM desen_isci_konum').get();
   assert.equal(row.durum, 'reddedildi');
   assert.match(row.neden, /kaynağa benzemiyor/);

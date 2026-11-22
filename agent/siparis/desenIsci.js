@@ -57,18 +57,50 @@ function stateFor(db, applicationId, env = process.env) {
 }
 
 // Worker side ---------------------------------------------------------------------------------------------
-function claim(db) {
+// Second attempt (G71). The whole-picture drawing (asama "tam") is judged per print against the cut-out source:
+//   weak  = it failed the fidelity check, OR its score (desenCizim.fidelity puan, 0..1) is below ZAYIF_PUAN,
+//           OR the source cut-out is small (shortest side under KUCUK_PX): little detail to go by, so the model may invent.
+// Weak prints get a second drawing from the cut-out alone (asama "kirpik", one Codex call per print) in the SAME job.
+// The better score wins; the cut-out drawing wins a near tie (within TOLERANS) because it cannot invent beyond its source.
+const ZAYIF_PUAN = () => Number(process.env.DESEN_ISCI_ZAYIF_PUAN) || 0.5;
+const KUCUK_PX = () => Number(process.env.DESEN_ISCI_KUCUK_PX) || 150;
+const TOLERANS = 0.05;
+// Choice between the two drawings of one print: tamPuan / kirpikPuan are fidelity scores, null when that drawing is missing or refused.
+// The higher score wins; the cut-out drawing wins a near tie (within TOLERANS); nothing usable -> null.
+function pick(tamPuan, kirpikPuan) {
+  if (kirpikPuan !== null && (tamPuan === null || kirpikPuan >= tamPuan - TOLERANS)) return 'kirpik';
+  return tamPuan !== null ? 'tam' : null;
+}
+function claim(db, dataDir) {
   return tx(db, () => {
     const t = now();
     // A worker that died: its lease ran out, the job is free again (tries are counted at the claim).
     db.prepare("UPDATE desen_isci_is SET durum='bekliyor',kiralama=NULL WHERE durum='kiralandi' AND kiralama_bitis<?").run(t);
-    db.prepare("UPDATE desen_isci_is SET durum='vazgecildi',hata=COALESCE(hata,'deneme sınırı'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE durum='bekliyor' AND deneme>=?").run(MAX_TRIES);
+    for (const j of db.prepare("SELECT * FROM desen_isci_is WHERE durum='bekliyor' AND deneme>=?").all(MAX_TRIES)) abandon(db, dataDir, j, 'deneme sınırı');
     const job = db.prepare("SELECT * FROM desen_isci_is WHERE durum='bekliyor' ORDER BY id LIMIT 1").get();
     if (!job) return null;
     const lease = crypto.randomBytes(16).toString('hex');
     db.prepare("UPDATE desen_isci_is SET durum='kiralandi',kiralama=?,kiralama_bitis=?,deneme=deneme+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?").run(lease, t + LEASE_S(), job.id);
-    return { id: job.id, kiralama: lease, kiralamaSn: LEASE_S(), deneme: job.deneme + 1, konumlar: JSON.parse(job.konumlar_json), kip: 'tam', mime: job.gorsel_mime };
+    const all = JSON.parse(job.konumlar_json);
+    const konumlar = job.asama === 'kirpik' ? all.filter(k => db.prepare("SELECT 1 FROM desen_isci_konum WHERE is_id=? AND konum=? AND durum='ikinci'").get(job.id, k)) : all;
+    return { id: job.id, kiralama: lease, kiralamaSn: LEASE_S(), deneme: job.deneme + 1, konumlar, kip: job.asama, mime: job.gorsel_mime };
   });
+}
+// A job past its try limit is given up. A print that already has a whole-picture candidate keeps it (hazir, secilen tam);
+// the others fall back to the old path with a reason.
+function abandon(db, dataDir, job, why) {
+  const ids = [];
+  for (const k of db.prepare("SELECT * FROM desen_isci_konum WHERE is_id=?").all(job.id)) {
+    if (k.application_id != null) ids.push(k.application_id);
+    if (!['bekliyor', 'ikinci'].includes(k.durum)) continue;
+    if (k.durum === 'ikinci' && k.tam_yol && fs.existsSync(k.tam_yol)) {
+      write(path.join(cacheDir(dataDir), `${job.anahtar}-${k.konum}.png`), fs.readFileSync(k.tam_yol));
+      db.prepare("UPDATE desen_isci_konum SET durum='hazir',secilen='tam' WHERE id=?").run(k.id);
+    } else db.prepare("UPDATE desen_isci_konum SET durum='reddedildi',neden=? WHERE id=?").run(`Deneme sınırına ulaşıldı: ${why}`.slice(0, 300), k.id);
+  }
+  const any = db.prepare("SELECT 1 FROM desen_isci_konum WHERE is_id=? AND durum='hazir'").get(job.id);
+  db.prepare("UPDATE desen_isci_is SET durum=?,kiralama=NULL,hata=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?").run(any ? 'hazir' : 'vazgecildi', String(why).slice(0, 300), job.id);
+  return ids;
 }
 function leased(db, id, lease) {
   const job = db.prepare('SELECT * FROM desen_isci_is WHERE id=?').get(id);
@@ -81,56 +113,96 @@ function image(db, id, lease) {
   if (r.error) return r;
   return { buffer: fs.readFileSync(r.job.gorsel_yol), mime: r.job.gorsel_mime };
 }
+// The cut-out of one print, for the second attempt.
+function cutout(db, id, lease, konum) {
+  const r = leased(db, id, lease);
+  if (r.error) return r;
+  const k = db.prepare("SELECT kirpim_yol FROM desen_isci_konum WHERE is_id=? AND konum=? AND kirpim_yol IS NOT NULL LIMIT 1").get(id, konum);
+  if (!k || !fs.existsSync(k.kirpim_yol)) return { status: 404, error: 'Kırpım yok' };
+  return { buffer: fs.readFileSync(k.kirpim_yol), mime: 'image/png' };
+}
 // Invalidate the stored previews of these applications (draft versions only) so the next request builds them again.
 function refresh(db, appIds) {
   if (!appIds.length) return;
   require('./documents').invalidateExtracted(db, appIds);
+}
+const decode = async b64 => { const png = b64 ? Buffer.from(b64, 'base64') : null; if (!png || png.length < 100) throw new Error('İşçi bu deseni üretmedi'); await require('@napi-rs/canvas').loadImage(png); return png; };
+// Fidelity of a drawing against the print's stored cut-out(s): the weakest cut-out decides; {ok, puan, neden}. No cut-out yet: accepted here, apply() checks again.
+async function judge(rows, png) {
+  let worst = null;
+  for (const k of rows) {
+    if (!k.kirpim_yol || !fs.existsSync(k.kirpim_yol)) continue;
+    const c = await desenCizim.fidelity(fs.readFileSync(k.kirpim_yol), png);
+    const puan = c.metrics?.puan ?? null;
+    if (!worst || !c.ok || (worst.ok && puan < worst.puan)) worst = { ok: c.ok, puan, neden: c.ok ? null : `Yeniden çizim kaynağa benzemiyor: ${c.reasons.join('; ')}`, crop: k.kirpim_yol };
+    if (!c.ok) break;
+  }
+  return worst || { ok: true, puan: null, neden: null, crop: null };
+}
+async function small(file) {
+  if (!file) return false;
+  const i = await require('@napi-rs/canvas').loadImage(fs.readFileSync(file));
+  return Math.min(i.width, i.height) < KUCUK_PX();
 }
 async function submit(db, dataDir, id, lease, results) {
   const r = leased(db, id, lease);
   if (r.error) return r;
   const job = r.job, positions = JSON.parse(job.konumlar_json), byPos = new Map((results || []).map(x => [String(x.konum), x.png]));
   const rows = db.prepare('SELECT * FROM desen_isci_konum WHERE is_id=?').all(id);
-  const outcome = {}, apps = [];
+  const cachePng = konum => path.join(cacheDir(dataDir), `${job.anahtar}-${konum}.png`), tamPng = konum => path.join(jobDir(dataDir), `${id}-${safe(konum)}.tam.png`);
+  const outcome = {}, apps = [], second = [];
+  const setRow = (konum, f) => db.prepare(`UPDATE desen_isci_konum SET ${Object.keys(f).map(k => `${k}=?`).join(',')} WHERE is_id=? AND konum=?`).run(...Object.values(f), id, konum);
   for (const konum of positions) {
-    const mine = rows.filter(k => k.konum === konum);
-    let ok = false, neden = null;
-    try {
-      const png = byPos.get(konum) ? Buffer.from(byPos.get(konum), 'base64') : null;
-      if (!png || png.length < 100) throw new Error('İşçi bu deseni üretmedi');
-      await require('@napi-rs/canvas').loadImage(png); // must decode
-      for (const k of mine) {
-        if (!k.kirpim_yol || !fs.existsSync(k.kirpim_yol)) continue; // no crop yet: apply() checks it again before use
-        const check = await desenCizim.fidelity(fs.readFileSync(k.kirpim_yol), png);
-        if (!check.ok) throw new Error(`Yeniden çizim kaynağa benzemiyor: ${check.reasons.join('; ')}`);
-      }
-      write(path.join(cacheDir(dataDir), `${job.anahtar}-${konum}.png`), png);
-      ok = true;
-    } catch (e) { neden = String(e.message).slice(0, 300); }
-    outcome[konum] = ok ? 'hazir' : 'reddedildi';
-    db.prepare('UPDATE desen_isci_konum SET durum=?,neden=? WHERE is_id=? AND konum=?').run(ok ? 'hazir' : 'reddedildi', neden, id, konum);
+    const mine = rows.filter(k => k.konum === konum), row0 = mine[0];
     apps.push(...mine.map(k => k.application_id).filter(v => v != null));
+    if (job.asama === 'kirpik' && row0.durum !== 'ikinci') continue; // finished in the first stage
+    let png = null, check = null, neden = null;
+    try { png = await decode(byPos.get(konum)); check = await judge(mine, png); neden = check.neden; } catch (e) { neden = String(e.message).slice(0, 300); }
+    if (job.asama === 'tam') {
+      const weak = check && check.crop && (!check.ok || (check.puan ?? 1) < ZAYIF_PUAN() || await small(check.crop));
+      if (weak) { // keep this drawing as the candidate, ask for a cut-out drawing
+        if (png) write(tamPng(konum), png);
+        setRow(konum, { durum: 'ikinci', tam_yol: png ? tamPng(konum) : null, tam_puan: check.ok ? check.puan : null, neden });
+        second.push(konum); outcome[konum] = 'ikinci'; continue;
+      }
+      if (check?.ok) { write(cachePng(konum), png); setRow(konum, { durum: 'hazir', neden: null, tam_puan: check.puan, secilen: 'tam' }); outcome[konum] = 'hazir'; }
+      else { setRow(konum, { durum: 'reddedildi', neden: neden || 'Yeniden çizim alınamadı' }); outcome[konum] = 'reddedildi'; }
+      continue;
+    }
+    // second stage: the better of the two drawings, the cut-out one on a near tie
+    const tamPuan = row0.tam_puan, kp = check?.ok ? check.puan : null;
+    const choice = pick(tamPuan, kp), tamThere = !!(row0.tam_yol && fs.existsSync(row0.tam_yol));
+    const useCut = choice === 'kirpik', useTam = choice === 'tam' && tamThere;
+    if (useCut || useTam) {
+      write(cachePng(konum), useCut ? png : fs.readFileSync(row0.tam_yol));
+      setRow(konum, { durum: 'hazir', neden: null, kirpik_puan: kp, secilen: useCut ? 'kirpik' : 'tam' });
+      outcome[konum] = 'hazir';
+    } else {
+      setRow(konum, { durum: 'reddedildi', neden: [row0.neden, neden].filter(Boolean).join(' | ').slice(0, 300) || 'Yeniden çizim alınamadı' });
+      outcome[konum] = 'reddedildi';
+    }
   }
   const any = Object.values(outcome).includes('hazir');
   tx(db, () => {
-    db.prepare("UPDATE desen_isci_is SET durum=?,kiralama=NULL,hata=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?")
-      .run(any ? 'hazir' : 'reddedildi', any ? null : 'hiçbir desen denetimden geçmedi', id);
-    audit(db, null, 'desen_isci_sonuc', id, { sonuc: outcome });
+    if (second.length) db.prepare("UPDATE desen_isci_is SET durum='bekliyor',asama='kirpik',deneme=0,kiralama=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?").run(id);
+    else db.prepare("UPDATE desen_isci_is SET durum=?,kiralama=NULL,hata=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?")
+      .run(any || db.prepare("SELECT 1 FROM desen_isci_konum WHERE is_id=? AND durum='hazir'").get(id) ? 'hazir' : 'reddedildi', any ? null : 'hiçbir desen denetimden geçmedi', id);
+    audit(db, null, 'desen_isci_sonuc', id, { asama: job.asama, sonuc: outcome });
   });
-  refresh(db, [...new Set(apps)]);
-  return { ok: true, sonuc: outcome };
+  if (!second.length) refresh(db, [...new Set(rows.filter(k => k.application_id != null).map(k => k.application_id))]);
+  return { ok: true, sonuc: outcome, ...(second.length ? { ikinciDeneme: second } : {}) };
 }
-function fail(db, id, lease, message) {
+function fail(db, dataDir, id, lease, message) {
   const r = leased(db, id, lease);
   if (r.error) return r;
-  const giveUp = r.job.deneme >= MAX_TRIES;
-  db.prepare("UPDATE desen_isci_is SET durum=?,kiralama=NULL,hata=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?")
-    .run(giveUp ? 'vazgecildi' : 'bekliyor', String(message || 'hata').slice(0, 300), id);
-  if (giveUp) {
-    db.prepare("UPDATE desen_isci_konum SET durum='reddedildi',neden=? WHERE is_id=? AND durum='bekliyor'").run('Deneme sınırına ulaşıldı: ' + String(message || '').slice(0, 200), id);
-    refresh(db, db.prepare('SELECT application_id FROM desen_isci_konum WHERE is_id=? AND application_id IS NOT NULL').all(id).map(k => k.application_id));
+  const msg = String(message || 'hata').slice(0, 300);
+  if (r.job.deneme < MAX_TRIES) {
+    db.prepare("UPDATE desen_isci_is SET durum='bekliyor',kiralama=NULL,hata=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?").run(msg, id);
+    return { ok: true, durum: 'bekliyor' };
   }
-  return { ok: true, durum: giveUp ? 'vazgecildi' : 'bekliyor' };
+  const ids = tx(db, () => abandon(db, dataDir, r.job, msg));
+  refresh(db, [...new Set(ids)]);
+  return { ok: true, durum: db.prepare('SELECT durum FROM desen_isci_is WHERE id=?').get(id).durum === 'hazir' ? 'hazir' : 'vazgecildi' };
 }
 const listing = db => ({
   sayilar: Object.fromEntries(db.prepare('SELECT durum,COUNT(*) n FROM desen_isci_is GROUP BY durum').all().map(r => [r.durum, r.n])),
@@ -138,4 +210,4 @@ const listing = db => ({
     .map(j => ({ id: j.id, konumlar: JSON.parse(j.konumlar_json), deneme: j.deneme, durum: j.durum })),
 });
 
-module.exports = { queue, stateFor, claim, image, submit, fail, listing, cacheDir, MAX_TRIES };
+module.exports = { pick, ZAYIF_PUAN, KUCUK_PX, queue, stateFor, claim, image, cutout, submit, fail, listing, cacheDir, MAX_TRIES };
