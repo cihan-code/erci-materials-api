@@ -86,6 +86,13 @@ test('G74 a print with its own design file is never asked of the model; the job 
   assert.ok(files.some(x => x.kind === 'desen_vektor' && x.application_id === f.apps.sirt));
   assert.ok(files.some(x => x.kind === 'desen_png' && x.application_id === f.apps.sirt && x.mime === 'image/png'));
   assert.equal(f.audit().desenBekleyen, undefined);
+  // The 30 x 20 cm box would stretch the design (ink 1160 x 800 px, 1.45:1) by 3.4%: the faithful trace is made again at its own ratio inside the box.
+  const out = f.audit().desenCikti.find(o => o.applicationId === f.apps.sirt);
+  assert.equal(out.cikti, 'vektor', JSON.stringify(out));
+  assert.match(out.kapi.neden ?? '', /^$/);
+  const vec = await PDFDocument.load(fs.readFileSync(files.find(x => x.kind === 'desen_vektor' && x.application_id === f.apps.sirt).path));
+  const p = vec.getPage(0);
+  assert.ok(Math.abs(p.getWidth() / p.getHeight() - 1.45) < 0.01 && p.getWidth() < 300 * 72 / 25.4 - 5, `${p.getWidth()} x ${p.getHeight()}`);
 });
 
 test('G74 worker queue: the design-file print stays out of the job, a late design file does not start a new job', async t => {

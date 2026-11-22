@@ -1119,7 +1119,7 @@ async function generateInChild(input,signal,{timeoutMs=120000}={}) {
     const result=await run({type:'raster',input:{buffer:source.buffer,edge}});
     return {...source,buffer:result.buffer,mime:'image/png',rasterSource:size};
   }
-  if(input.type==='desenCikti') input={...input,input:{...input.input,source:await shrink(input.input.source,2048)}};
+  if(['desenCikti','vektorKapisi'].includes(input.type)) input={...input,input:{...input.input,source:await shrink(input.input.source,2048)}};
   else if(input.type==='vector') {
     const source=await shrink(input.input,800);
     const qualitySource=await shrink(source.qualitySource,800);
@@ -1218,10 +1218,11 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
         const cached=prev && !drawn && (!raster || (Number.isFinite(prev.report.rasterQuality?.pathCount) && Number.isFinite(prev.report.rasterQuality?.nodeCount)));
         // Legacy previews without complexity metrics are retraced from the original raster.
         // Keep cached vector paths; final raster quality is measured against the original artwork.
-        const result=await generateInChild({type:'vector',input:{...(cached
+        const vectorAt=targetMm=>generateInChild({type:'vector',input:{...(cached
           ? {manualVector:true,buffer:prev.buffer,mime:'application/pdf',targetMm,applicationType:a.kind,
             ...(raster ? {qualitySource:{...original,metrics:prev.report.rasterQuality}} : {})}
           : {...original,targetMm,applicationType:a.kind}),garmentColor:garmentColor(db,line.id)}},signal);
+        const result=await vectorAt(targetMm);
         const report=cached && !raster ? {...result.report,quality:prev.report.quality==='teyit' || result.report.aspectRatioError>0.01 ? 'teyit' : 'iyi',
           reasons:[...new Set([...(prev.report.reasons||[]),...(result.report.aspectRatioError>0.01 ? ['oran_bozuldu'] : [])])]} : result.report;
         // G74: a vector traced from a raster goes only through the gate (desenCikti.vectorGate); otherwise its desen_vektor
@@ -1232,12 +1233,21 @@ async function prepare(db,dataDir,versionId,user,regenerate=false) {
           try {out=await generateInChild({type:'desenCikti',input:{source:original,pdf:result.pdf,widthMm:a.width_mm,heightMm:a.height_mm}},signal,{timeoutMs:180000});}
           catch(e) {if(signal.aborted||e.code==='PREPARE_TIMEOUT')throw e;out={hata:String(e.message||e).slice(0,200)};}
         }
+        // A faithful trace refused only because the measured box stretches it: the vector is made again at the design's own
+        // ratio inside that box (the size of the PNG) and judged again. The stretch itself stays reported (oran_bozuldu).
+        let vectorPdf=result.pdf,fitted=null;
+        if(out?.png&&!out.kapi.gecti&&require('./desenCikti').onlyAspect(out.kapi)) {
+          const again=await vectorAt({w:out.mm.w,h:out.mm.h});
+          const kapi=await generateInChild({type:'vektorKapisi',input:{source:original,pdf:again.pdf}},signal);
+          out={...out,kapi:{...kapi,olcuKutusuna:out.kapi}};
+          if(kapi.gecti) {vectorPdf=again.pdf;fitted={w:out.mm.w,h:out.mm.h};}
+        }
         const cikti=out?.png&&!out.kapi.gecti ? 'png' : 'vektor';
-        const final={...report,cikti,...(out?.kapi?{vektorKapisi:out.kapi}:{}),
+        const final={...report,cikti,...(out?.kapi?{vektorKapisi:out.kapi}:{}),...(fitted?{vektorOlcuMm:fitted,notes:[...(report.notes||[]),'Vektör, desenin kendi oranıyla ölçü kutusuna sığdırıldı (çekiştirilmedi).']}:{}),
           ...(out?.png?{yuksekPng:{genislik:out.width,yukseklik:out.height,dpi:out.dpi,murekkep:out.inks,olcuMm:out.mm}}:{}),
           // The gate could not run: the vector is not known to be faithful, so a person looks at it.
           ...(out?.hata?{quality:'teyit',reasons:[...(report.reasons||[]),`Vektör kapısı ve yüksek çözünürlüklü görsel hazırlanamadı: ${out.hata}`]}:{})};
-        generated.push({kind:'desen_vektor',buffer:cikti==='png'?Buffer.from(out.pdf):result.pdf,meta,report:final});
+        generated.push({kind:'desen_vektor',buffer:cikti==='png'?Buffer.from(out.pdf):vectorPdf,meta,report:final});
         if(out?.png)generated.push({kind:'desen_png',buffer:Buffer.from(out.png),meta:{...meta,ext:'png',mime:'image/png'}});
         if(cikti==='png')outputByApp.set(a.id,'png');
         if(raster)outputs.push({applicationId:a.id,cikti,kapi:out?.kapi?{gecti:out.kapi.gecti,neden:out.kapi.neden,olcum:out.kapi.olcum}:null,
@@ -1540,6 +1550,7 @@ if (require.main===module && process.argv[2]==='--vector-worker') {
         result=await require('./autoMeasure').autoMeasure({...input,design:reference});
       }
       else if (job.type==='extractArtwork') result=await require('./autoMeasure').extractArtwork(job.input);
+      else if (job.type==='vektorKapisi') result=await require('./desenCikti').vectorGate({source:Buffer.from(job.input.source.buffer),pdf:Buffer.from(job.input.pdf)});
       else if (job.type==='desenCikti') {
         // G74: the gate first, then the picture (its rows are compressed in bands; see desenCikti.js).
         const desenCikti=require('./desenCikti'),{source,pdf,widthMm,heightMm}=job.input;

@@ -121,6 +121,12 @@ async function vectorGate({ source, pdf, limits = GATE }) {
 }
 
 
+// True when the ratio is the gate's only objection (the shape itself is faithful).
+function onlyAspect(kapi, limits = GATE) {
+  const m = kapi?.olcum || {};
+  return !kapi?.gecti && m.oranFarki > limits.oran && m.ortusme >= limits.ortusme && m.enKotuParca >= limits.parca && m.ince >= limits.ince && m.kaynakPx >= limits.kaynakPx;
+}
+
 // ---- inks ------------------------------------------------------------------------------------------------
 // Coverage 0..255 of every pixel: alpha on a transparent ground, else the distance from the ground colour (35 -> 0, 90 -> 255).
 function coverage(p, ground) {
@@ -132,15 +138,25 @@ function coverage(p, ground) {
   }
   return a;
 }
-// The design's inks: colours of the solid pixels (coverage >= 250) in 5-bit buckets, the most used first, each one at
+// Interior pixels: fully covered, and so are their four neighbours. An edge pixel can be fully opaque yet carry the
+// old ground in its colour (a cream line drawn on black, its ground made transparent: a grey rim).
+function interior(cover, W, H) {
+  const m = new Uint8Array(W * H);
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+    const k = y * W + x;
+    if (cover[k] >= 250 && cover[k - 1] >= 250 && cover[k + 1] >= 250 && cover[k - W] >= 250 && cover[k + W] >= 250) m[k] = 1;
+  }
+  return m;
+}
+// The design's inks: colours of the interior pixels in 5-bit buckets, the most used first, each one at
 // least MERGE away from the ones taken and holding 1% of the solid pixels; then three k-means rounds. Edge blends
 // between two inks are spread over many small buckets and do not become an ink of their own. -> [[r,g,b], ...]
 const MERGE = 64;
-function inksOf(p, cover) {
+function inksOf(p, cover, inner = interior(cover, p.width, p.height)) {
   const d = p.data, bins = new Map();
   let solid = 0;
   for (let k = 0; k < cover.length; k++) {
-    if (cover[k] < 250) continue;
+    if (!inner[k]) continue;
     const i = k * 4, key = (d[i] >> 3) << 10 | (d[i + 1] >> 3) << 5 | (d[i + 2] >> 3);
     let b = bins.get(key); if (!b) bins.set(key, b = [0, 0, 0, 0]);
     b[0] += d[i]; b[1] += d[i + 1]; b[2] += d[i + 2]; b[3]++; solid++;
@@ -179,20 +195,37 @@ function nearest(inks, r, g, b) {
   for (let j = 0; j < inks.length; j++) { const e = (inks[j][0] - r) ** 2 + (inks[j][1] - g) ** 2 + (inks[j][2] - b) ** 2; if (e < bd) { bd = e; best = j; } }
   return best;
 }
-// Every pixel becomes one ink (its coverage kept as alpha: the edge's sub-pixel position) or transparent (coverage < 128):
-// a clean drawing for the tracer and the PNG.
-// -> {width, height, data (RGBA), inks, box (ink box) | null}
+// Every pixel becomes one ink, its coverage kept as alpha (the edge's sub-pixel position; under 128 it is transparent).
+// An edge pixel carries the ground in its colour, so it takes the ink of its interior neighbours (within 3 px),
+// not its own nearest ink: no grey fleck along a white stroke. -> {width, height, data (RGBA), inks, box (ink box) | null}
 async function cleanInks(buffer) {
-  const p = await decode(buffer), ground = groundOf(p), cover = coverage(p, ground), inks = inksOf(p, cover), d = p.data;
-  const out = new Uint8ClampedArray(d.length);
-  let x0 = p.width, y0 = p.height, x1 = -1, y1 = -1;
-  if (inks.length) for (let k = 0; k < cover.length; k++) {
-    if (cover[k] < 128) continue;
-    const i = k * 4, c = inks[nearest(inks, d[i], d[i + 1], d[i + 2])], x = k % p.width, y = (k - x) / p.width;
+  const p = await decode(buffer), ground = groundOf(p), cover = coverage(p, ground), W = p.width, H = p.height, inner = interior(cover, W, H);
+  const inks = inksOf(p, cover, inner), d = p.data, out = new Uint8ClampedArray(d.length), idx = new Int8Array(W * H).fill(-1);
+  let x0 = W, y0 = H, x1 = -1, y1 = -1;
+  if (!inks.length) return { width: W, height: H, data: out, inks, box: null };
+  for (let k = 0; k < cover.length; k++) if (inner[k]) idx[k] = nearest(inks, d[k * 4], d[k * 4 + 1], d[k * 4 + 2]);
+  const votes = new Uint32Array(inks.length);
+  for (let k = 0; k < cover.length; k++) {
+    if (!cover[k]) continue;
+    let j = idx[k];
+    if (j < 0) {
+      const x = k % W, y = (k - x) / W;
+      for (let r = 1; r <= 3 && j < 0; r++) {
+        votes.fill(0);
+        for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+          const X = x + dx, Y = y + dy;
+          if (X >= 0 && Y >= 0 && X < W && Y < H && idx[Y * W + X] >= 0) votes[idx[Y * W + X]]++;
+        }
+        let best = -1; for (let n = 0; n < inks.length; n++) if (votes[n] && (best < 0 || votes[n] > votes[best])) best = n;
+        j = best;
+      }
+      if (j < 0) j = nearest(inks, d[k * 4], d[k * 4 + 1], d[k * 4 + 2]);
+    }
+    const i = k * 4, c = inks[j];
     out[i] = c[0]; out[i + 1] = c[1]; out[i + 2] = c[2]; out[i + 3] = cover[k];
-    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+    if (cover[k] >= 128) { const x = k % W, y = (k - x) / W; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
   }
-  return { width: p.width, height: p.height, data: out, inks, box: x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 } };
+  return { width: W, height: H, data: out, inks, box: x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 } };
 }
 async function cleanPng(buffer) {
   const c = await cleanInks(buffer);
@@ -312,4 +345,4 @@ async function pngPdf({ W, H, palette, data, widthMm, heightMm, mmW, mmH }) {
   return Buffer.from(await doc.save());
 }
 
-module.exports = { vectorGate, highResPng, cleanInks, cleanPng, pngSize, GATE, PNG_DPI, PNG_MIN_EDGE, PT_PER_MM, decode, groundOf, inkMask };
+module.exports = { vectorGate, onlyAspect, highResPng, cleanInks, cleanPng, pngSize, GATE, PNG_DPI, PNG_MIN_EDGE, PT_PER_MM, decode, groundOf, inkMask };
