@@ -114,3 +114,16 @@ test('G61b a design the colour separation cannot isolate is cut from the eye\'s 
   assert.equal(alpha(5, 5), 255); assert.equal(alpha(70, 30), 0); // ink kept, garment between the bars transparent
   assert.match(cut.notes[0], /gözün kutusundan kesildi/);
 });
+
+test('G61b shoulder and hem agreeing outweigh a narrow-reading chest; a mirrored side is taken when the order leaves it free', () => {
+  const pts = { omuz_sol: pt(300, 100), omuz_sag: pt(700, 100), koltuk_sol: pt(330, 300), koltuk_sag: pt(670, 300), etek_sol: pt(290, 800), etek_sag: pt(710, 800) };
+  // Chest 44 cm over 340 px (1.29 mm/px) against shoulder and hem at 1.0: the chest is left out.
+  const r = pointScale(pts, { omuz: 40, gogus: 44, etek: 42 }, 1000, 1000);
+  assert.ok(Math.abs(r.mmPerPx - 1) < 1e-9); assert.equal(r.yaklasik, undefined);
+  assert.equal(r.adaylar.length, 3); // all candidates stay on the record
+  const answer = goz.normalize({ urunler: [{ kutu: { x: 0, y: 0, w: 100, h: 100 }, gorunum: 'on', tur: 't', noktalar: null }],
+    baskilar: [{ konum: 'sag_gogus', urun: 0, kutu: { x: 60, y: 20, w: 10, h: 10 }, aciklama: 'logo', guven: 'yuksek' }] }, { width: 100, height: 100 });
+  const swapped = goz.forPrint(answer, 'sol_gogus', 1, 0, new Set(['sol_gogus', 'sirt']));
+  assert.match(swapped.print.pairing, /sag_gogus konumunda gördü/);
+  assert.ok(goz.forPrint(answer, 'sol_gogus', 1, 0, new Set(['sol_gogus', 'sag_gogus'])).baskiYok);
+});

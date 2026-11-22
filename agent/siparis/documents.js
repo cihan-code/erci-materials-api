@@ -879,7 +879,7 @@ function gozFor(db,v,line,app,image) {
   }
   // Several prints at one position pair top to bottom with the applications in their order (G61b).
   const same=line.applications.filter(a=>a.position===app.position).sort((a,b)=>a.id-b.id);
-  return goz.forPrint(answer,app.position,same.length,Math.max(0,same.findIndex(a=>a.id===app.id)));
+  return goz.forPrint(answer,app.position,same.length,Math.max(0,same.findIndex(a=>a.id===app.id)),new Set(line.applications.map(a=>a.position)));
 }
 async function ensureGoz(db,dataDir,line,image,signal) {
   if(!goz.provider() || !image)return null;

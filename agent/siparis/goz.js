@@ -238,24 +238,33 @@ const union = boxes => {
  * order fills once are one print (their union); several applications with several prints
  * cannot be paired on this evidence, so the eye stays out of them.
  */
-function forPrint(answer, ordered, sameCount, rank = 0) {
+// Wearer's left and right are easily swapped on a picture.
+const MIRROR = { sol_gogus: 'sag_gogus', sag_gogus: 'sol_gogus', sol_kol: 'sag_kol', sag_kol: 'sol_kol', sol_bacak: 'sag_bacak', sag_bacak: 'sol_bacak' };
+function forPrint(answer, ordered, sameCount, rank = 0, orderedPositions = null) {
   const position = ordered === 'kapusan' ? 'kapuson' : ordered;
   if (!answer.urunler.length) return { urunYok: 'görselde giysi yok' };
   // The front/back answer belongs to the picture, whatever this print's outcome.
   const front = frontSide(answer), side = front ? { front } : {};
-  const prints = answer.baskilar.filter(b => b.position === position);
+  let prints = answer.baskilar.filter(b => b.position === position), swapped = null;
+  // G61b: nothing on the ordered side but a print on the mirrored side the order does not use:
+  // the same print with left and right swapped (approximate, noted).
+  const mirror = MIRROR[position];
+  if (!prints.length && mirror && orderedPositions && !orderedPositions.has(mirror)) {
+    prints = answer.baskilar.filter(b => b.position === mirror);
+    if (prints.length) swapped = `Göz baskıyı ${mirror} konumunda gördü; siparişte o konum yok, ${position} baskısı sayıldı (sol/sağ ters okunmuş olabilir).`;
+  }
   if (!prints.length) return { baskiYok: `${position} konumunda baskı yok`, ...side };
   const products = new Set(prints.map(p => p.product));
   if (products.size > 1) return { reason: `Göz ${position} konumunda ${products.size} farklı üründe baskı gösterdi; hangisi olduğu ayrılamadı.`, ...side };
-  let box, pairing = null;
+  let box, pairing = swapped;
   if (sameCount === 1) box = prints.length === 1 ? prints[0].box : union(prints.map(p => p.box));
   else if (prints.length === sameCount) {
     // G61b: as many prints as ordered: top to bottom in the order's sequence, marked approximate.
     box = prints.slice().sort((a, b) => a.box.y - b.box.y)[rank].box;
-    pairing = `Göz ${position} konumunda ${prints.length} baskı gördü; yukarıdan aşağı sırayla eşlendi (${rank + 1}. baskı).`;
+    pairing = [swapped, `Göz ${position} konumunda ${prints.length} baskı gördü; yukarıdan aşağı sırayla eşlendi (${rank + 1}. baskı).`].filter(Boolean).join(' ');
   } else {
     box = union(prints.map(p => p.box));
-    pairing = `Göz ${position} konumunda ${prints.length} baskı, siparişte ${sameCount} uygulama; hepsi tek grup kutusu olarak ölçüldü.`;
+    pairing = [swapped, `Göz ${position} konumunda ${prints.length} baskı, siparişte ${sameCount} uygulama; hepsi tek grup kutusu olarak ölçüldü.`].filter(Boolean).join(' ');
   }
   const product = prints[0].product == null ? null : answer.urunler[prints[0].product];
   // Pixel proportion of the box (the answer's boxes are fractions of its picture).

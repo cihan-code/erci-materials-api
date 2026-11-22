@@ -1374,25 +1374,30 @@ function fitInkWith(p,box,garment) {
 }
 function fitInk(p,ref,box) {return fitInkWith(p,box,dominant(p,Array.from(ref.mask.keys()).filter(i=>ref.mask[i])));}
 // G61b: scale from the eye's garment points and the pattern's known widths (cm, L).
-// Candidates: shoulder, chest (armpits) and hem width; their median is the body scale.
-// Candidates more than 12% apart: the most consistent pair is used and the scale is
-// approximate. Height alone (collar to hem) is never used as a scale (G61: TAYF %69).
+// Shoulder and hem width come first: on a photo the hanging sleeves hide the armpits and the
+// chest reads narrow (G61b evaluation: chest 15-30% off where shoulder and hem agreed with the
+// workshop). When they agree within 12% their mean is the scale; when one is missing or they
+// disagree (a dropped shoulder), all candidates count: the median, or the most consistent pair
+// (approximate). Height alone (collar to hem) is never a scale (G61: TAYF %69).
 const POINT_SPREAD=.12;
 function pointScale(pts,cm,W,H) {
   const d=(a,b)=>pts?.[a]&&pts?.[b]?Math.hypot((pts[a].x-pts[b].x)*W,(pts[a].y-pts[b].y)*H):null;
-  const found=[['omuz',d('omuz_sol','omuz_sag')],['gogus',d('koltuk_sol','koltuk_sag')],['etek',d('etek_sol','etek_sag')]]
+  const all=[['omuz',d('omuz_sol','omuz_sag')],['gogus',d('koltuk_sol','koltuk_sag')],['etek',d('etek_sol','etek_sag')]]
     .filter(([k,px])=>px>4&&Number.isFinite(cm[k])&&cm[k]>0).map(([k,px])=>({k,px:Math.round(px*10)/10,mmPerPx:cm[k]*10/px}));
+  const primary=all.filter(c=>c.k!=='gogus');
+  const agree=primary.length===2&&Math.abs(primary[0].mmPerPx-primary[1].mmPerPx)/((primary[0].mmPerPx+primary[1].mmPerPx)/2)<=POINT_SPREAD;
+  const found=agree?primary:all;
   if(!found.length)return {reason:pts?.yaka&&(pts.etek_sol||pts.etek_sag)?'Yalnız boy noktaları var; tek eksenli ölçek kullanılmaz.':'Gözün noktalarında kalıbın bilinen bir eniyle eşleşen ölçü yok.'};
   const values=found.map(c=>c.mmPerPx).sort((a,b)=>a-b),mid=values.length>>1,median=values.length%2?values[mid]:(values[mid-1]+values[mid])/2;
   const spread=(values.at(-1)-values[0])/median;
   if(found.length<2||spread<=POINT_SPREAD)
-    return {mmPerPx:median,adaylar:found,...(found.length<2?{yaklasik:`Ölçek tek yatay adaydan (${found[0].k}).`}:{})};
+    return {mmPerPx:median,adaylar:all,...(found.length<2?{yaklasik:`Ölçek tek yatay adaydan (${found[0].k}).`}:{})};
   let best=null;
   for(let i=0;i<found.length;i++)for(let j=i+1;j<found.length;j++) {
     const a=found[i].mmPerPx,b=found[j].mmPerPx,off=Math.abs(a-b)/((a+b)/2);
     if(!best||off<best.off)best={off,pair:[found[i],found[j]]};
   }
-  return {mmPerPx:(best.pair[0].mmPerPx+best.pair[1].mmPerPx)/2,adaylar:found,secilen:best.pair.map(c=>c.k),
+  return {mmPerPx:(best.pair[0].mmPerPx+best.pair[1].mmPerPx)/2,adaylar:all,secilen:best.pair.map(c=>c.k),
     yaklasik:`Ölçek adayları %${Math.round(spread*100)} ayrışıyor; en tutarlı ikili (${best.pair.map(c=>c.k).join(' ve ')}) alındı.`};
 }
 // goz: {print:{box (0..1 of the picture), pairing?}, product:{box, points?}|null} chosen by the parent for this print.
